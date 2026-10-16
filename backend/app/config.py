@@ -17,6 +17,15 @@ class Settings(BaseModel):
     DATA_DIR: Path = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
     TEST_DATA_DIR: Path = Path(os.getenv("TEST_DATA_DIR", str(BASE_DIR / "test-data")))
     STATIC_DIR: Path = Path(os.getenv("STATIC_DIR", str(BASE_DIR / "frontend" / "dist")))
+    DATABASE_URL: str = ""
+
+    def model_post_init(self, __context):
+        if not self.DATABASE_URL:
+            env_db = os.getenv("DATABASE_URL")
+            if env_db:
+                self.DATABASE_URL = env_db
+            else:
+                self.DATABASE_URL = f"sqlite:///{self.DATA_DIR / 'test_center.db'}"
 
 
 @lru_cache()
