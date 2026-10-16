@@ -1,0 +1,28 @@
+# Test datasets (large, copied in manually)
+test-data/
+
+# Secrets / env
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# Runtime data
+*.sqlite3
+*.db
+artifacts/
+data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
