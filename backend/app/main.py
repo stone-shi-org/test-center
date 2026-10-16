@@ -6,15 +6,37 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.api.health import router as health_router
+from backend.app.api.testers import router as testers_router
+from backend.app.api.runs import router as runs_router
 from backend.app.config import get_settings
+from backend.app.db.session import SessionLocal
+from backend.app.runner.recovery import recover_stale_runs
+from backend.app.runner.worker import get_worker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    # Ensure data directory exists
+    # Ensure data and artifact directories exist
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    settings.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Recover any runs left in 'running' state from previous process crash/restart
+    try:
+        with SessionLocal() as db:
+            recover_stale_runs(db, settings.ARTIFACTS_DIR)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to recover stale runs on startup: {e}")
+
+    # Start runner worker
+    worker = get_worker()
+    worker.start()
+
     yield
+
+    # Cleanly stop worker on shutdown
+    await worker.stop()
 
 
 def create_app() -> FastAPI:
@@ -35,6 +57,8 @@ def create_app() -> FastAPI:
 
     # API routes
     app.include_router(health_router, prefix="/api")
+    app.include_router(testers_router, prefix="/api")
+    app.include_router(runs_router, prefix="/api")
 
     # Static assets and SPA handling for frontend
     static_dir = Path(settings.STATIC_DIR)

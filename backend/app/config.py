@@ -27,6 +27,14 @@ class Settings(BaseModel):
             else:
                 self.DATABASE_URL = f"sqlite:///{self.DATA_DIR / 'test_center.db'}"
 
+    @property
+    def ARTIFACTS_DIR(self) -> Path:
+        env_artifacts = os.getenv("ARTIFACTS_DIR")
+        if env_artifacts:
+            return Path(env_artifacts)
+        return self.DATA_DIR / "artifacts"
+
+
 
 @lru_cache()
 def get_settings() -> Settings:
