@@ -3,6 +3,7 @@
 from typing import Any
 from backend.app.testers.base import TesterPlugin, TesterError
 from backend.app.testers.dummy import DummyTester
+from backend.app.testers.embedding import EmbeddingTester
 
 
 class TesterNotFoundError(TesterError):
@@ -50,6 +51,7 @@ tester_registry = TesterRegistry()
 
 # Register built-in plugins
 tester_registry.register(DummyTester())
+tester_registry.register(EmbeddingTester())
 
 
 def get_tester(name: str) -> TesterPlugin:
