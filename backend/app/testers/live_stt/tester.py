@@ -6,6 +6,7 @@ import json
 import os
 import statistics
 import time
+from pathlib import Path
 from typing import Any
 
 from backend.app.testers.base import (
@@ -14,6 +15,18 @@ from backend.app.testers.base import (
     TesterResult,
     TesterConfigError,
     TesterError,
+)
+from backend.app.testers.live_stt.accuracy import (
+    AccuracyResultCache,
+    CPWERResult,
+    DERResult,
+    WERResult,
+    align_words_to_segments,
+    compute_cpwer,
+    compute_der_and_speaker_error,
+    compute_wer,
+    extract_speaker_transcripts_from_segments,
+    render_notsofar_accuracy_html_report,
 )
 from backend.app.testers.live_stt.client import (
     DEFAULT_ASR_MODEL,
@@ -25,12 +38,23 @@ from backend.app.testers.live_stt.client import (
     ModelInfo,
     select_parametrized_models,
 )
+from backend.app.testers.live_stt.dataset import (
+    DEFAULT_NOTSOFAR_SPLIT,
+    NotsofarMeeting,
+    load_notsofar_meetings,
+)
 from backend.app.testers.live_stt.fixtures import (
     BUILTIN_AUDIO_FIXTURES,
     BUILTIN_BAD_AUDIO_FIXTURES,
     BUILTIN_TTS_FIXTURES,
     get_audio_fixture,
     get_bad_audio_fixture,
+)
+from backend.app.testers.live_stt.grpc_client import (
+    DEFAULT_GRPC_PORT,
+    LiveSTTGRPCError,
+    LiveSTTStreamingHarness,
+    resolve_grpc_target,
 )
 from backend.app.testers.live_stt.metrics import (
     compute_latency_and_rtf_summary,
@@ -87,11 +111,30 @@ _SUITE_EXPANSIONS: dict[str, list[str]] = {
     "admission": ["concurrency"],
     "contract": ["admin", "error_handling", "concurrency"],
     "admin_contract": ["admin", "error_handling", "concurrency"],
+    "accuracy_wer": ["accuracy_wer"],
+    "wer": ["accuracy_wer"],
+    "http_wer": ["accuracy_wer"],
+    "batch_wer": ["accuracy_wer"],
+    "accuracy_http": ["accuracy_wer"],
+    "accuracy_streaming": ["accuracy_streaming"],
+    "streaming_wer": ["accuracy_streaming"],
+    "stream_wer": ["accuracy_streaming"],
+    "grpc_wer": ["accuracy_streaming"],
+    "accuracy_transcription": ["accuracy_wer", "accuracy_streaming"],
+    "accuracy_transcriptions": ["accuracy_wer", "accuracy_streaming"],
+    "wer_all": ["accuracy_wer", "accuracy_streaming"],
+    "accuracy_diarization": ["accuracy_diarization"],
+    "diarization_accuracy": ["accuracy_diarization"],
+    "der": ["accuracy_diarization"],
+    "accuracy": ["accuracy_wer", "accuracy_streaming", "accuracy_diarization"],
+    "notsofar": ["accuracy_wer", "accuracy_streaming", "accuracy_diarization"],
+    "notsofar-1": ["accuracy_wer", "accuracy_streaming", "accuracy_diarization"],
+    "notsofar1": ["accuracy_wer", "accuracy_streaming", "accuracy_diarization"],
 }
 
 
 def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]) -> list[str]:
-    """Normalize suite names and expand shorthand aliases (e.g. 'transcriptions', 'contract')."""
+    """Normalize suite names and expand shorthand aliases (e.g. 'transcriptions', 'contract', 'accuracy')."""
     if not raw_suites:
         return list(available)
     expanded: list[str] = []
@@ -106,7 +149,7 @@ def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]
 
 
 class LiveSTTTester(TesterPlugin):
-    """Tester for live-stt HTTP endpoints and admin/contract verification:
+    """Tester for live-stt HTTP/gRPC endpoints, contract verification, and NOTSOFAR-1 accuracy:
 
     - POST /v1/audio/transcriptions (JSON and verbose_json)
     - POST /v1/audio/transcriptions (stream=true Server-Sent Events)
@@ -117,15 +160,17 @@ class LiveSTTTester(TesterPlugin):
       (no mutating calls by default)
     - Error-path contract tests (bad audio, unknown model, missing fields, status codes & error body shapes)
     - Concurrency/admission tests (503 when over budget, capacity tracking, slot recovery)
+    - NOTSOFAR-1 accuracy suites: batch HTTP WER/cpWER (accuracy_wer), streaming gRPC/SSE WER/cpWER
+      (accuracy_streaming), and diarization DER/speaker-count error (accuracy_diarization) with SQLite result cache
     """
 
     name = "live-stt"
     description = (
-        "Functional, latency, and contract tester for live-stt HTTP endpoints: "
+        "Functional, latency, contract, and NOTSOFAR-1 accuracy tester for live-stt HTTP/gRPC endpoints: "
         "POST /v1/audio/transcriptions (JSON + stream=true SSE), "
         "POST /v1/audio/diarization, POST /v1/audio/speech (TTS), "
         "read-only admin/telemetry endpoints (/v1/models, /api/stats, /api/health, /metrics), "
-        "error handling, and concurrency/admission limits."
+        "error handling, concurrency/admission limits, and NOTSOFAR-1 WER/cpWER/DER/speaker-count accuracy suites."
     )
     suites = [
         "transcriptions_json",
@@ -135,6 +180,9 @@ class LiveSTTTester(TesterPlugin):
         "admin",
         "error_handling",
         "concurrency",
+        "accuracy_wer",
+        "accuracy_streaming",
+        "accuracy_diarization",
     ]
     suite_aliases = set(_SUITE_EXPANSIONS.keys())
 
@@ -153,6 +201,9 @@ class LiveSTTTester(TesterPlugin):
                         "admin",
                         "error_handling",
                         "concurrency",
+                        "accuracy_wer",
+                        "accuracy_streaming",
+                        "accuracy_diarization",
                     ],
                 },
                 "default": [
@@ -164,7 +215,7 @@ class LiveSTTTester(TesterPlugin):
                     "error_handling",
                     "concurrency",
                 ],
-                "description": "HTTP endpoint and contract test suites to execute",
+                "description": "HTTP endpoint, contract, and NOTSOFAR-1 accuracy test suites to execute",
             },
             "model_parametrization": {
                 "type": "string",
@@ -269,11 +320,138 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 1.0,
                 "description": "HTTP request timeout in seconds",
             },
+            "dataset_dir": {
+                "type": "string",
+                "description": "Optional path override to NOTSOFAR-1 dataset root or split directory",
+            },
+            "dataset_split": {
+                "type": "string",
+                "default": "eval_small",
+                "description": "NOTSOFAR-1 split or subset ('eval_small', 'eval_full', 'dev', 'train', or path)",
+            },
+            "meetings": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list or comma-separated string of NOTSOFAR-1 meeting IDs (e.g. ['MTG_32000', 'MTG_32003'])",
+            },
+            "max_meetings": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional cap on number of NOTSOFAR-1 meetings evaluated per suite",
+            },
+            "audio_device": {
+                "type": "string",
+                "description": "Optional NOTSOFAR-1 single-channel device alias (e.g. 'sc_meetup_0', 'sc_rockfall_0')",
+            },
+            "prefer_close_talk": {
+                "type": "boolean",
+                "default": False,
+                "description": "Prefer close-talk microphone over single-channel far-field device when loading NOTSOFAR-1 audio",
+            },
+            "max_audio_duration_sec": {
+                "type": "number",
+                "minimum": 0.5,
+                "description": "Optional cap on meeting audio duration in seconds (clips WAV and GT segments to [0, max_audio_duration_sec])",
+            },
+            "max_duration_sec": {
+                "type": "number",
+                "minimum": 0.5,
+                "description": "Alias for max_audio_duration_sec",
+            },
+            "streaming_protocol": {
+                "type": "string",
+                "enum": ["auto", "grpc", "sse", "both"],
+                "default": "auto",
+                "description": (
+                    "Streaming protocol for accuracy_streaming suite: 'grpc' (StreamingASR.Transcribe), "
+                    "'sse' (POST /v1/audio/transcriptions stream=true), 'both', or 'auto'"
+                ),
+            },
+            "grpc_target": {
+                "type": "string",
+                "description": "Optional host:port override for gRPC StreamingASR server",
+            },
+            "grpc_port": {
+                "type": "integer",
+                "default": DEFAULT_GRPC_PORT,
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "gRPC port used when deriving gRPC target from HTTP base_url",
+            },
+            "chunk_ms": {
+                "type": "number",
+                "default": 100.0,
+                "minimum": 10.0,
+                "maximum": 5000.0,
+                "description": "PCM frame chunk size in milliseconds for gRPC streaming evaluation",
+            },
+            "realtime_pacing": {
+                "type": "boolean",
+                "default": False,
+                "description": "Whether to pace gRPC streaming chunks in real time (default False for fast evaluation)",
+            },
+            "compute_cpwer": {
+                "type": "boolean",
+                "default": True,
+                "description": "Compute speaker-attributed cpWER when speaker segments/words are available",
+            },
+            "diarize_for_cpwer": {
+                "type": "boolean",
+                "default": False,
+                "description": "Run diarization to attribute ASR words to speakers for cpWER even when accuracy_diarization suite is not explicitly selected",
+            },
+            "use_num_speakers_hint": {
+                "type": "boolean",
+                "default": False,
+                "description": "Pass ground-truth speaker count as min_speakers/max_speakers hint to /v1/audio/diarization",
+            },
+            "der_collar_sec": {
+                "type": "number",
+                "default": 0.0,
+                "minimum": 0.0,
+                "maximum": 5.0,
+                "description": "Forgiveness collar in seconds around reference segment boundaries for DER scoring",
+            },
+            "der_frame_sec": {
+                "type": "number",
+                "default": 0.05,
+                "minimum": 0.01,
+                "maximum": 1.0,
+                "description": "Frame discretization step in seconds for DER scoring",
+            },
+            "wer_threshold": {
+                "type": "number",
+                "default": 1.0,
+                "minimum": 0.0,
+                "maximum": 5.0,
+                "description": "Maximum WER ratio allowed per meeting before marking case as fail",
+            },
+            "der_threshold": {
+                "type": "number",
+                "default": 1.0,
+                "minimum": 0.0,
+                "maximum": 5.0,
+                "description": "Maximum DER ratio allowed per meeting before marking case as fail",
+            },
+            "use_cache": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable SQLite result cache so repeated runs of unchanged config are cheap",
+            },
+            "skip_cache": {
+                "type": "boolean",
+                "default": False,
+                "description": "Bypass reading from the SQLite result cache while still writing fresh results",
+            },
+            "cache_path": {
+                "type": "string",
+                "description": "Optional explicit path to the SQLite accuracy result cache file",
+            },
         },
     }
 
     def validate_and_apply_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
-        """Normalize optional None fields and suite aliases before JSON Schema validation."""
+        """Normalize optional None fields, suite aliases, and string meetings list before JSON Schema validation."""
         cleaned: dict[str, Any] = {}
         if isinstance(raw_config, dict):
             for k, v in raw_config.items():
@@ -281,6 +459,8 @@ class LiveSTTTester(TesterPlugin):
                     continue
                 if k == "suites" and isinstance(v, list):
                     cleaned[k] = normalize_live_stt_suites(v, self.suites)
+                elif k == "meetings" and isinstance(v, str):
+                    cleaned[k] = [m.strip() for m in v.split(",") if m.strip()]
                 else:
                     cleaned[k] = v
         return super().validate_and_apply_config(cleaned)
@@ -389,11 +569,15 @@ class LiveSTTTester(TesterPlugin):
         cfg = self.validate_and_apply_config(config)
         client = self._resolve_client(cfg, target)
 
-        raw_suites = cfg.get("suites") or target.get("suites") or self.suites
+        raw_suites = (
+            config.get("suites")
+            if isinstance(config, dict) and config.get("suites")
+            else (target.get("suites") or cfg.get("suites") or self.suites[:7])
+        )
         suites_to_run = normalize_live_stt_suites(raw_suites, self.suites)
         suites_to_run = [s for s in self.suites if s in suites_to_run]
         if not suites_to_run:
-            suites_to_run = list(self.suites)
+            suites_to_run = list(self.suites[:7])
 
         repetitions = int(cfg.get("repetitions", 1))
         language = str(cfg.get("language", "en") or "en")
@@ -444,6 +628,35 @@ class LiveSTTTester(TesterPlugin):
 
         include_extended_admin = bool(cfg.get("include_extended_admin", True))
 
+        accuracy_suites = [
+            s
+            for s in ("accuracy_wer", "accuracy_streaming", "accuracy_diarization")
+            if s in suites_to_run
+        ]
+        notsofar_meetings: list[NotsofarMeeting] = []
+        streaming_protocols: list[str] = []
+        if accuracy_suites:
+            streaming_protocols = self._resolve_streaming_protocols(cfg, target)
+            max_dur_val = cfg.get("max_audio_duration_sec") or cfg.get("max_duration_sec")
+            split_name = str(cfg.get("dataset_split", DEFAULT_NOTSOFAR_SPLIT) or DEFAULT_NOTSOFAR_SPLIT)
+            try:
+                notsofar_meetings = load_notsofar_meetings(
+                    dataset_dir=cfg.get("dataset_dir") or target.get("dataset_dir"),
+                    split=split_name,
+                    meetings=cfg.get("meetings"),
+                    max_meetings=int(cfg["max_meetings"]) if cfg.get("max_meetings") else None,
+                    device_alias=cfg.get("audio_device"),
+                    prefer_close_talk=bool(cfg.get("prefer_close_talk", False)),
+                    max_duration_sec=float(max_dur_val) if max_dur_val is not None else None,
+                )
+            except (FileNotFoundError, ValueError) as e:
+                raise TesterConfigError(f"NOTSOFAR-1 dataset configuration error: {e}") from e
+            ctx.log(
+                f"Loaded {len(notsofar_meetings)} NOTSOFAR-1 meeting(s) from split='{split_name}' "
+                f"({[m.meeting_id for m in notsofar_meetings[:6]]}"
+                f"{'...' if len(notsofar_meetings) > 6 else ''})"
+            )
+
         # Calculate total planned cases for progress reporting
         planned_cases = 0
         if "transcriptions_json" in suites_to_run:
@@ -461,6 +674,12 @@ class LiveSTTTester(TesterPlugin):
             planned_cases += 15
         if "concurrency" in suites_to_run:
             planned_cases += 3
+        if "accuracy_wer" in suites_to_run:
+            planned_cases += len(asr_models) * len(notsofar_meetings)
+        if "accuracy_streaming" in suites_to_run:
+            planned_cases += len(asr_models) * len(streaming_protocols) * len(notsofar_meetings)
+        if "accuracy_diarization" in suites_to_run:
+            planned_cases += len(diar_models) * len(notsofar_meetings)
         planned_cases = max(1, planned_cases)
         completed_cases = 0
 
@@ -1229,6 +1448,31 @@ class LiveSTTTester(TesterPlugin):
                 planned_cases=planned_cases,
             )
 
+        # -------------------------------------------------------------------
+        # Suites 8, 9, 10: NOTSOFAR-1 Accuracy Suites (WER, Streaming WER, Diarization DER)
+        # -------------------------------------------------------------------
+        accuracy_cache_stats: dict[str, Any] | None = None
+        if accuracy_suites:
+            completed_cases, accuracy_cache_stats = self._run_accuracy_suites(
+                client=client,
+                ctx=ctx,
+                result=result,
+                cfg=cfg,
+                target=target,
+                suites_to_run=suites_to_run,
+                streaming_protocols=streaming_protocols,
+                asr_models=asr_models,
+                diar_models=diar_models,
+                meetings=notsofar_meetings,
+                language=language,
+                tested_engines=tested_engines,
+                tested_models=tested_models,
+                all_latencies_ms=all_latencies_ms,
+                all_rtfs=all_rtfs,
+                completed_cases=completed_cases,
+                planned_cases=planned_cases,
+            )
+
         total_wall_ms = round((time.perf_counter() - t_run_start) * 1000.0, 2)
 
         # -------------------------------------------------------------------
@@ -1426,33 +1670,67 @@ class LiveSTTTester(TesterPlugin):
         result.set_metric("pass_rate", pass_rate, unit="%", better="higher")
 
         result.status = "fail" if passed_cases < total_cases else "pass"
+        acc_summary_parts: list[str] = []
+        if "wer" in result.metrics:
+            acc_summary_parts.append(f"WER={result.metrics['wer']['value'] * 100.0:.2f}%")
+        if "cpwer" in result.metrics:
+            acc_summary_parts.append(f"cpWER={result.metrics['cpwer']['value'] * 100.0:.2f}%")
+        if "der" in result.metrics:
+            acc_summary_parts.append(f"DER={result.metrics['der']['value'] * 100.0:.2f}%")
+        if "speaker_count_error" in result.metrics:
+            acc_summary_parts.append(f"spk_err={result.metrics['speaker_count_error']['value']:.2f}")
+        acc_suffix = f" | {', '.join(acc_summary_parts)}" if acc_summary_parts else ""
+
         result.summary = (
             f"live-stt HTTP test: {passed_cases}/{total_cases} cases passed ({pass_rate}%), "
             f"engines={len(tested_engines)}, models={len(tested_models)}, "
             f"mean_latency={overall_stats['latency_mean_ms']}ms, "
-            f"mean_RTF={overall_stats['rtf_mean']}x"
+            f"mean_RTF={overall_stats['rtf_mean']}x{acc_suffix}"
         )
 
+        asr_active = any(
+            s in suites_to_run
+            for s in ("transcriptions_json", "transcriptions_sse", "accuracy_wer", "accuracy_streaming")
+        )
+        diar_active = any(s in suites_to_run for s in ("diarization", "accuracy_diarization"))
         models_summary = {
             "discovered_count": discovered_count,
             "models_schema_valid": models_schema_valid,
             "parametrization_mode": param_mode,
-            "asr_models": [m.id for m in asr_models] if ("transcriptions_json" in suites_to_run or "transcriptions_sse" in suites_to_run) else [],
-            "diarization_models": [m.id for m in diar_models] if "diarization" in suites_to_run else [],
+            "asr_models": [m.id for m in asr_models] if asr_active else [],
+            "diarization_models": [m.id for m in diar_models] if diar_active else [],
             "tts_models": [m.id for m in tts_models] if "tts" in suites_to_run else [],
             "engines_tested": sorted(tested_engines),
             "models_tested": sorted(tested_models),
         }
 
+        case_dicts = [c.to_dict() for c in result.cases]
         report_text = format_live_stt_report(
             base_url=client.root_url,
             models_summary=models_summary,
             metrics=result.metrics,
-            cases=[c.to_dict() for c in result.cases],
+            cases=case_dicts,
         )
         report_file = ctx.artifacts_dir / "live_stt_report.txt"
         report_file.write_text(report_text, encoding="utf-8")
         ctx.add_artifact("live_stt_report.txt", report_file, mime="text/plain")
+
+        if accuracy_suites:
+            acc_cases = [
+                c for c in case_dicts
+                if c.get("suite") in ("accuracy_wer", "accuracy_streaming", "accuracy_diarization")
+            ]
+            split_label = str(cfg.get("dataset_split", DEFAULT_NOTSOFAR_SPLIT) or DEFAULT_NOTSOFAR_SPLIT)
+            html_report = render_notsofar_accuracy_html_report(
+                base_url=client.root_url,
+                split_name=split_label,
+                metrics=result.metrics,
+                accuracy_cases=acc_cases,
+                cache_stats=accuracy_cache_stats,
+            )
+            html_file = ctx.artifacts_dir / "notsofar_accuracy_report.html"
+            html_file.write_text(html_report, encoding="utf-8")
+            ctx.add_artifact("notsofar_accuracy_report.html", html_file, mime="text/html")
 
         detailed_json = {
             "tester": self.name,
@@ -1461,8 +1739,9 @@ class LiveSTTTester(TesterPlugin):
             "summary": result.summary,
             "models_summary": models_summary,
             "suites_executed": suites_to_run,
+            "accuracy_cache": accuracy_cache_stats,
             "metrics": result.metrics,
-            "cases": [c.to_dict() for c in result.cases],
+            "cases": case_dicts,
         }
         json_file = ctx.artifacts_dir / "live_stt_results.json"
         json_file.write_text(json.dumps(detailed_json, indent=2), encoding="utf-8")
@@ -2366,4 +2645,948 @@ class LiveSTTTester(TesterPlugin):
         ctx.progress(completed_cases, planned_cases, f"Completed {case_post}")
 
         return completed_cases
+
+    @staticmethod
+    def _resolve_streaming_protocols(cfg: dict[str, Any], target: dict[str, Any]) -> list[str]:
+        """Resolve which streaming transport(s) ('grpc' and/or 'sse') to use for accuracy_streaming."""
+        proto = str(cfg.get("streaming_protocol", "auto") or "auto").strip().lower()
+        if proto == "both":
+            return ["grpc", "sse"]
+        if proto in ("grpc", "sse"):
+            return [proto]
+
+        extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
+        has_explicit_grpc = any(
+            bool(candidate)
+            for candidate in (
+                cfg.get("grpc_target"),
+                cfg.get("grpc_url"),
+                cfg.get("grpc_host"),
+                target.get("grpc_target"),
+                target.get("grpc_url"),
+                target.get("grpc_host"),
+                target.get("grpc_port"),
+                extra.get("grpc_target"),
+                extra.get("grpc_url"),
+                extra.get("grpc_host"),
+                extra.get("grpc_port"),
+            )
+        )
+        if has_explicit_grpc:
+            return ["grpc"]
+        if cfg.get("_transport") is not None:
+            return ["sse"]
+        return ["grpc"]
+
+    @staticmethod
+    def _compute_case_cpwer(
+        meeting: NotsofarMeeting,
+        words: list[dict[str, Any]],
+        segments_from_asr: list[dict[str, Any]],
+        diar_segments: list[dict[str, Any]] | None,
+        full_text: str,
+    ) -> CPWERResult | None:
+        """Compute speaker-attributed cpWER if speaker attribution is available directly or via diarization."""
+        if not meeting.speaker_reference_texts:
+            return None
+
+        hyp_spk_texts: dict[str, str] = {}
+
+        # 1. Check if ASR response segments directly include speaker attribution
+        has_asr_speaker = any(
+            isinstance(s, dict) and bool(str(s.get("speaker", "") or "").strip())
+            for s in segments_from_asr
+        )
+        if has_asr_speaker:
+            hyp_spk_texts = extract_speaker_transcripts_from_segments(segments_from_asr, words)
+
+        # 2. Check if ASR words directly include speaker attribution
+        if not hyp_spk_texts:
+            has_word_speaker = any(
+                isinstance(w, dict) and bool(str(w.get("speaker", "") or "").strip())
+                for w in words
+            )
+            if has_word_speaker:
+                by_spk: dict[str, list[str]] = {}
+                for w in words:
+                    if not isinstance(w, dict):
+                        continue
+                    spk = str(w.get("speaker", "") or "").strip()
+                    w_txt = str(w.get("word", w.get("text", "")) or "").strip()
+                    if spk and w_txt:
+                        by_spk.setdefault(spk, []).append(w_txt)
+                hyp_spk_texts = {spk: " ".join(toks) for spk, toks in sorted(by_spk.items())}
+
+        # 3. Align ASR words onto diarization segments if diarization segments are available
+        if not hyp_spk_texts and diar_segments:
+            norm_words: list[dict[str, Any]] = []
+            for w in words:
+                if not isinstance(w, dict):
+                    continue
+                w_txt = str(w.get("word", w.get("text", "")) or "").strip()
+                if not w_txt:
+                    continue
+                w_start = float(w.get("start_sec", w.get("start", 0.0)) or 0.0)
+                w_end = float(w.get("end_sec", w.get("end", w_start)) or w_start)
+                norm_words.append({
+                    "text": w_txt,
+                    "start_sec": w_start,
+                    "end_sec": max(w_start, w_end),
+                })
+
+            if not norm_words and full_text.strip() and meeting.duration_sec > 0:
+                raw_toks = full_text.strip().split()
+                n_toks = len(raw_toks)
+                step = meeting.duration_sec / float(max(1, n_toks))
+                for idx, tok in enumerate(raw_toks):
+                    norm_words.append({
+                        "text": tok,
+                        "start_sec": round(idx * step, 3),
+                        "end_sec": round((idx + 1) * step, 3),
+                    })
+
+            hyp_spk_texts = extract_speaker_transcripts_from_segments(diar_segments, norm_words)
+
+        if not hyp_spk_texts:
+            return None
+
+        return compute_cpwer(meeting.speaker_reference_texts, hyp_spk_texts)
+
+    def _evaluate_meeting_diarization(
+        self,
+        client: LiveSTTHTTPClient,
+        eval_cache: AccuracyResultCache,
+        cfg: dict[str, Any],
+        diar_model: ModelInfo,
+        meeting: NotsofarMeeting,
+        ctx: TestContext,
+    ) -> dict[str, Any]:
+        """Run or load cached POST /v1/audio/diarization result for a single NOTSOFAR-1 meeting."""
+        use_hint = bool(cfg.get("use_num_speakers_hint", False)) and diar_model.supports_num_speakers_hint
+        min_spk = meeting.expected_speakers if use_hint else None
+        max_spk = meeting.expected_speakers if use_hint else None
+
+        cache_key = {
+            "suite": "accuracy_diarization",
+            "base_url": client.root_url,
+            "model_id": diar_model.id,
+            "meeting_id": meeting.meeting_id,
+            "split": meeting.split,
+            "device_alias": meeting.device_alias,
+            "duration_sec": round(meeting.duration_sec, 3),
+            "use_num_speakers_hint": use_hint,
+        }
+        cached = eval_cache.get(cache_key)
+        if cached is not None:
+            return {
+                **cached,
+                "cache_hit": True,
+            }
+
+        ctx.check_cancelled()
+        try:
+            dres = client.diarize(
+                wav_bytes=meeting.wav_bytes,
+                model=diar_model.id,
+                words=None,
+                include_text=False,
+                min_speakers=min_spk,
+                max_speakers=max_spk,
+                response_format="verbose_json",
+                filename=f"{meeting.meeting_id}.wav",
+            )
+        except LiveSTTClientError as e:
+            ctx.log(f"Error calling {client.diarization_url} for {meeting.meeting_id}: {e}", level="error")
+            raise TesterError(f"live-stt API error: {e}") from e
+
+        payload = {
+            "status_code": dres.status_code,
+            "content_type": dres.content_type,
+            "latency_ms": dres.latency_ms,
+            "body": dres.body if isinstance(dres.body, dict) else {},
+        }
+        if dres.status_code == 200 and isinstance(dres.body, dict):
+            eval_cache.put(cache_key, payload)
+
+        return {
+            **payload,
+            "cache_hit": False,
+        }
+
+    def _run_accuracy_suites(
+        self,
+        client: LiveSTTHTTPClient,
+        ctx: TestContext,
+        result: TesterResult,
+        cfg: dict[str, Any],
+        target: dict[str, Any],
+        suites_to_run: list[str],
+        streaming_protocols: list[str],
+        asr_models: list[ModelInfo],
+        diar_models: list[ModelInfo],
+        meetings: list[NotsofarMeeting],
+        language: str,
+        tested_engines: set[str],
+        tested_models: set[str],
+        all_latencies_ms: list[float],
+        all_rtfs: list[float],
+        completed_cases: int,
+        planned_cases: int,
+    ) -> tuple[int, dict[str, Any]]:
+        """Execute NOTSOFAR-1 accuracy suites (accuracy_wer, accuracy_streaming, accuracy_diarization)."""
+        default_cache_path = ctx.artifacts_dir.parent / "notsofar_eval_cache.sqlite3"
+        cache_path = Path(str(cfg["cache_path"])) if cfg.get("cache_path") else default_cache_path
+        eval_cache = AccuracyResultCache(
+            cache_path=cache_path,
+            enabled=bool(cfg.get("use_cache", True)),
+            skip_read=bool(cfg.get("skip_cache", False)),
+        )
+
+        compute_cpwer_enabled = bool(cfg.get("compute_cpwer", True))
+        diarize_for_cpwer = bool(cfg.get("diarize_for_cpwer", False)) or ("accuracy_diarization" in suites_to_run)
+        wer_threshold = float(cfg.get("wer_threshold", 1.0))
+        der_threshold = float(cfg.get("der_threshold", 1.0))
+        der_collar_sec = float(cfg.get("der_collar_sec", 0.0))
+        der_frame_sec = float(cfg.get("der_frame_sec", 0.05))
+
+        # Pre-resolve diarization per meeting if needed for accuracy_diarization or cpWER alignment
+        diar_by_model_meeting: dict[tuple[str, str], dict[str, Any]] = {}
+        primary_diar_by_meeting: dict[str, list[dict[str, Any]]] = {}
+        if diarize_for_cpwer and diar_models:
+            models_to_diarize = diar_models if "accuracy_diarization" in suites_to_run else [diar_models[0]]
+            for d_model in models_to_diarize:
+                for meeting in meetings:
+                    d_payload = self._evaluate_meeting_diarization(
+                        client=client,
+                        eval_cache=eval_cache,
+                        cfg=cfg,
+                        diar_model=d_model,
+                        meeting=meeting,
+                        ctx=ctx,
+                    )
+                    diar_by_model_meeting[(d_model.id, meeting.meeting_id)] = d_payload
+                    d_body = d_payload.get("body", {})
+                    segs = d_body.get("segments", []) if isinstance(d_body, dict) and isinstance(d_body.get("segments"), list) else []
+                    if segs and meeting.meeting_id not in primary_diar_by_meeting:
+                        primary_diar_by_meeting[meeting.meeting_id] = segs
+
+        meeting_asr_words: dict[str, list[dict[str, Any]]] = {}
+
+        # Aggregate accumulators
+        http_wer_list: list[WERResult] = []
+        http_cpwer_list: list[CPWERResult] = []
+        http_latencies: list[float] = []
+        http_rtfs: list[float] = []
+
+        stream_wer_list: list[WERResult] = []
+        stream_cpwer_list: list[CPWERResult] = []
+        stream_latencies: list[float] = []
+        stream_rtfs: list[float] = []
+        stream_ttfps: list[float] = []
+
+        der_list: list[DERResult] = []
+        diar_cpwer_list: list[CPWERResult] = []
+        acc_diar_latencies: list[float] = []
+        acc_diar_rtfs: list[float] = []
+
+        # -------------------------------------------------------------------
+        # Suite 8: accuracy_wer (Batch HTTP transcription WER & cpWER on NOTSOFAR-1)
+        # -------------------------------------------------------------------
+        if "accuracy_wer" in suites_to_run:
+            for m_info in asr_models:
+                tested_engines.add(m_info.engine)
+                tested_models.add(m_info.id)
+
+                for meeting in meetings:
+                    ctx.check_cancelled()
+                    case_id = f"accuracy_wer:{m_info.id}:{meeting.meeting_id}"
+                    ctx.log(
+                        f"Running [{completed_cases + 1}/{planned_cases}] {case_id} "
+                        f"(engine={m_info.engine}, device={meeting.device_alias}, {meeting.duration_sec:.1f}s)..."
+                    )
+
+                    wer_cache_key = {
+                        "suite": "accuracy_wer",
+                        "path": "http_verbose_json",
+                        "base_url": client.root_url,
+                        "model_id": m_info.id,
+                        "language": language,
+                        "meeting_id": meeting.meeting_id,
+                        "split": meeting.split,
+                        "device_alias": meeting.device_alias,
+                        "duration_sec": round(meeting.duration_sec, 3),
+                    }
+                    cached_http = eval_cache.get(wer_cache_key)
+                    if cached_http is not None:
+                        status_code = int(cached_http.get("status_code", 200))
+                        content_type = str(cached_http.get("content_type", "application/json"))
+                        latency_ms = float(cached_http.get("latency_ms", 0.0))
+                        body = cached_http.get("body", {})
+                        cache_hit = True
+                    else:
+                        try:
+                            res = client.transcribe_json(
+                                wav_bytes=meeting.wav_bytes,
+                                model=m_info.id,
+                                response_format="verbose_json",
+                                language=language,
+                                filename=f"{meeting.meeting_id}.wav",
+                            )
+                        except LiveSTTClientError as e:
+                            ctx.log(f"Error calling {client.transcriptions_url} for {meeting.meeting_id}: {e}", level="error")
+                            raise TesterError(f"live-stt API error: {e}") from e
+
+                        status_code = res.status_code
+                        content_type = res.content_type
+                        latency_ms = res.latency_ms
+                        body = res.body if isinstance(res.body, dict) else {}
+                        cache_hit = False
+                        if status_code == 200 and isinstance(res.body, dict):
+                            eval_cache.put(
+                                wer_cache_key,
+                                {
+                                    "status_code": status_code,
+                                    "content_type": content_type,
+                                    "latency_ms": latency_ms,
+                                    "body": body,
+                                },
+                            )
+
+                    rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
+                    all_latencies_ms.append(latency_ms)
+                    all_rtfs.append(rtf_val)
+                    http_latencies.append(latency_ms)
+                    http_rtfs.append(rtf_val)
+
+                    schema_res = validate_transcription_json_response(
+                        body=body,
+                        content_type=content_type,
+                        status_code=status_code,
+                    )
+                    hyp_text = str(body.get("text", "") or "") if isinstance(body, dict) else ""
+                    words = body.get("words", []) if isinstance(body, dict) and isinstance(body.get("words"), list) else []
+                    asr_segments = body.get("segments", []) if isinstance(body, dict) and isinstance(body.get("segments"), list) else []
+
+                    if words and meeting.meeting_id not in meeting_asr_words:
+                        meeting_asr_words[meeting.meeting_id] = words
+
+                    wer_res = compute_wer(meeting.reference_text, hyp_text)
+                    http_wer_list.append(wer_res)
+
+                    cpwer_res: CPWERResult | None = None
+                    if compute_cpwer_enabled:
+                        cpwer_res = self._compute_case_cpwer(
+                            meeting=meeting,
+                            words=words,
+                            segments_from_asr=asr_segments,
+                            diar_segments=primary_diar_by_meeting.get(meeting.meeting_id),
+                            full_text=hyp_text,
+                        )
+                        if cpwer_res is not None:
+                            http_cpwer_list.append(cpwer_res)
+
+                    passed = schema_res.valid and (wer_res.wer <= wer_threshold)
+                    case_status = "pass" if passed else "fail"
+
+                    case_metrics: dict[str, Any] = {
+                        "wer": {"value": wer_res.wer, "unit": "ratio", "better": "lower"},
+                        "wer_pct": {"value": wer_res.wer_pct, "unit": "%", "better": "lower"},
+                        "substitutions": {"value": wer_res.substitutions, "unit": "words", "better": "lower"},
+                        "deletions": {"value": wer_res.deletions, "unit": "words", "better": "lower"},
+                        "insertions": {"value": wer_res.insertions, "unit": "words", "better": "lower"},
+                        "ref_word_count": {"value": wer_res.ref_word_count, "unit": "words"},
+                        "hyp_word_count": {"value": wer_res.hyp_word_count, "unit": "words"},
+                        "latency_ms": {"value": round(latency_ms, 2), "unit": "ms", "better": "lower"},
+                        "rtf": {"value": rtf_val, "unit": "x", "better": "lower"},
+                        "audio_duration_sec": {"value": round(meeting.duration_sec, 3), "unit": "s"},
+                    }
+                    if cpwer_res is not None:
+                        case_metrics["cpwer"] = {"value": cpwer_res.cpwer, "unit": "ratio", "better": "lower"}
+                        case_metrics["cpwer_pct"] = {"value": cpwer_res.cpwer_pct, "unit": "%", "better": "lower"}
+
+                    eval_msg = (
+                        f"WER={wer_res.wer_pct:.2f}% ({wer_res.edit_distance}/{wer_res.ref_word_count} words"
+                        f"{f', cpWER={cpwer_res.cpwer_pct:.2f}%' if cpwer_res is not None else ''})"
+                    )
+                    if not schema_res.valid:
+                        eval_msg = f"{schema_res.summary_message}; {eval_msg}"
+
+                    result.add_case(
+                        case_id=case_id,
+                        suite="accuracy_wer",
+                        status=case_status,
+                        metrics=case_metrics,
+                        detail={
+                            "endpoint": "/v1/audio/transcriptions",
+                            "path": "batch_http",
+                            "model": m_info.id,
+                            "engine": m_info.engine,
+                            "meeting_id": meeting.meeting_id,
+                            "split": meeting.split,
+                            "device_alias": meeting.device_alias,
+                            "audio_duration_sec": round(meeting.duration_sec, 3),
+                            "expected_speakers": meeting.expected_speakers,
+                            "cache_hit": cache_hit,
+                            "wer": wer_res.to_dict(),
+                            "cpwer": cpwer_res.to_dict() if cpwer_res is not None else None,
+                            "reference_preview": wer_res.ref_normalized[:500],
+                            "hypothesis_preview": wer_res.hyp_normalized[:500],
+                            "passed": passed,
+                            "eval_message": eval_msg,
+                        },
+                    )
+                    completed_cases += 1
+                    ctx.log(
+                        f"  {case_id} -> {case_status.upper()} | {eval_msg} | "
+                        f"Latency={latency_ms:.2f}ms, RTF={rtf_val:.4f}x, Cache={'HIT' if cache_hit else 'MISS'}"
+                    )
+                    ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+
+        # -------------------------------------------------------------------
+        # Suite 9: accuracy_streaming (Streaming gRPC / SSE WER & cpWER on NOTSOFAR-1)
+        # -------------------------------------------------------------------
+        if "accuracy_streaming" in suites_to_run:
+            chunk_ms = float(cfg.get("chunk_ms", 100.0))
+            realtime_pacing = bool(cfg.get("realtime_pacing", False))
+            multi_proto = len(streaming_protocols) > 1
+
+            for m_info in asr_models:
+                tested_engines.add(m_info.engine)
+                tested_models.add(m_info.id)
+
+                for proto in streaming_protocols:
+                    grpc_harness: LiveSTTStreamingHarness | None = None
+                    if proto == "grpc":
+                        grpc_harness = LiveSTTStreamingHarness(
+                            target,
+                            config=cfg,
+                            api_key=self._resolve_api_key(target, cfg),
+                            timeout=float(cfg.get("timeout_seconds", 120.0)),
+                            default_chunk_ms=chunk_ms,
+                            default_speed=1.0 if realtime_pacing else 0.0,
+                            default_realtime=realtime_pacing,
+                        )
+
+                    for meeting in meetings:
+                        ctx.check_cancelled()
+                        case_id = (
+                            f"accuracy_streaming:{m_info.id}:{proto}:{meeting.meeting_id}"
+                            if multi_proto
+                            else f"accuracy_streaming:{m_info.id}:{meeting.meeting_id}"
+                        )
+                        ctx.log(
+                            f"Running [{completed_cases + 1}/{planned_cases}] {case_id} "
+                            f"(proto={proto}, engine={m_info.engine}, {meeting.duration_sec:.1f}s)..."
+                        )
+
+                        stream_cache_key = {
+                            "suite": "accuracy_streaming",
+                            "protocol": proto,
+                            "base_url": grpc_harness.grpc_target if grpc_harness is not None else client.root_url,
+                            "model_id": m_info.id,
+                            "language": language,
+                            "meeting_id": meeting.meeting_id,
+                            "split": meeting.split,
+                            "device_alias": meeting.device_alias,
+                            "duration_sec": round(meeting.duration_sec, 3),
+                            "chunk_ms": chunk_ms if proto == "grpc" else 0.0,
+                            "realtime_pacing": realtime_pacing if proto == "grpc" else False,
+                        }
+                        cached_stream = eval_cache.get(stream_cache_key)
+                        if cached_stream is not None:
+                            stream_ok = bool(cached_stream.get("ok", True))
+                            hyp_text = str(cached_stream.get("text", "") or "")
+                            words = cached_stream.get("words", []) if isinstance(cached_stream.get("words"), list) else []
+                            asr_segments = cached_stream.get("segments", []) if isinstance(cached_stream.get("segments"), list) else []
+                            latency_ms = float(cached_stream.get("latency_ms", 0.0))
+                            ttfp_ms = cached_stream.get("ttfp_ms")
+                            cache_hit = True
+                            err_msg = cached_stream.get("error_message")
+                        elif proto == "grpc":
+                            assert grpc_harness is not None
+                            session = grpc_harness.run_session_sync(
+                                meeting.wav_bytes,
+                                model=m_info.id,
+                                language=language,
+                                chunk_ms=chunk_ms,
+                                speed=1.0 if realtime_pacing else 0.0,
+                                realtime=realtime_pacing,
+                                enable_word_timestamps=True,
+                                cancel_check=ctx.check_cancelled,
+                            )
+                            stream_ok = session.ok
+                            hyp_text = session.text
+                            words = [w.to_dict() for w in session.words]
+                            asr_segments = [
+                                {
+                                    "speaker": str(ev.detail.get("speaker", "")),
+                                    "start_sec": float(ev.audio_offset_sec or 0.0),
+                                    "end_sec": float(ev.audio_sent_sec_at_receipt or meeting.duration_sec),
+                                    "text": ev.text,
+                                }
+                                for ev in session.events
+                                if isinstance(ev.detail, dict) and ev.detail.get("speaker") and ev.text
+                            ]
+                            latency_ms = session.total_latency_ms
+                            ttfp_ms = session.ttfp_ms
+                            err_msg = session.error_message
+                            cache_hit = False
+                            if stream_ok:
+                                eval_cache.put(
+                                    stream_cache_key,
+                                    {
+                                        "ok": True,
+                                        "text": hyp_text,
+                                        "words": words,
+                                        "segments": asr_segments,
+                                        "latency_ms": latency_ms,
+                                        "ttfp_ms": ttfp_ms,
+                                        "error_message": None,
+                                    },
+                                )
+                        else:
+                            try:
+                                sres = client.transcribe_sse(
+                                    wav_bytes=meeting.wav_bytes,
+                                    model=m_info.id,
+                                    language=language,
+                                    filename=f"{meeting.meeting_id}.wav",
+                                )
+                            except LiveSTTClientError as e:
+                                ctx.log(f"Error calling {client.transcriptions_url} (SSE) for {meeting.meeting_id}: {e}", level="error")
+                                raise TesterError(f"live-stt API error: {e}") from e
+
+                            sse_schema = validate_transcription_sse_response(
+                                events=sres.events,
+                                saw_done=sres.saw_done,
+                                content_type=sres.content_type,
+                                status_code=sres.status_code,
+                            )
+                            stream_ok = sres.status_code == 200 and (
+                                sse_schema.valid or bool(sres.text) or len(sres.events) > 0
+                            )
+                            hyp_text = sres.text
+                            words = []
+                            asr_segments = []
+                            for ev in sres.events:
+                                if not isinstance(ev, dict):
+                                    continue
+                                if isinstance(ev.get("words"), list):
+                                    words.extend(ev["words"])
+                                if isinstance(ev.get("segments"), list):
+                                    asr_segments.extend(ev["segments"])
+                                elif ev.get("speaker") and ev.get("text"):
+                                    asr_segments.append({
+                                        "speaker": str(ev["speaker"]),
+                                        "start_sec": float(ev.get("start_sec", ev.get("start", 0.0)) or 0.0),
+                                        "end_sec": float(ev.get("end_sec", ev.get("end", 0.0)) or 0.0),
+                                        "text": str(ev["text"]),
+                                    })
+                            latency_ms = sres.latency_ms
+                            ttfp_ms = sres.ttft_ms
+                            err_msg = None if stream_ok else sse_schema.summary_message
+                            cache_hit = False
+                            if stream_ok:
+                                eval_cache.put(
+                                    stream_cache_key,
+                                    {
+                                        "ok": True,
+                                        "text": hyp_text,
+                                        "words": words,
+                                        "segments": asr_segments,
+                                        "latency_ms": latency_ms,
+                                        "ttfp_ms": ttfp_ms,
+                                        "error_message": None,
+                                    },
+                                )
+
+                        rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
+                        all_latencies_ms.append(latency_ms)
+                        all_rtfs.append(rtf_val)
+                        stream_latencies.append(latency_ms)
+                        stream_rtfs.append(rtf_val)
+                        if ttfp_ms is not None:
+                            stream_ttfps.append(float(ttfp_ms))
+
+                        if words and meeting.meeting_id not in meeting_asr_words:
+                            meeting_asr_words[meeting.meeting_id] = words
+
+                        wer_res = compute_wer(meeting.reference_text, hyp_text)
+                        stream_wer_list.append(wer_res)
+
+                        cpwer_res = None
+                        if compute_cpwer_enabled:
+                            cpwer_res = self._compute_case_cpwer(
+                                meeting=meeting,
+                                words=words,
+                                segments_from_asr=asr_segments,
+                                diar_segments=primary_diar_by_meeting.get(meeting.meeting_id),
+                                full_text=hyp_text,
+                            )
+                            if cpwer_res is not None:
+                                stream_cpwer_list.append(cpwer_res)
+
+                        passed = stream_ok and (wer_res.wer <= wer_threshold)
+                        case_status = "pass" if passed else "fail"
+
+                        case_metrics = {
+                            "wer": {"value": wer_res.wer, "unit": "ratio", "better": "lower"},
+                            "wer_pct": {"value": wer_res.wer_pct, "unit": "%", "better": "lower"},
+                            "substitutions": {"value": wer_res.substitutions, "unit": "words", "better": "lower"},
+                            "deletions": {"value": wer_res.deletions, "unit": "words", "better": "lower"},
+                            "insertions": {"value": wer_res.insertions, "unit": "words", "better": "lower"},
+                            "ref_word_count": {"value": wer_res.ref_word_count, "unit": "words"},
+                            "hyp_word_count": {"value": wer_res.hyp_word_count, "unit": "words"},
+                            "latency_ms": {"value": round(latency_ms, 2), "unit": "ms", "better": "lower"},
+                            "rtf": {"value": rtf_val, "unit": "x", "better": "lower"},
+                            "audio_duration_sec": {"value": round(meeting.duration_sec, 3), "unit": "s"},
+                        }
+                        if ttfp_ms is not None:
+                            case_metrics["ttfp_ms"] = {"value": round(float(ttfp_ms), 2), "unit": "ms", "better": "lower"}
+                        if cpwer_res is not None:
+                            case_metrics["cpwer"] = {"value": cpwer_res.cpwer, "unit": "ratio", "better": "lower"}
+                            case_metrics["cpwer_pct"] = {"value": cpwer_res.cpwer_pct, "unit": "%", "better": "lower"}
+
+                        eval_msg = (
+                            f"Streaming ({proto}) WER={wer_res.wer_pct:.2f}% "
+                            f"({wer_res.edit_distance}/{wer_res.ref_word_count} words"
+                            f"{f', cpWER={cpwer_res.cpwer_pct:.2f}%' if cpwer_res is not None else ''})"
+                        )
+                        if not stream_ok and err_msg:
+                            eval_msg = f"{err_msg}; {eval_msg}"
+
+                        result.add_case(
+                            case_id=case_id,
+                            suite="accuracy_streaming",
+                            status=case_status,
+                            metrics=case_metrics,
+                            detail={
+                                "endpoint": "StreamingASR.Transcribe" if proto == "grpc" else "/v1/audio/transcriptions?stream=true",
+                                "path": f"streaming_{proto}",
+                                "protocol": proto,
+                                "model": m_info.id,
+                                "engine": m_info.engine,
+                                "meeting_id": meeting.meeting_id,
+                                "split": meeting.split,
+                                "device_alias": meeting.device_alias,
+                                "audio_duration_sec": round(meeting.duration_sec, 3),
+                                "expected_speakers": meeting.expected_speakers,
+                                "cache_hit": cache_hit,
+                                "wer": wer_res.to_dict(),
+                                "cpwer": cpwer_res.to_dict() if cpwer_res is not None else None,
+                                "reference_preview": wer_res.ref_normalized[:500],
+                                "hypothesis_preview": wer_res.hyp_normalized[:500],
+                                "passed": passed,
+                                "eval_message": eval_msg,
+                            },
+                        )
+                        completed_cases += 1
+                        ctx.log(
+                            f"  {case_id} -> {case_status.upper()} | {eval_msg} | "
+                            f"Latency={latency_ms:.2f}ms, RTF={rtf_val:.4f}x, Cache={'HIT' if cache_hit else 'MISS'}"
+                        )
+                        ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+
+        # -------------------------------------------------------------------
+        # Suite 10: accuracy_diarization (DER & speaker-count error on NOTSOFAR-1)
+        # -------------------------------------------------------------------
+        if "accuracy_diarization" in suites_to_run:
+            for d_info in diar_models:
+                tested_engines.add(d_info.engine)
+                tested_models.add(d_info.id)
+
+                for meeting in meetings:
+                    ctx.check_cancelled()
+                    case_id = f"accuracy_diarization:{d_info.id}:{meeting.meeting_id}"
+                    ctx.log(
+                        f"Running [{completed_cases + 1}/{planned_cases}] {case_id} "
+                        f"(engine={d_info.engine}, ref_speakers={meeting.expected_speakers}, {meeting.duration_sec:.1f}s)..."
+                    )
+
+                    d_payload = diar_by_model_meeting.get((d_info.id, meeting.meeting_id))
+                    if d_payload is None:
+                        d_payload = self._evaluate_meeting_diarization(
+                            client=client,
+                            eval_cache=eval_cache,
+                            cfg=cfg,
+                            diar_model=d_info,
+                            meeting=meeting,
+                            ctx=ctx,
+                        )
+
+                    status_code = int(d_payload.get("status_code", 200))
+                    content_type = str(d_payload.get("content_type", "application/json"))
+                    latency_ms = float(d_payload.get("latency_ms", 0.0))
+                    body = d_payload.get("body", {})
+                    cache_hit = bool(d_payload.get("cache_hit", False))
+
+                    rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
+                    all_latencies_ms.append(latency_ms)
+                    all_rtfs.append(rtf_val)
+                    acc_diar_latencies.append(latency_ms)
+                    acc_diar_rtfs.append(rtf_val)
+
+                    d_schema = validate_diarization_response(
+                        body=body,
+                        content_type=content_type,
+                        status_code=status_code,
+                        expect_text=False,
+                    )
+                    diar_http_ok = (
+                        status_code == 200
+                        and isinstance(body, dict)
+                        and isinstance(body.get("segments"), list)
+                    )
+                    pred_segments = (
+                        body.get("segments", [])
+                        if isinstance(body, dict) and isinstance(body.get("segments"), list)
+                        else []
+                    )
+                    pred_speakers_count = (
+                        int(body["num_speakers"])
+                        if isinstance(body, dict) and isinstance(body.get("num_speakers"), int)
+                        else len({str(s.get("speaker", "")).strip() for s in pred_segments if isinstance(s, dict) and str(s.get("speaker", "")).strip()})
+                    )
+
+                    der_res = compute_der_and_speaker_error(
+                        gt_segments=meeting.gt_segments_dicts,
+                        pred_segments=pred_segments,
+                        duration_sec=meeting.duration_sec,
+                        expected_speakers=meeting.expected_speakers,
+                        predicted_speakers=pred_speakers_count,
+                        frame_sec=der_frame_sec,
+                        collar_sec=der_collar_sec,
+                    )
+                    der_list.append(der_res)
+
+                    cpwer_res = None
+                    if compute_cpwer_enabled:
+                        asr_words_for_mtg = meeting_asr_words.get(meeting.meeting_id, [])
+                        cpwer_res = self._compute_case_cpwer(
+                            meeting=meeting,
+                            words=asr_words_for_mtg,
+                            segments_from_asr=pred_segments,
+                            diar_segments=pred_segments,
+                            full_text="",
+                        )
+                        if cpwer_res is not None:
+                            diar_cpwer_list.append(cpwer_res)
+
+                    passed = (d_schema.valid or diar_http_ok) and (der_res.der <= der_threshold)
+                    case_status = "pass" if passed else "fail"
+
+                    case_metrics = {
+                        "der": {"value": der_res.der, "unit": "ratio", "better": "lower"},
+                        "der_pct": {"value": der_res.der_pct, "unit": "%", "better": "lower"},
+                        "missed_rate": {"value": der_res.missed_rate, "unit": "ratio", "better": "lower"},
+                        "false_alarm_rate": {"value": der_res.false_alarm_rate, "unit": "ratio", "better": "lower"},
+                        "confusion_rate": {"value": der_res.confusion_rate, "unit": "ratio", "better": "lower"},
+                        "speaker_error_rate": {"value": der_res.speaker_error_rate, "unit": "ratio", "better": "lower"},
+                        "speaker_count_error": {"value": der_res.speaker_count_error, "unit": "speakers", "better": "lower"},
+                        "speaker_count_delta": {"value": der_res.speaker_count_delta, "unit": "speakers"},
+                        "expected_speakers": {"value": der_res.expected_speakers, "unit": "speakers"},
+                        "predicted_speakers": {"value": der_res.predicted_speakers, "unit": "speakers"},
+                        "latency_ms": {"value": round(latency_ms, 2), "unit": "ms", "better": "lower"},
+                        "rtf": {"value": rtf_val, "unit": "x", "better": "lower"},
+                        "audio_duration_sec": {"value": round(meeting.duration_sec, 3), "unit": "s"},
+                    }
+                    if cpwer_res is not None:
+                        case_metrics["cpwer"] = {"value": cpwer_res.cpwer, "unit": "ratio", "better": "lower"}
+                        case_metrics["cpwer_pct"] = {"value": cpwer_res.cpwer_pct, "unit": "%", "better": "lower"}
+
+                    eval_msg = (
+                        f"DER={der_res.der_pct:.2f}% (miss={der_res.missed_rate * 100.0:.1f}%, "
+                        f"FA={der_res.false_alarm_rate * 100.0:.1f}%, conf={der_res.confusion_rate * 100.0:.1f}%), "
+                        f"speakers={der_res.predicted_speakers}/{der_res.expected_speakers} "
+                        f"(|err|={der_res.speaker_count_error})"
+                    )
+                    if not d_schema.valid:
+                        eval_msg = f"{d_schema.summary_message}; {eval_msg}"
+
+                    result.add_case(
+                        case_id=case_id,
+                        suite="accuracy_diarization",
+                        status=case_status,
+                        metrics=case_metrics,
+                        detail={
+                            "endpoint": "/v1/audio/diarization",
+                            "path": "diarization_http",
+                            "model": d_info.id,
+                            "engine": d_info.engine,
+                            "meeting_id": meeting.meeting_id,
+                            "split": meeting.split,
+                            "device_alias": meeting.device_alias,
+                            "audio_duration_sec": round(meeting.duration_sec, 3),
+                            "expected_speakers": der_res.expected_speakers,
+                            "predicted_speakers": der_res.predicted_speakers,
+                            "speaker_count_error": der_res.speaker_count_error,
+                            "speaker_count_delta": der_res.speaker_count_delta,
+                            "speaker_count_exact": der_res.speaker_count_exact,
+                            "cache_hit": cache_hit,
+                            "der": {
+                                "der": der_res.der,
+                                "der_pct": der_res.der_pct,
+                                "missed_speech_sec": der_res.missed_speech_sec,
+                                "false_alarm_sec": der_res.false_alarm_sec,
+                                "speaker_confusion_sec": der_res.speaker_confusion_sec,
+                                "total_ref_speech_sec": der_res.total_ref_speech_sec,
+                                "missed_rate": der_res.missed_rate,
+                                "false_alarm_rate": der_res.false_alarm_rate,
+                                "confusion_rate": der_res.confusion_rate,
+                                "speaker_error_rate": der_res.speaker_error_rate,
+                            },
+                            "cpwer": cpwer_res.to_dict() if cpwer_res is not None else None,
+                            "speaker_diagnostics": der_res.speaker_diagnostics,
+                            "passed": passed,
+                            "eval_message": eval_msg,
+                        },
+                    )
+                    completed_cases += 1
+                    ctx.log(
+                        f"  {case_id} -> {case_status.upper()} | {eval_msg} | "
+                        f"Latency={latency_ms:.2f}ms, RTF={rtf_val:.4f}x, Cache={'HIT' if cache_hit else 'MISS'}"
+                    )
+                    ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+
+        # -------------------------------------------------------------------
+        # Aggregate Accuracy Metrics
+        # -------------------------------------------------------------------
+        if http_wer_list:
+            tot_ref = sum(w.ref_word_count for w in http_wer_list)
+            tot_ed = sum(w.edit_distance for w in http_wer_list)
+            http_corpus_wer = round(tot_ed / float(tot_ref), 4) if tot_ref > 0 else 0.0
+            http_mean_wer = round(float(statistics.mean(w.wer for w in http_wer_list)), 4)
+            result.set_metric("http_wer", http_corpus_wer, unit="ratio", better="lower")
+            result.set_metric("http_wer_pct", round(http_corpus_wer * 100.0, 2), unit="%", better="lower")
+            result.set_metric("http_wer_mean", http_mean_wer, unit="ratio", better="lower")
+            result.set_metric(
+                "accuracy_wer_latency_mean_ms",
+                round(float(statistics.mean(http_latencies)), 2),
+                unit="ms",
+                better="lower",
+            )
+            result.set_metric(
+                "accuracy_wer_rtf_mean",
+                round(float(statistics.mean(http_rtfs)), 4),
+                unit="x",
+                better="lower",
+            )
+
+        if http_cpwer_list:
+            tot_cp_ref = sum(c.ref_word_count for c in http_cpwer_list)
+            tot_cp_ed = sum(c.edit_distance for c in http_cpwer_list)
+            http_corpus_cpwer = round(tot_cp_ed / float(tot_cp_ref), 4) if tot_cp_ref > 0 else 0.0
+            http_mean_cpwer = round(float(statistics.mean(c.cpwer for c in http_cpwer_list)), 4)
+            result.set_metric("http_cpwer", http_corpus_cpwer, unit="ratio", better="lower")
+            result.set_metric("http_cpwer_pct", round(http_corpus_cpwer * 100.0, 2), unit="%", better="lower")
+            result.set_metric("http_cpwer_mean", http_mean_cpwer, unit="ratio", better="lower")
+
+        if stream_wer_list:
+            tot_s_ref = sum(w.ref_word_count for w in stream_wer_list)
+            tot_s_ed = sum(w.edit_distance for w in stream_wer_list)
+            stream_corpus_wer = round(tot_s_ed / float(tot_s_ref), 4) if tot_s_ref > 0 else 0.0
+            stream_mean_wer = round(float(statistics.mean(w.wer for w in stream_wer_list)), 4)
+            result.set_metric("streaming_wer", stream_corpus_wer, unit="ratio", better="lower")
+            result.set_metric("streaming_wer_pct", round(stream_corpus_wer * 100.0, 2), unit="%", better="lower")
+            result.set_metric("streaming_wer_mean", stream_mean_wer, unit="ratio", better="lower")
+            result.set_metric(
+                "accuracy_streaming_latency_mean_ms",
+                round(float(statistics.mean(stream_latencies)), 2),
+                unit="ms",
+                better="lower",
+            )
+            result.set_metric(
+                "accuracy_streaming_rtf_mean",
+                round(float(statistics.mean(stream_rtfs)), 4),
+                unit="x",
+                better="lower",
+            )
+            if stream_ttfps:
+                result.set_metric(
+                    "accuracy_streaming_ttfp_mean_ms",
+                    round(float(statistics.mean(stream_ttfps)), 2),
+                    unit="ms",
+                    better="lower",
+                )
+
+        if stream_cpwer_list:
+            tot_scp_ref = sum(c.ref_word_count for c in stream_cpwer_list)
+            tot_scp_ed = sum(c.edit_distance for c in stream_cpwer_list)
+            stream_corpus_cpwer = round(tot_scp_ed / float(tot_scp_ref), 4) if tot_scp_ref > 0 else 0.0
+            stream_mean_cpwer = round(float(statistics.mean(c.cpwer for c in stream_cpwer_list)), 4)
+            result.set_metric("streaming_cpwer", stream_corpus_cpwer, unit="ratio", better="lower")
+            result.set_metric("streaming_cpwer_pct", round(stream_corpus_cpwer * 100.0, 2), unit="%", better="lower")
+            result.set_metric("streaming_cpwer_mean", stream_mean_cpwer, unit="ratio", better="lower")
+
+        all_wer_list = http_wer_list + stream_wer_list
+        if all_wer_list:
+            tot_all_ref = sum(w.ref_word_count for w in all_wer_list)
+            tot_all_ed = sum(w.edit_distance for w in all_wer_list)
+            corpus_wer = round(tot_all_ed / float(tot_all_ref), 4) if tot_all_ref > 0 else 0.0
+            mean_wer = round(float(statistics.mean(w.wer for w in all_wer_list)), 4)
+            result.set_metric("wer", corpus_wer, unit="ratio", better="lower")
+            result.set_metric("wer_pct", round(corpus_wer * 100.0, 2), unit="%", better="lower")
+            result.set_metric("wer_mean", mean_wer, unit="ratio", better="lower")
+            result.set_metric("corpus_wer", corpus_wer, unit="ratio", better="lower")
+
+        all_cpwer_list = (http_cpwer_list + stream_cpwer_list) or diar_cpwer_list
+        if all_cpwer_list:
+            tot_cp_all_ref = sum(c.ref_word_count for c in all_cpwer_list)
+            tot_cp_all_ed = sum(c.edit_distance for c in all_cpwer_list)
+            corpus_cpwer = round(tot_cp_all_ed / float(tot_cp_all_ref), 4) if tot_cp_all_ref > 0 else 0.0
+            mean_cpwer = round(float(statistics.mean(c.cpwer for c in all_cpwer_list)), 4)
+            result.set_metric("cpwer", corpus_cpwer, unit="ratio", better="lower")
+            result.set_metric("cpwer_pct", round(corpus_cpwer * 100.0, 2), unit="%", better="lower")
+            result.set_metric("cpwer_mean", mean_cpwer, unit="ratio", better="lower")
+            result.set_metric("corpus_cpwer", corpus_cpwer, unit="ratio", better="lower")
+
+        if der_list:
+            tot_ref_sec = sum(d.total_ref_speech_sec for d in der_list)
+            tot_err_sec = sum(
+                d.missed_speech_sec + d.false_alarm_sec + d.speaker_confusion_sec
+                for d in der_list
+            )
+            corpus_der = round(tot_err_sec / float(tot_ref_sec), 4) if tot_ref_sec > 0 else 0.0
+            mean_der = round(float(statistics.mean(d.der for d in der_list)), 4)
+            mean_miss = round(float(statistics.mean(d.missed_rate for d in der_list)), 4)
+            mean_fa = round(float(statistics.mean(d.false_alarm_rate for d in der_list)), 4)
+            mean_conf = round(float(statistics.mean(d.confusion_rate for d in der_list)), 4)
+            mean_spk_err_rate = round(float(statistics.mean(d.speaker_error_rate for d in der_list)), 4)
+            mean_spk_cnt_err = round(float(statistics.mean(d.speaker_count_error for d in der_list)), 4)
+            exact_spk_rate = round(
+                sum(1 for d in der_list if d.speaker_count_exact) / float(len(der_list)) * 100.0,
+                2,
+            )
+
+            result.set_metric("der", corpus_der, unit="ratio", better="lower")
+            result.set_metric("der_pct", round(corpus_der * 100.0, 2), unit="%", better="lower")
+            result.set_metric("der_mean", mean_der, unit="ratio", better="lower")
+            result.set_metric("corpus_der", corpus_der, unit="ratio", better="lower")
+            result.set_metric("der_missed_rate_mean", mean_miss, unit="ratio", better="lower")
+            result.set_metric("der_false_alarm_rate_mean", mean_fa, unit="ratio", better="lower")
+            result.set_metric("der_confusion_rate_mean", mean_conf, unit="ratio", better="lower")
+            result.set_metric("speaker_error_rate", mean_spk_err_rate, unit="ratio", better="lower")
+            result.set_metric("speaker_count_error", mean_spk_cnt_err, unit="speakers", better="lower")
+            result.set_metric("speaker_count_error_mean", mean_spk_cnt_err, unit="speakers", better="lower")
+            result.set_metric("speaker_count_exact_rate", exact_spk_rate, unit="%", better="higher")
+            result.set_metric(
+                "accuracy_diarization_latency_mean_ms",
+                round(float(statistics.mean(acc_diar_latencies)), 2),
+                unit="ms",
+                better="lower",
+            )
+            result.set_metric(
+                "accuracy_diarization_rtf_mean",
+                round(float(statistics.mean(acc_diar_rtfs)), 4),
+                unit="x",
+                better="lower",
+            )
+
+        cache_stats = eval_cache.stats()
+        result.set_metric("accuracy_meetings_evaluated", len(meetings), unit="meetings", better="higher")
+        result.set_metric("accuracy_cache_hits", cache_stats["hits"], unit="cases", better="higher")
+        result.set_metric("accuracy_cache_misses", cache_stats["misses"], unit="cases")
+
+        return completed_cases, cache_stats
+
 

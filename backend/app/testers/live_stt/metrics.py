@@ -62,3 +62,30 @@ def compute_latency_and_rtf_summary(
         "rtf_p95": rtf_pct[95],
         "rtf_p99": rtf_pct[99],
     }
+
+
+from backend.app.testers.live_stt.accuracy import (
+    CPWERResult,
+    DERResult,
+    WERResult,
+    align_words_to_segments,
+    compute_cpwer,
+    compute_der_and_speaker_error,
+    compute_wer,
+    extract_speaker_transcripts_from_segments,
+)
+
+__all__ = [
+    "CPWERResult",
+    "DERResult",
+    "WERResult",
+    "align_words_to_segments",
+    "compute_cpwer",
+    "compute_der_and_speaker_error",
+    "compute_latency_and_rtf_summary",
+    "compute_percentiles",
+    "compute_rtf",
+    "compute_wer",
+    "extract_speaker_transcripts_from_segments",
+]
+

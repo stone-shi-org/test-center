@@ -1070,6 +1070,9 @@ def test_live_stt_tester_registration_and_aliases():
         "admin",
         "error_handling",
         "concurrency",
+        "accuracy_wer",
+        "accuracy_streaming",
+        "accuracy_diarization",
     ]
 
     # Verify aliases resolve to the same plugin
@@ -1078,6 +1081,8 @@ def test_live_stt_tester_registration_and_aliases():
     assert get_tester("live_stt_http") is tester
     assert get_tester("live-stt-admin") is tester
     assert get_tester("live-stt-contract") is tester
+    assert get_tester("live-stt-accuracy") is tester
+    assert get_tester("live-stt-notsofar") is tester
     assert any(t.name == "live-stt" for t in list_testers())
 
     # Verify suite alias normalization
@@ -1375,6 +1380,9 @@ def test_live_stt_worker_subprocess_end_to_end(app_and_client, monkeypatch):
             "admin",
             "error_handling",
             "concurrency",
+            "accuracy_wer",
+            "accuracy_streaming",
+            "accuracy_diarization",
         ]
 
         # 2. Create Target pointing to mock live-stt server

@@ -85,6 +85,7 @@ side-by-side artifacts).
 6. Polish: notifications, artifact viewer, optional Bamboo hook.
 
 ## Open items
-- NOTSOFAR-1 layout and which subset/split to use (decide once copied in).
+- ~~NOTSOFAR-1 layout and which subset/split to use (decide once copied in).~~ **Resolved (TES-32 / TES-33):** `test-data/NOTSOFAR-1` contains `eval_set/240629.1_eval_small_with_GT` (80 meetings, default `eval_small` split), `eval_set/240825.1_eval_full_with_GT` (129 meetings, `eval_full`), `dev_set/240825.1_dev1` (36 meetings, `dev`), and `train_set/240825.1_train` (72 meetings, `train`). Each `MTG_*` directory provides `gt_meeting_metadata.json`, `gt_transcription.json`, and single-channel far-field 16kHz mono 16-bit PCM WAVs (`sc_meetup_0/ch0.wav`, `sc_rockfall_0/ch0.wav`), loaded by `backend/app/testers/live_stt/dataset.py` and scored by `backend/app/testers/live_stt/accuracy.py` (`accuracy_wer`, `accuracy_streaming`, `accuracy_diarization` with SQLite result cache).
 - ~~Where the live-stt proto/client comes from (vendor the .proto vs. pip-install the client).~~ **Resolved (TES-30):** Vendored `proto/livestt/v1/asr.proto` (no dependency on `live-stt` code), generate Python protobuf/gRPC stubs in the build (`scripts/gen_proto.sh` into `backend/app/testers/live_stt/pb/`), and use the built-in streaming client & harness (`backend/app/testers/live_stt/grpc_client.py`).
+
 

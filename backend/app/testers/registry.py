@@ -72,6 +72,10 @@ tester_registry.register(
         "live_stt_admin",
         "live-stt-contract",
         "live_stt_contract",
+        "live-stt-accuracy",
+        "live_stt_accuracy",
+        "live-stt-notsofar",
+        "live_stt_notsofar",
     ],
 )
 

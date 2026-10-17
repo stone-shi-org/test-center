@@ -77,6 +77,37 @@ def format_live_stt_report(
             f"  Concurrency Limits  : {metrics['concurrency_latency_mean_ms']['value']:.2f} ms "
             f"(p95 {metrics.get('concurrency_latency_p95_ms', {}).get('value', 0.0):.2f} ms)"
         )
+    if "wer" in metrics:
+        endpoint_lines.append(
+            f"  NOTSOFAR-1 WER      : {metrics['wer']['value'] * 100.0:.2f}% "
+            f"(ratio {metrics['wer']['value']:.4f}, mean {metrics.get('wer_mean', {}).get('value', 0.0) * 100.0:.2f}%)"
+        )
+    if "http_wer" in metrics:
+        endpoint_lines.append(
+            f"  Batch HTTP WER      : {metrics['http_wer']['value'] * 100.0:.2f}% "
+            f"(ratio {metrics['http_wer']['value']:.4f})"
+        )
+    if "streaming_wer" in metrics:
+        endpoint_lines.append(
+            f"  Streaming WER       : {metrics['streaming_wer']['value'] * 100.0:.2f}% "
+            f"(ratio {metrics['streaming_wer']['value']:.4f})"
+        )
+    if "cpwer" in metrics:
+        endpoint_lines.append(
+            f"  Speaker cpWER       : {metrics['cpwer']['value'] * 100.0:.2f}% "
+            f"(ratio {metrics['cpwer']['value']:.4f})"
+        )
+    if "der" in metrics:
+        endpoint_lines.append(
+            f"  Diarization DER     : {metrics['der']['value'] * 100.0:.2f}% "
+            f"(ratio {metrics['der']['value']:.4f}, "
+            f"spk_err {metrics.get('speaker_count_error', {}).get('value', 0.0):.2f})"
+        )
+    if "accuracy_cache_hits" in metrics or "accuracy_cache_misses" in metrics:
+        endpoint_lines.append(
+            f"  Accuracy Eval Cache : {int(metrics.get('accuracy_cache_hits', {}).get('value', 0))} hits / "
+            f"{int(metrics.get('accuracy_cache_misses', {}).get('value', 0))} misses"
+        )
 
     if endpoint_lines:
         lines.append("-" * 84)
