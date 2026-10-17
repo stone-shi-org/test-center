@@ -249,6 +249,8 @@ def test_chat_client_streaming_sse_and_think_stripping():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": [{"id": "auto-detected-llm"}]})
+        payload = json.loads(request.content.decode("utf-8"))
+        assert "temperature" not in payload
         return httpx.Response(
             200,
             headers={"Content-Type": "text/event-stream"},
@@ -343,6 +345,7 @@ def _make_llm_mock_transport(all_pass: bool = True) -> httpx.MockTransport:
             return httpx.Response(200, json={"data": [{"id": "mock-chat-v1"}]})
 
         body = json.loads(request.content.decode("utf-8"))
+        assert "temperature" not in body
         messages = body.get("messages", [])
         user_content = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
@@ -373,6 +376,8 @@ def _make_judge_mock_transport(score: int = 5, passed: bool = True) -> httpx.Moc
         if request.method == "GET" and request.url.path.endswith("/models"):
             return httpx.Response(200, json={"data": [{"id": "mock-judge-v1"}]})
 
+        body = json.loads(request.content.decode("utf-8"))
+        assert "temperature" not in body
         judge_reply = json.dumps({
             "score": score,
             "passed": passed,
@@ -402,6 +407,7 @@ def test_llm_tester_registered():
     assert isinstance(plugin, LLMTester)
     assert plugin.suites == ["coding", "tool_call", "constraints", "reasoning", "summarization"]
     assert "properties" in plugin.config_schema
+    assert "temperature" not in plugin.config_schema["properties"]
 
 
 def test_llm_tester_full_run_without_judge(tmp_path: Path):

@@ -149,7 +149,7 @@ def test_run_snapshots_and_immutability(db_session):
         name="LLM Reasoning",
         tester="llm",
         suites=["reasoning"],
-        config={"temperature": 0.0},
+        config={"max_tokens": 1024},
         target_id=target.id,
     )
     db_session.add(def1)
@@ -171,18 +171,18 @@ def test_run_snapshots_and_immutability(db_session):
     assert run.target_snapshot["name"] == "LLM Test Target"
     assert run.target_snapshot["extra"]["model"] == "gpt-4o"
     assert len(run.config_snapshot) == 1
-    assert run.config_snapshot[0]["config"]["temperature"] == 0.0
+    assert run.config_snapshot[0]["config"]["max_tokens"] == 1024
 
     # Mutate target and definition; verify snapshot remains unmodified
     target.name = "Renamed Target"
     target.extra = {"model": "gpt-4o-mini"}
-    def1.config = {"temperature": 0.7}
+    def1.config = {"max_tokens": 2048}
     db_session.commit()
     db_session.refresh(run)
 
     assert run.target_snapshot["name"] == "LLM Test Target"
     assert run.target_snapshot["extra"]["model"] == "gpt-4o"
-    assert run.config_snapshot[0]["config"]["temperature"] == 0.0
+    assert run.config_snapshot[0]["config"]["max_tokens"] == 1024
 
 
 def test_result_metrics_and_better_direction(db_session):

@@ -88,13 +88,6 @@ class LLMTester(TesterPlugin):
                 "default": ["coding", "tool_call", "constraints", "reasoning", "summarization"],
                 "description": "Capability sub-suites to execute",
             },
-            "temperature": {
-                "type": "number",
-                "default": 0.05,
-                "minimum": 0.0,
-                "maximum": 2.0,
-                "description": "Sampling temperature for generation",
-            },
             "max_tokens": {
                 "type": "integer",
                 "default": 2048,
@@ -324,7 +317,6 @@ class LLMTester(TesterPlugin):
         if not cases_to_run:
             cases_to_run = list(BUILTIN_CAPABILITY_CASES)
 
-        temperature = float(cfg.get("temperature", 0.05))
         max_tokens = int(cfg.get("max_tokens", 2048))
         repetitions = int(cfg.get("repetitions", 1))
         coding_timeout = float(cfg.get("coding_timeout_seconds", 5.0))
@@ -377,7 +369,6 @@ class LLMTester(TesterPlugin):
                     stream_res = client.stream_chat(
                         messages=messages,
                         model=model,
-                        temperature=temperature,
                         max_tokens=max_tokens,
                     )
                 except ChatClientError as e:
@@ -428,7 +419,6 @@ class LLMTester(TesterPlugin):
                     judge_raw, j_usage, j_dt = judge_client.chat(
                         messages=judge_msgs,
                         model=judge_model,
-                        temperature=0.1,
                         max_tokens=512,
                         response_format={"type": "json_object"},
                     )
