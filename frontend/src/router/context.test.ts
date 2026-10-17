@@ -17,9 +17,12 @@ describe('Router context and matching', () => {
     expect(matchRoute('/targets').name).toBe('targets')
   })
 
-  it('matches trigger and jobs route', () => {
+  it('matches trigger and jobs routes', () => {
     expect(matchRoute('/trigger').name).toBe('trigger')
-    expect(matchRoute('/jobs').name).toBe('trigger')
+    expect(matchRoute('/jobs').name).toBe('jobs')
+    const jobDetail = matchRoute('/jobs/7')
+    expect(jobDetail.name).toBe('jobs')
+    expect(jobDetail.params.id).toBe('7')
   })
 
   it('matches runs list route', () => {

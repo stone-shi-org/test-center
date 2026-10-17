@@ -249,9 +249,16 @@ export function RunsListView() {
                       />
                     </td>
                     <td>
-                      <Link href={`/runs/${r.id}`} className="font-mono font-bold table-link">
-                        #{r.id}
-                      </Link>
+                      <div>
+                        <Link href={`/runs/${r.id}`} className="font-mono font-bold table-link">
+                          #{r.id}
+                        </Link>
+                        {r.job_id && (
+                          <div className="text-muted text-sm">
+                            Job: {r.job_name || (r.config_snapshot?.job_name as string) || `#${r.job_id}`}
+                          </div>
+                        )}
+                      </div>
                     </td>
                     <td>
                       <Badge status={r.status} size="sm" />
@@ -269,7 +276,18 @@ export function RunsListView() {
                           : '—'}
                     </td>
                     <td>
-                      {primaryRes ? (
+                      {r.results && r.results.length > 1 ? (
+                        <div className="result-pill-group">
+                          {r.results.map((res, idx) => (
+                            <span key={res.id} className="grouped-mini-pill">
+                              <span className="font-mono text-muted">
+                                {res.definition_name || `${idx + 1}:${res.tester}`}:
+                              </span>{' '}
+                              <Badge status={res.status} size="sm" />
+                            </span>
+                          ))}
+                        </div>
+                      ) : primaryRes ? (
                         <div className="result-pill-group">
                           <Badge status={primaryRes.status} size="sm" />
                           {primaryRes.cases && primaryRes.cases.length > 0 && (

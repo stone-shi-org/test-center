@@ -36,7 +36,12 @@ def test_alembic_migrations_lifecycle(tmp_path):
     }
     assert expected_tables.issubset(tables), f"Missing tables in migration: {expected_tables - tables}"
 
-    # Verify column existence on runs (snapshots) and results (metrics)
+    # Verify column existence on jobs, runs (snapshots) and results (metrics)
+    job_columns = {col["name"] for col in inspector.get_columns("jobs")}
+    assert "run_mode" in job_columns
+    assert "overrides" in job_columns
+    assert "description" in job_columns
+
     run_columns = {col["name"] for col in inspector.get_columns("runs")}
     assert "config_snapshot" in run_columns
     assert "target_snapshot" in run_columns

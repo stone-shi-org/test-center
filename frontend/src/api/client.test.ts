@@ -104,4 +104,60 @@ describe('API client', () => {
     expect(fetch).toHaveBeenCalledWith('/api/runs/1/artifacts/10/download')
     expect(text).toBe('report line 1\nreport line 2')
   })
+
+  it('manages jobs via CRUD and triggers job runs', async () => {
+    const mockJob = {
+      id: 7,
+      name: 'bundle-job',
+      description: 'Test bundle',
+      schedule: '',
+      enabled: true,
+      run_mode: 'parallel',
+      definition_ids: [1, 2],
+      overrides: {},
+      definitions: [],
+      created_at: '2026-10-16T00:00:00Z',
+      updated_at: '2026-10-16T00:00:00Z',
+    }
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => mockJob,
+    } as Response)
+
+    const created = await api.jobs.create({
+      name: 'bundle-job',
+      run_mode: 'parallel',
+      definition_ids: [1, 2],
+    })
+    expect(created.id).toBe(7)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/jobs',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'bundle-job',
+          run_mode: 'parallel',
+          definition_ids: [1, 2],
+        }),
+      })
+    )
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 202,
+      json: async () => ({ id: 42, job_id: 7, status: 'queued', results: [] }),
+    } as Response)
+
+    const run = await api.jobs.trigger(7)
+    expect(run.id).toBe(42)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/jobs/7/run',
+      expect.objectContaining({
+        method: 'POST',
+      })
+    )
+  })
 })
+

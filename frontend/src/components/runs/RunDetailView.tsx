@@ -15,6 +15,7 @@ export function RunDetailView({ runId }: { runId: number }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'logs' | 'results' | 'config'>('logs')
+  const [selectedResultId, setSelectedResultId] = useState<number | 'all'>('all')
 
   // Modals
   const [showCancelDialog, setShowCancelDialog] = useState(false)
@@ -85,13 +86,15 @@ export function RunDetailView({ runId }: { runId: number }) {
     if (!run) return
     try {
       setActionInProgress(true)
-      const newRun = await api.runs.create({
-        tester: (run.config_snapshot?.tester as string) || undefined,
-        suites: (run.config_snapshot?.suites as string[]) || undefined,
-        config: (run.config_snapshot?.config as Record<string, unknown>) || {},
-        target_id: (run.target_snapshot?.id as number) || undefined,
-        timeout: (run.config_snapshot?.timeout as number) || undefined,
-      })
+      const newRun = run.job_id
+        ? await api.jobs.trigger(run.job_id)
+        : await api.runs.create({
+            tester: (run.config_snapshot?.tester as string) || undefined,
+            suites: (run.config_snapshot?.suites as string[]) || undefined,
+            config: (run.config_snapshot?.config as Record<string, unknown>) || {},
+            target_id: (run.target_snapshot?.id as number) || undefined,
+            timeout: (run.config_snapshot?.timeout as number) || undefined,
+          })
       navigate(`/runs/${newRun.id}`)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
@@ -118,9 +121,17 @@ export function RunDetailView({ runId }: { runId: number }) {
   }
 
   const isOngoing = run.status === 'queued' || run.status === 'running'
-  const testerName = (run.config_snapshot?.tester as string) || 'unknown'
+  const testersList = Array.isArray(run.config_snapshot?.testers)
+    ? (run.config_snapshot.testers as string[])
+    : []
+  const testerName =
+    testersList.length > 1
+      ? testersList.map((t) => t.toUpperCase()).join(', ')
+      : ((run.config_snapshot?.tester as string) || 'unknown').toUpperCase()
   const targetName = (run.target_snapshot?.name as string) || 'None'
   const targetUrl = (run.target_snapshot?.base_url as string) || ''
+  const jobName = run.job_name || (run.config_snapshot?.job_name as string | undefined) || null
+  const jobRunMode = (run.config_snapshot?.run_mode as string | undefined) || null
 
   // Calculate duration without calling Date.now() during render
   let durationStr = '—'
@@ -133,7 +144,12 @@ export function RunDetailView({ runId }: { runId: number }) {
     durationStr = 'Queued'
   }
 
-  const primaryResult = run.results && run.results.length > 0 ? run.results[0] : null
+  const allResults = run.results || []
+  const primaryResult = allResults.length > 0 ? allResults[0] : null
+  const visibleResults =
+    selectedResultId === 'all'
+      ? allResults
+      : allResults.filter((res) => res.id === selectedResultId)
 
   return (
     <div className="view-container run-detail-view">
@@ -146,6 +162,12 @@ export function RunDetailView({ runId }: { runId: number }) {
             </button>
             <h2>Run #{run.id}</h2>
             <Badge status={run.status} size="lg" />
+            {run.job_id && (
+              <span className="job-run-tag">
+                Job: {jobName || `#${run.job_id}`}
+                {jobRunMode ? ` (${jobRunMode.toUpperCase()})` : ''}
+              </span>
+            )}
           </div>
 
           <div className="detail-header-actions">
@@ -189,7 +211,7 @@ export function RunDetailView({ runId }: { runId: number }) {
         <div className="detail-meta-grid">
           <div className="meta-item">
             <span className="meta-label">Tester Plugin</span>
-            <span className="meta-value font-semibold">{testerName.toUpperCase()}</span>
+            <span className="meta-value font-semibold">{testerName}</span>
           </div>
 
           <div className="meta-item">
@@ -239,7 +261,12 @@ export function RunDetailView({ runId }: { runId: number }) {
           className={`tab-btn ${activeTab === 'results' ? 'active' : ''}`}
           onClick={() => setActiveTab('results')}
         >
-          Results & Metrics {primaryResult && `(${primaryResult.status.toUpperCase()})`}
+          Results & Metrics{' '}
+          {allResults.length > 1
+            ? `(${allResults.length} TESTERS)`
+            : primaryResult
+              ? `(${primaryResult.status.toUpperCase()})`
+              : ''}
         </button>
         <button
           className={`tab-btn ${activeTab === 'config' ? 'active' : ''}`}
@@ -261,7 +288,7 @@ export function RunDetailView({ runId }: { runId: number }) {
         {/* RESULTS TAB */}
         {activeTab === 'results' && (
           <div className="results-tab-wrapper">
-            {!primaryResult ? (
+            {allResults.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon">⏳</div>
                 <h3>No results recorded yet</h3>
@@ -274,77 +301,129 @@ export function RunDetailView({ runId }: { runId: number }) {
               </div>
             ) : (
               <div className="results-content">
-                {/* Result Summary Banner */}
-                <div className="result-summary-card card">
-                  <div className="summary-left">
-                    <span className="summary-label">Test Outcome:</span>
-                    <Badge status={primaryResult.status} size="lg" />
-                  </div>
-                  {primaryResult.summary && (
-                    <div className="summary-text font-mono">{primaryResult.summary}</div>
-                  )}
-                </div>
-
-                {/* Metrics */}
-                <div className="card section-card">
-                  <h3 className="section-title">Aggregate Metrics</h3>
-                  <MetricsTable metrics={primaryResult.metrics} />
-                </div>
-
-                {/* Test Cases Table */}
-                <div className="card section-card">
-                  <h3 className="section-title">
-                    Test Cases ({primaryResult.cases?.length || 0})
-                  </h3>
-                  <CasesTable cases={primaryResult.cases || []} />
-                </div>
-
-                {/* Artifacts */}
-                {primaryResult.artifacts && primaryResult.artifacts.length > 0 && (
-                  <div className="card section-card">
-                    <h3 className="section-title">
-                      Run Artifacts ({primaryResult.artifacts.length})
-                    </h3>
-                    <div className="table-responsive">
-                      <table className="data-table">
-                        <thead>
-                          <tr>
-                            <th>Artifact Name</th>
-                            <th>MIME Type</th>
-                            <th>Size</th>
-                            <th>Action</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {primaryResult.artifacts.map((art) => (
-                            <tr key={art.id}>
-                              <td>
-                                <strong>{art.name}</strong>
-                              </td>
-                              <td className="font-mono text-muted">{art.mime}</td>
-                              <td className="font-mono">
-                                {art.size_bytes !== null && art.size_bytes !== undefined
-                                  ? `${(art.size_bytes / 1024).toFixed(1)} KB`
-                                  : '—'}
-                              </td>
-                              <td>
-                                <a
-                                  href={api.runs.getArtifactDownloadUrl(run.id, art.id)}
-                                  className="btn btn-sm btn-secondary"
-                                  download={art.name}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  ⬇ Download
-                                </a>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                {/* Per-Tester Result Selector / Grouping Bar when multiple results exist */}
+                {allResults.length > 1 && (
+                  <div className="grouped-results-bar card">
+                    <div className="grouped-results-header">
+                      <span className="font-semibold">
+                        Grouped Tester Results ({allResults.length}):
+                      </span>
+                    </div>
+                    <div className="grouped-results-pills">
+                      <button
+                        type="button"
+                        className={`tester-result-pill ${selectedResultId === 'all' ? 'active' : ''}`}
+                        onClick={() => setSelectedResultId('all')}
+                      >
+                        All Testers ({allResults.length})
+                      </button>
+                      {allResults.map((res, idx) => (
+                        <button
+                          key={res.id}
+                          type="button"
+                          className={`tester-result-pill ${selectedResultId === res.id ? 'active' : ''}`}
+                          onClick={() => setSelectedResultId(res.id)}
+                        >
+                          <span className="pill-order">{idx + 1}.</span>
+                          <span>
+                            {res.definition_name
+                              ? `${res.definition_name} (${res.tester.toUpperCase()})`
+                              : res.tester.toUpperCase()}
+                          </span>
+                          <Badge status={res.status} size="sm" />
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
+
+                {visibleResults.map((resultItem, idx) => (
+                  <div key={resultItem.id} className="grouped-result-section">
+                    {allResults.length > 1 && (
+                      <div className="grouped-result-title-bar">
+                        <h3>
+                          #{idx + 1}{' '}
+                          {resultItem.definition_name
+                            ? `${resultItem.definition_name} — ${resultItem.tester.toUpperCase()}`
+                            : `Tester: ${resultItem.tester.toUpperCase()}`}
+                        </h3>
+                        <Badge status={resultItem.status} size="md" />
+                      </div>
+                    )}
+
+                    {/* Result Summary Banner */}
+                    <div className="result-summary-card card">
+                      <div className="summary-left">
+                        <span className="summary-label">Test Outcome:</span>
+                        <Badge status={resultItem.status} size="lg" />
+                      </div>
+                      {resultItem.summary && (
+                        <div className="summary-text font-mono">{resultItem.summary}</div>
+                      )}
+                    </div>
+
+                    {/* Metrics */}
+                    <div className="card section-card">
+                      <h3 className="section-title">Aggregate Metrics</h3>
+                      <MetricsTable metrics={resultItem.metrics} />
+                    </div>
+
+                    {/* Test Cases Table */}
+                    <div className="card section-card">
+                      <h3 className="section-title">
+                        Test Cases ({resultItem.cases?.length || 0})
+                      </h3>
+                      <CasesTable cases={resultItem.cases || []} />
+                    </div>
+
+                    {/* Artifacts */}
+                    {resultItem.artifacts && resultItem.artifacts.length > 0 && (
+                      <div className="card section-card">
+                        <h3 className="section-title">
+                          Run Artifacts ({resultItem.artifacts.length})
+                        </h3>
+                        <div className="table-responsive">
+                          <table className="data-table">
+                            <thead>
+                              <tr>
+                                <th>Artifact Name</th>
+                                <th>MIME Type</th>
+                                <th>Size</th>
+                                <th>Action</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {resultItem.artifacts.map((art) => (
+                                <tr key={art.id}>
+                                  <td>
+                                    <strong>{art.name}</strong>
+                                  </td>
+                                  <td className="font-mono text-muted">{art.mime}</td>
+                                  <td className="font-mono">
+                                    {art.size_bytes !== null && art.size_bytes !== undefined
+                                      ? `${(art.size_bytes / 1024).toFixed(1)} KB`
+                                      : '—'}
+                                  </td>
+                                  <td>
+                                    <a
+                                      href={api.runs.getArtifactDownloadUrl(run.id, art.id)}
+                                      className="btn btn-sm btn-secondary"
+                                      download={art.name}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                    >
+                                      ⬇ Download
+                                    </a>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>

@@ -758,9 +758,41 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
     target_snap = _sanitize_dict(raw_target)
 
     raw_config_snap = run.config_snapshot
-    if isinstance(raw_config_snap, list) and raw_config_snap:
-        first_snap = raw_config_snap[0] if isinstance(raw_config_snap[0], dict) else {}
-        config_snap = _sanitize_dict(first_snap)
+    matched_step: dict[str, Any] | None = None
+    if isinstance(raw_config_snap, dict) and isinstance(raw_config_snap.get("definitions"), list):
+        defs_list = [d for d in raw_config_snap["definitions"] if isinstance(d, dict)]
+        if result.test_definition_id is not None:
+            matched_step = next(
+                (
+                    d
+                    for d in defs_list
+                    if (d.get("test_definition_id") or d.get("id")) == result.test_definition_id
+                ),
+                None,
+            )
+        if matched_step is None:
+            matched_step = next((d for d in defs_list if d.get("tester") == result.tester), None)
+    elif isinstance(raw_config_snap, list) and raw_config_snap:
+        defs_list = [d for d in raw_config_snap if isinstance(d, dict)]
+        if result.test_definition_id is not None:
+            matched_step = next(
+                (
+                    d
+                    for d in defs_list
+                    if (d.get("test_definition_id") or d.get("id")) == result.test_definition_id
+                ),
+                None,
+            )
+        if matched_step is None:
+            matched_step = next(
+                (d for d in defs_list if d.get("tester") == result.tester),
+                defs_list[0] if defs_list else None,
+            )
+
+    if matched_step is not None:
+        config_snap = _sanitize_dict(matched_step)
+        if isinstance(matched_step.get("target_snapshot"), dict) and matched_step["target_snapshot"]:
+            target_snap = _sanitize_dict(matched_step["target_snapshot"])
     elif isinstance(raw_config_snap, dict):
         config_snap = _sanitize_dict(raw_config_snap)
     else:

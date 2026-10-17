@@ -5,6 +5,9 @@ import type {
   CompareResponse,
   CreateRunRequest,
   HealthResponse,
+  Job,
+  JobCreate,
+  JobUpdate,
   Run,
   RunLogsResponse,
   Target,
@@ -15,6 +18,7 @@ import type {
   TestDefinitionUpdate,
   TesterInfo,
   TriggerDefinitionRunRequest,
+  TriggerJobRunRequest,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -134,6 +138,50 @@ export const api = {
         method: 'POST',
         body: data ? JSON.stringify(data) : undefined,
       }),
+  },
+
+  jobs: {
+    list: (params?: { enabled?: boolean; run_mode?: string; limit?: number; offset?: number }) => {
+      const query = new URLSearchParams()
+      if (params?.enabled !== undefined) query.set('enabled', String(params.enabled))
+      if (params?.run_mode) query.set('run_mode', params.run_mode)
+      if (params?.limit) query.set('limit', String(params.limit))
+      if (params?.offset) query.set('offset', String(params.offset))
+      const qs = query.toString()
+      return request<Job[]>(`/jobs${qs ? `?${qs}` : ''}`)
+    },
+    get: (id: number) => request<Job>(`/jobs/${id}`),
+    create: (data: JobCreate) =>
+      request<Job>('/jobs', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (id: number, data: JobUpdate) =>
+      request<Job>(`/jobs/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    reorder: (id: number, definition_ids: number[]) =>
+      request<Job>(`/jobs/${id}/order`, {
+        method: 'PUT',
+        body: JSON.stringify({ definition_ids }),
+      }),
+    delete: (id: number) =>
+      request<void>(`/jobs/${id}`, {
+        method: 'DELETE',
+      }),
+    trigger: (id: number, data?: TriggerJobRunRequest) =>
+      request<Run>(`/jobs/${id}/run`, {
+        method: 'POST',
+        body: data ? JSON.stringify(data) : undefined,
+      }),
+    listRuns: (id: number, params?: { limit?: number; offset?: number }) => {
+      const query = new URLSearchParams()
+      if (params?.limit) query.set('limit', String(params.limit))
+      if (params?.offset) query.set('offset', String(params.offset))
+      const qs = query.toString()
+      return request<Run[]>(`/jobs/${id}/runs${qs ? `?${qs}` : ''}`)
+    },
   },
 
   runs: {

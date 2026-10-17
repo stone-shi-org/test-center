@@ -117,6 +117,9 @@ def test_openapi_documentation_enabled(app_and_client):
     assert "/api/test-definitions" in paths
     assert "/api/test-definitions/{definition_id}" in paths
     assert "/api/test-definitions/{definition_id}/run" in paths
+    assert "/api/jobs" in paths
+    assert "/api/jobs/{job_id}" in paths
+    assert "/api/jobs/{job_id}/run" in paths
     assert "/api/testers" in paths
     assert "/api/testers/{name}" in paths
     assert "/api/runs" in paths

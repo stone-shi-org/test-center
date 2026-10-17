@@ -93,6 +93,93 @@ export interface TriggerDefinitionRunRequest {
   timeout?: number
 }
 
+export type JobRunMode = 'sequential' | 'parallel'
+
+export interface JobStepOverride {
+  suites?: string[]
+  config?: Record<string, unknown>
+  target_id?: number | null
+  timeout?: number | null
+}
+
+export interface JobDefinitionItem {
+  order: number
+  id: number
+  test_definition_id: number
+  name: string
+  tester: string
+  suites: string[]
+  config: Record<string, unknown>
+  target_id: number | null
+  target?: Target | null
+  overrides: JobStepOverride
+  effective_suites: string[]
+  effective_config: Record<string, unknown>
+  effective_target_id: number | null
+  effective_target?: Target | null
+  timeout?: number | null
+}
+
+export interface Job {
+  id: number
+  name: string
+  description: string | null
+  schedule: string
+  enabled: boolean
+  run_mode: JobRunMode
+  definition_ids: number[]
+  overrides: Record<string, JobStepOverride | unknown>
+  definitions: JobDefinitionItem[]
+  created_at: string
+  updated_at: string
+}
+
+export interface JobCreate {
+  name: string
+  description?: string | null
+  schedule?: string
+  enabled?: boolean
+  run_mode?: JobRunMode
+  definition_ids?: number[]
+  overrides?: Record<string, unknown>
+  definitions?: Array<{
+    test_definition_id: number
+    suites?: string[]
+    config?: Record<string, unknown>
+    target_id?: number | null
+    timeout?: number | null
+    overrides?: Record<string, unknown>
+  }>
+}
+
+export interface JobUpdate {
+  name?: string
+  description?: string | null
+  schedule?: string
+  enabled?: boolean
+  run_mode?: JobRunMode
+  definition_ids?: number[]
+  overrides?: Record<string, unknown>
+  definitions?: Array<{
+    test_definition_id: number
+    suites?: string[]
+    config?: Record<string, unknown>
+    target_id?: number | null
+    timeout?: number | null
+    overrides?: Record<string, unknown>
+  }>
+}
+
+export interface TriggerJobRunRequest {
+  run_mode?: JobRunMode
+  overrides?: Record<string, unknown>
+  config?: Record<string, unknown>
+  suites?: string[]
+  target_id?: number | null
+  timeout?: number | null
+  definition_ids?: number[]
+}
+
 export interface CreateRunRequest {
   test_definition_id?: number | null
   tester?: string | null
@@ -124,6 +211,8 @@ export interface Artifact {
 
 export interface RunResult {
   id: number
+  test_definition_id?: number | null
+  definition_name?: string | null
   tester: string
   status: ResultStatus | string
   metrics: Record<string, unknown>
@@ -135,15 +224,23 @@ export interface RunResult {
 export interface Run {
   id: number
   job_id: number | null
+  job_name?: string | null
   status: RunStatus
   queued_at: string | null
   started_at: string | null
   finished_at: string | null
   config_snapshot: {
+    job_id?: number
+    job_name?: string
+    run_mode?: JobRunMode
     tester?: string
+    testers?: string[]
     suites?: string[]
     config?: Record<string, unknown>
     test_definition_id?: number
+    definition_ids?: number[]
+    definitions?: Array<Record<string, unknown>>
+    overrides?: Record<string, unknown>
     timeout?: number
     [key: string]: unknown
   }
@@ -154,6 +251,7 @@ export interface Run {
     base_url?: string
     auth_env_var?: string | null
     extra?: Record<string, unknown>
+    targets?: Array<Record<string, unknown>>
     [key: string]: unknown
   }
   git_info: Record<string, unknown> | null

@@ -11,6 +11,7 @@ from backend.app.api import (
     targets_router,
     test_definitions_router,
     definitions_alias_router,
+    jobs_router,
     runs_router,
     results_router,
     compare_router,
@@ -51,6 +52,7 @@ OPENAPI_TAGS = [
     {"name": "testers", "description": "Tester plugins discovery and configuration schemas."},
     {"name": "targets", "description": "Target service endpoints and authentication environment variable references."},
     {"name": "test-definitions", "description": "Test definitions, suite selections, and manual run triggers."},
+    {"name": "jobs", "description": "Jobs bundling ordered test definitions, sequential/parallel run modes, overrides, and manual triggers."},
     {"name": "runs", "description": "Test execution queueing, status, cancellation, and live streaming."},
     {"name": "results", "description": "Execution results, per-case details, metrics, and artifact downloads."},
     {"name": "compare", "description": "Side-by-side comparison of 2+ runs or results, aligned metrics, deltas, and per-case diffs."},
@@ -62,7 +64,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.VERSION,
-        description="Test Center REST API: targets, testers, test definitions, runs, results, and compare.",
+        description="Test Center REST API: targets, testers, test definitions, jobs, runs, results, and compare.",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -85,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(test_definitions_router, prefix="/api")
     # Also support /api/definitions as an alias for test definitions
     app.include_router(definitions_alias_router, prefix="/api", include_in_schema=False)
+    app.include_router(jobs_router, prefix="/api")
     app.include_router(runs_router, prefix="/api")
     app.include_router(results_router, prefix="/api")
     app.include_router(compare_router, prefix="/api")

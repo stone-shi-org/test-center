@@ -41,6 +41,22 @@ class CreateRunRequest(BaseModel):
 
 def _format_run_detail(run: Run) -> dict[str, Any]:
     """Helper to serialize a Run with its nested results, cases, and artifacts."""
+    def_names_by_id: dict[int, str] = {}
+    job_name: str | None = None
+    if isinstance(run.config_snapshot, dict):
+        if isinstance(run.config_snapshot.get("job_name"), str):
+            job_name = run.config_snapshot["job_name"]
+        raw_defs = run.config_snapshot.get("definitions")
+        if isinstance(raw_defs, list):
+            for d in raw_defs:
+                if isinstance(d, dict):
+                    did = d.get("test_definition_id") or d.get("id")
+                    dname = d.get("name")
+                    if isinstance(did, int) and isinstance(dname, str):
+                        def_names_by_id[did] = dname
+    if not job_name and run.job is not None:
+        job_name = run.job.name
+
     results_list = []
     for r in run.results:
         cases_list = [
@@ -65,8 +81,15 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
             }
             for a in r.artifacts
         ]
+        def_name = (
+            r.test_definition.name
+            if r.test_definition is not None
+            else (def_names_by_id.get(r.test_definition_id) if r.test_definition_id is not None else None)
+        )
         results_list.append({
             "id": r.id,
+            "test_definition_id": r.test_definition_id,
+            "definition_name": def_name,
             "tester": r.tester,
             "status": r.status,
             "metrics": r.metrics,
@@ -78,6 +101,7 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
     return {
         "id": run.id,
         "job_id": run.job_id,
+        "job_name": job_name,
         "status": run.status,
         "queued_at": run.queued_at.isoformat() if run.queued_at else None,
         "started_at": run.started_at.isoformat() if run.started_at else None,
@@ -94,7 +118,20 @@ def create_run(
     req: CreateRunRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Queue a new test run manually or from a test definition."""
+    """Queue a new test run manually, from a test definition, or from a job."""
+    if req.job_id is not None and req.test_definition_id is None and req.tester is None:
+        from backend.app.api.jobs import TriggerJobRunRequest, trigger_job_run
+        return trigger_job_run(
+            job_id=req.job_id,
+            req=TriggerJobRunRequest(
+                config=req.config if req.config else None,
+                suites=req.suites,
+                target_id=req.target_id,
+                timeout=req.timeout,
+            ),
+            db=db,
+        )
+
     test_def = None
     if req.test_definition_id is not None:
         from backend.app.db.models.test_definition import TestDefinition

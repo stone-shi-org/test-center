@@ -93,9 +93,12 @@ def test_test_definition_crud(db_session):
 def test_job_crud(db_session):
     job = Job(
         name="Nightly Benchmark Suite",
+        description="Bundled nightly regression suite",
         schedule="0 2 * * *",
         enabled=True,
+        run_mode="parallel",
         definition_ids=[1, 2, 3],
+        overrides={"1": {"suites": ["smoke"], "config": {"batch_size": 16}}},
     )
     db_session.add(job)
     db_session.commit()
@@ -103,9 +106,18 @@ def test_job_crud(db_session):
 
     assert job.id is not None
     assert job.name == "Nightly Benchmark Suite"
+    assert job.description == "Bundled nightly regression suite"
     assert job.schedule == "0 2 * * *"
     assert job.enabled is True
+    assert job.run_mode == "parallel"
     assert job.definition_ids == [1, 2, 3]
+    assert job.overrides["1"]["config"]["batch_size"] == 16
+
+    snap = job.to_snapshot()
+    assert snap["id"] == job.id
+    assert snap["run_mode"] == "parallel"
+    assert snap["definition_ids"] == [1, 2, 3]
+    assert snap["overrides"]["1"]["suites"] == ["smoke"]
 
     # Unique constraint test
     dup_job = Job(name="Nightly Benchmark Suite", schedule="manual")
