@@ -64,7 +64,15 @@ tester_registry.register(EmbeddingTester())
 tester_registry.register(LLMTester())
 tester_registry.register(
     LiveSTTTester(),
-    aliases=["live_stt", "live-stt-http", "live_stt_http"],
+    aliases=[
+        "live_stt",
+        "live-stt-http",
+        "live_stt_http",
+        "live-stt-admin",
+        "live_stt_admin",
+        "live-stt-contract",
+        "live_stt_contract",
+    ],
 )
 
 

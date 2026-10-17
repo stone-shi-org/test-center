@@ -62,6 +62,21 @@ def format_live_stt_report(
             f"(TTFB {metrics.get('tts_ttfb_mean_ms', {}).get('value', 0.0):.2f} ms, "
             f"RTF {metrics.get('tts_rtf_mean', {}).get('value', 0.0):.4f}x)"
         )
+    if "admin_latency_mean_ms" in metrics:
+        endpoint_lines.append(
+            f"  Admin / Contract    : {metrics['admin_latency_mean_ms']['value']:.2f} ms "
+            f"(p95 {metrics.get('admin_latency_p95_ms', {}).get('value', 0.0):.2f} ms, read-only)"
+        )
+    if "error_handling_latency_mean_ms" in metrics:
+        endpoint_lines.append(
+            f"  Error Handling      : {metrics['error_handling_latency_mean_ms']['value']:.2f} ms "
+            f"(p95 {metrics.get('error_handling_latency_p95_ms', {}).get('value', 0.0):.2f} ms)"
+        )
+    if "concurrency_latency_mean_ms" in metrics:
+        endpoint_lines.append(
+            f"  Concurrency Limits  : {metrics['concurrency_latency_mean_ms']['value']:.2f} ms "
+            f"(p95 {metrics.get('concurrency_latency_p95_ms', {}).get('value', 0.0):.2f} ms)"
+        )
 
     if endpoint_lines:
         lines.append("-" * 84)

@@ -61,6 +61,42 @@ class TTSFixture:
     description: str
 
 
+@dataclass(frozen=True)
+class BadAudioFixture:
+    """Invalid or unsupported WAV/audio fixture for live-stt error-path contract tests."""
+    id: str
+    name: str
+    description: str
+    wav_bytes: bytes
+    expected_error_substring: str
+
+
+def make_pcm_wav_bytes(
+    sample_rate: int = 16000,
+    channels: int = 1,
+    sample_width: int = 2,
+    duration_sec: float = 0.25,
+) -> bytes:
+    """Construct a RIFF WAV byte buffer with configurable sample rate, channel count, and bit depth."""
+    n_frames = max(1, int(round(duration_sec * sample_rate)))
+    total_samples = n_frames * max(1, channels)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        if sample_width == 1:
+            # 8-bit unsigned PCM silence centered at 128
+            wf.writeframes(bytes([128] * total_samples))
+        elif sample_width == 2:
+            t = np.arange(total_samples, dtype=np.float32) / float(max(1, sample_rate))
+            pcm16 = (0.2 * np.sin(2.0 * math.pi * 220.0 * t) * 32767.0).astype("<i2")
+            wf.writeframes(pcm16.tobytes())
+        else:
+            wf.writeframes(b"\x00" * (total_samples * sample_width))
+    return buf.getvalue()
+
+
 def _pack_pcm16_wav(samples: np.ndarray, sample_rate: int = 16000) -> bytes:
     """Pack float32 [-1.0, 1.0] samples into a 16-bit mono PCM RIFF WAV byte buffer."""
     clipped = np.clip(samples, -1.0, 1.0)
@@ -226,6 +262,37 @@ BUILTIN_TTS_FIXTURES: dict[str, TTSFixture] = {
     ),
 }
 
+BUILTIN_BAD_AUDIO_FIXTURES: dict[str, BadAudioFixture] = {
+    "corrupt_non_wav": BadAudioFixture(
+        id="corrupt_non_wav",
+        name="Corrupt Non-WAV Bytes",
+        description="Non-RIFF arbitrary binary bytes that cannot be parsed as a WAV file",
+        wav_bytes=b"NOT_A_VALID_RIFF_WAV_PAYLOAD_0123456789",
+        expected_error_substring="WAV",
+    ),
+    "wrong_sample_rate_8khz": BadAudioFixture(
+        id="wrong_sample_rate_8khz",
+        name="8kHz Sample Rate WAV",
+        description="8kHz mono 16-bit PCM WAV (live-stt requires 16kHz)",
+        wav_bytes=make_pcm_wav_bytes(sample_rate=8000, channels=1, sample_width=2),
+        expected_error_substring="16kHz",
+    ),
+    "stereo_2ch_wav": BadAudioFixture(
+        id="stereo_2ch_wav",
+        name="Stereo 2-Channel WAV",
+        description="16kHz 2-channel stereo 16-bit PCM WAV (live-stt requires mono)",
+        wav_bytes=make_pcm_wav_bytes(sample_rate=16000, channels=2, sample_width=2),
+        expected_error_substring="mono",
+    ),
+    "wrong_bit_depth_8bit": BadAudioFixture(
+        id="wrong_bit_depth_8bit",
+        name="8-Bit Unsigned PCM WAV",
+        description="16kHz mono 8-bit unsigned PCM WAV (live-stt requires 16-bit)",
+        wav_bytes=make_pcm_wav_bytes(sample_rate=16000, channels=1, sample_width=1),
+        expected_error_substring="16-bit",
+    ),
+}
+
 
 def get_audio_fixture(fixture_id: str = "short_speech") -> AudioFixture:
     """Retrieve a built-in audio fixture by ID, falling back to 'short_speech'."""
@@ -240,3 +307,14 @@ def get_builtin_audio_fixtures() -> list[AudioFixture]:
 def get_builtin_tts_fixtures() -> list[TTSFixture]:
     """Return all built-in TTS text fixtures."""
     return list(BUILTIN_TTS_FIXTURES.values())
+
+
+def get_bad_audio_fixture(fixture_id: str = "corrupt_non_wav") -> BadAudioFixture:
+    """Retrieve a built-in bad audio fixture by ID, falling back to 'corrupt_non_wav'."""
+    return BUILTIN_BAD_AUDIO_FIXTURES.get(fixture_id, BUILTIN_BAD_AUDIO_FIXTURES["corrupt_non_wav"])
+
+
+def get_builtin_bad_audio_fixtures() -> list[BadAudioFixture]:
+    """Return all built-in bad audio fixtures for error-path contract tests."""
+    return list(BUILTIN_BAD_AUDIO_FIXTURES.values())
+

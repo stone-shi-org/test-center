@@ -1,12 +1,16 @@
-"""Comprehensive test suite for the live-stt HTTP Tester plugin (TES-23).
+"""Comprehensive test suite for the live-stt HTTP Tester plugin (TES-23 & TES-24).
 
 Covers:
-1. Built-in 16kHz mono 16-bit PCM WAV audio fixtures and TTS text fixtures
+1. Built-in 16kHz mono 16-bit PCM WAV audio fixtures, bad audio fixtures, and TTS text fixtures
 2. Response schema validators for /v1/models, /v1/audio/transcriptions (JSON, verbose_json, SSE),
-   /v1/audio/diarization (speaker segments + word-level alignment), and /v1/audio/speech (WAV/MP3/PCM)
+   /v1/audio/diarization (speaker segments + word-level alignment), /v1/audio/speech (WAV/MP3/PCM),
+   read-only admin endpoints (/api/health, /api/stats, /api/version, /api/config, /api/settings,
+   /api/backends, /api/diarization-engines, /api/tts-engines, /metrics, /dashboard), and error shapes
 3. Latency percentiles, TTFT/TTFB, and Real-Time Factor (RTF) metrics calculation
 4. /v1/models discovery and per-engine / per-model parametrization
-5. Full LiveSTTTester plugin execution across all suites, error handling, and cancellation
+5. Read-only admin/contract suite verification (confirming zero mutating calls by default),
+   error-path suite (bad audio, unknown model, missing fields, status codes & error body shapes),
+   and concurrency/admission limit suite (503 when over budget, slot recovery, stats counters)
 6. End-to-end REST API + Worker subprocess integration test against a mock live-stt HTTP server
 """
 
@@ -17,7 +21,9 @@ import http.server
 import io
 import json
 from pathlib import Path
+import re
 import threading
+import time
 from typing import Any
 import wave
 import httpx
@@ -32,9 +38,13 @@ from backend.app.testers.base import (
 )
 from backend.app.testers.registry import get_tester, list_testers
 from backend.app.testers.live_stt import (
+    AdminEndpointResult,
     AudioFixture,
     BUILTIN_AUDIO_FIXTURES,
+    BUILTIN_BAD_AUDIO_FIXTURES,
     BUILTIN_TTS_FIXTURES,
+    BadAudioFixture,
+    ConcurrentBurstResult,
     DiscoveredModels,
     LiveSTTClientError,
     LiveSTTHTTPClient,
@@ -43,24 +53,39 @@ from backend.app.testers.live_stt import (
     SchemaCheckResult,
     TTSFixture,
     WordTimestamp,
+    build_multipart_body,
     compute_latency_and_rtf_summary,
     compute_percentiles,
     compute_rtf,
+    extract_error_message,
     format_live_stt_report,
     get_audio_fixture,
+    get_bad_audio_fixture,
     get_builtin_audio_fixtures,
+    get_builtin_bad_audio_fixtures,
     get_builtin_tts_fixtures,
     infer_model_info,
+    make_pcm_wav_bytes,
     normalize_live_stt_suites,
     parse_wav_audio_info,
     select_parametrized_models,
     synthesize_speech_like_wav,
+    validate_backends_response,
+    validate_config_response,
+    validate_dashboard_html_response,
     validate_diarization_response,
+    validate_engine_status_response,
+    validate_error_response,
+    validate_health_response,
     validate_models_response,
+    validate_prometheus_metrics_response,
+    validate_settings_response,
+    validate_stats_response,
     validate_transcription_json_response,
     validate_transcription_sse_response,
     validate_transcription_verbose_json_response,
     validate_tts_response,
+    validate_version_response,
 )
 
 
@@ -171,69 +196,459 @@ def _build_sample_models_payload() -> dict[str, Any]:
     }
 
 
+def _parse_multipart_form(content: bytes, content_type: str) -> tuple[dict[str, str], dict[str, bytes]]:
+    """Parse multipart/form-data fields and file payloads for mock live-stt validation."""
+    fields: dict[str, str] = {}
+    files: dict[str, bytes] = {}
+    m = re.search(r"boundary=([^\s;]+)", content_type or "")
+    if not m:
+        return fields, files
+    boundary = m.group(1).strip('"').encode("utf-8")
+    for part in content.split(b"--" + boundary):
+        if not part or part.startswith(b"--") or b"\r\n\r\n" not in part:
+            continue
+        header_block, body = part.split(b"\r\n\r\n", 1)
+        if body.endswith(b"\r\n"):
+            body = body[:-2]
+        header_str = header_block.decode("utf-8", errors="ignore")
+        name_m = re.search(r'name="([^"]+)"', header_str)
+        if not name_m:
+            continue
+        field_name = name_m.group(1)
+        if 'filename="' in header_str:
+            files[field_name] = body
+        else:
+            fields[field_name] = body.decode("utf-8", errors="replace")
+    return fields, files
+
+
+def _validate_16khz_mono_16bit_wav(wav_bytes: bytes) -> str | None:
+    """Validate WAV bytes match live-stt's strict 16kHz mono 16-bit PCM requirement."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sr = wf.getframerate()
+            ch = wf.getnchannels()
+            sw = wf.getsampwidth()
+            nframes = wf.getnframes()
+    except Exception:
+        return "could not parse WAV file"
+    if sr != 16000 or ch != 1 or sw != 2:
+        return (
+            f"unsupported WAV format: {sr}Hz, {ch}ch, {sw * 8}-bit "
+            "(only 16kHz mono 16-bit PCM accepted)"
+        )
+    if nframes == 0:
+        return "WAV file contains no audio frames"
+    return None
+
+
 def _create_mock_live_stt_transport(
     *,
     models_payload: dict[str, Any] | None = None,
+    max_concurrent_calls: int = 2,
+    transcribe_hold_sec: float = 0.03,
+    draining: bool = False,
 ) -> tuple[httpx.MockTransport, list[httpx.Request]]:
-    """Create an httpx.MockTransport simulating all live-stt HTTP endpoints."""
+    """Create an httpx.MockTransport simulating all live-stt HTTP, admin, error, and admission endpoints."""
     recorded_requests: list[httpx.Request] = []
     active_models = models_payload or _build_sample_models_payload()
     wav_24k = _build_mock_tts_wav(duration_sec=0.8, sample_rate=24000)
     wav_22k = _build_mock_tts_wav(duration_sec=0.8, sample_rate=22050)
 
+    known_asr_ids = {
+        m["id"] for m in active_models.get("data", []) if m.get("type") == "asr"
+    } | {"realtime_eou_120m-v1"}
+    known_diar_ids = {
+        m["id"] for m in active_models.get("data", []) if m.get("type") == "diarization"
+    }
+    known_tts_ids = {
+        m["id"] for m in active_models.get("data", []) if m.get("type") == "tts"
+    } | {"kokoro-82m-v1"}
+
+    state_lock = threading.Lock()
+    state: dict[str, Any] = {
+        "active_calls": 0,
+        "active_workers": 0,
+        "max_concurrent_calls": max_concurrent_calls,
+        "max_workers": max_concurrent_calls + 2,
+        "draining": draining,
+        "transcribe_active": 0,
+        "transcribe_completed_total": 0,
+        "transcribe_failed_total": 0,
+        "transcribe_rejected_vram_total": 0,
+        "transcribe_rejected_capacity_total": 0,
+        "diarization_completed_total": 0,
+        "tts_completed_total": 0,
+    }
+
     def handler(request: httpx.Request) -> httpx.Response:
         recorded_requests.append(request)
         path = request.url.path
 
+        # -------------------------------------------------------------------
+        # Read-only Admin & Telemetry GET Endpoints
+        # -------------------------------------------------------------------
         if request.method == "GET" and path.endswith("/v1/models"):
             return httpx.Response(200, json=active_models)
 
+        if request.method == "GET" and path.endswith("/api/health"):
+            with state_lock:
+                used = state["active_calls"]
+                total = state["max_concurrent_calls"]
+                is_draining = state["draining"]
+            status_str = "draining" if is_draining else "ok"
+            http_code = 200 if status_str == "ok" else 503
+            return httpx.Response(
+                http_code,
+                json={
+                    "status": status_str,
+                    "backend": "cuda",
+                    "backends": {
+                        "parakeet": "cuda",
+                        "whisper": "cuda",
+                        "parakeet_tdt": "cuda",
+                    },
+                    "model": "parakeet-ctc-0.6b",
+                    "capacity": {
+                        "used": used,
+                        "total": total,
+                        "admitting": (not is_draining) and (used < total),
+                    },
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/stats"):
+            with state_lock:
+                snap = dict(state)
+            return httpx.Response(
+                200,
+                json={
+                    "active_calls": snap["active_calls"],
+                    "active_workers": snap["active_workers"],
+                    "max_concurrent_calls": snap["max_concurrent_calls"],
+                    "max_workers": snap["max_workers"],
+                    "draining": snap["draining"],
+                    "gpu": {
+                        "free_vram_mb": 12400,
+                        "total_vram_mb": 16384,
+                        "used_vram_mb": 3984,
+                        "utilization_pct": 18,
+                        "reserve_mb": 2048,
+                    },
+                    "diarization": {
+                        "active": 0,
+                        "completed_total": snap["diarization_completed_total"],
+                        "failed_total": 0,
+                        "rejected_vram_total": 0,
+                        "active_requests": [],
+                    },
+                    "transcribe": {
+                        "active": snap["transcribe_active"],
+                        "completed_total": snap["transcribe_completed_total"],
+                        "failed_total": snap["transcribe_failed_total"],
+                        "rejected_vram_total": snap["transcribe_rejected_vram_total"],
+                        "rejected_capacity_total": snap["transcribe_rejected_capacity_total"],
+                        "active_requests": [],
+                    },
+                    "tts": {
+                        "active": 0,
+                        "completed_total": snap["tts_completed_total"],
+                        "failed_total": 0,
+                        "rejected_vram_total": 0,
+                        "rejected_capacity_total": 0,
+                        "active_requests": [],
+                        "warm_worker": None,
+                    },
+                    "stt_worker_pool": {
+                        "standby_workers": [],
+                        "standby_count": 0,
+                    },
+                    "warmed_workers": [],
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/version"):
+            return httpx.Response(
+                200,
+                json={
+                    "hash": "a1b2c3d",
+                    "timestamp": "2026-10-16T00:00:00Z",
+                    "parakeet_ref": "v0.3.0",
+                    "whisper_ref": "v1.1.0",
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/config"):
+            return httpx.Response(
+                200,
+                json={
+                    "host": "0.0.0.0",
+                    "port": 8080,
+                    "parakeet_backend": "cuda",
+                    "whisper_backend": "cuda",
+                    "parakeet_tdt_backend": "cuda",
+                    "default_model": "parakeet-ctc-0.6b",
+                    "max_concurrent_calls": max_concurrent_calls,
+                    "reserve_slots": 2,
+                    "gpu_vram_reserve_mb": 2048,
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/settings"):
+            return httpx.Response(
+                200,
+                json={
+                    "settings": {
+                        "default_model": "parakeet-ctc-0.6b",
+                        "max_concurrent_calls": max_concurrent_calls,
+                        "parakeet_backend": "cuda",
+                        "whisper_backend": "cuda",
+                    },
+                    "hot_reload_fields": ["default_model", "max_concurrent_calls", "reserve_slots"],
+                    "restart_required_fields": ["host", "port", "parakeet_backend", "whisper_backend"],
+                    "store_available": True,
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/backends"):
+            return httpx.Response(
+                200,
+                json={
+                    "store_available": True,
+                    "registered": [
+                        {"engine": "parakeet", "device": "cuda", "name": "parakeet-cuda"},
+                        {"engine": "whisper", "device": "cuda", "name": "whisper-cuda"},
+                        {"engine": "parakeet_tdt", "device": "cuda", "name": "parakeet_tdt-cuda"},
+                    ],
+                    "installed": [
+                        {"engine": "parakeet", "device": "cuda", "installed": True, "active": True},
+                        {"engine": "whisper", "device": "cuda", "installed": True, "active": True},
+                    ],
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/diarization-engines"):
+            return httpx.Response(
+                200,
+                json={
+                    "engines": {
+                        "pyannote": {
+                            "installed": True,
+                            "active_install": False,
+                            "install_error": None,
+                        },
+                        "nemo_sortformer": {
+                            "installed": False,
+                            "active_install": False,
+                            "install_error": None,
+                        },
+                    }
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/api/tts-engines"):
+            return httpx.Response(
+                200,
+                json={
+                    "engines": {
+                        "kokoro": {
+                            "installed": True,
+                            "active_install": False,
+                            "install_error": None,
+                        },
+                        "piper": {
+                            "installed": True,
+                            "active_install": False,
+                            "install_error": None,
+                        },
+                    }
+                },
+            )
+
+        if request.method == "GET" and path.endswith("/metrics"):
+            prom_text = (
+                "# HELP live_stt_streams_active Currently active WebSocket audio streams.\n"
+                "# TYPE live_stt_streams_active gauge\n"
+                "live_stt_streams_active 0.0\n"
+                "# HELP live_stt_transcribe_requests_total Total /v1/audio/transcriptions requests by model and outcome.\n"
+                "# TYPE live_stt_transcribe_requests_total counter\n"
+                'live_stt_transcribe_requests_total{model="parakeet-ctc-0.6b",outcome="completed"} 5.0\n'
+                "# HELP live_stt_diarization_requests_total Total /v1/audio/diarization requests by model and outcome.\n"
+                "# TYPE live_stt_diarization_requests_total counter\n"
+                'live_stt_diarization_requests_total{model="pyannote/speaker-diarization-community-1",outcome="completed"} 2.0\n'
+                "# HELP live_stt_tts_requests_total Total /v1/audio/speech requests by model and outcome.\n"
+                "# TYPE live_stt_tts_requests_total counter\n"
+                'live_stt_tts_requests_total{model="kokoro-82m",outcome="completed"} 2.0\n'
+                "# HELP live_stt_admission_rejections_total Total requests rejected by admission gates.\n"
+                "# TYPE live_stt_admission_rejections_total counter\n"
+                'live_stt_admission_rejections_total{endpoint="transcribe",reason="capacity"} 0.0\n'
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/plain; version=0.0.4; charset=utf-8"},
+                content=prom_text.encode("utf-8"),
+            )
+
+        if request.method == "GET" and path.endswith("/dashboard"):
+            html_doc = "<!DOCTYPE html><html><head><title>live-stt Dashboard</title></head><body><h1>live-stt</h1></body></html>"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                content=html_doc.encode("utf-8"),
+            )
+
+        # -------------------------------------------------------------------
+        # POST /v1/audio/transcriptions (with validation & admission budget)
+        # -------------------------------------------------------------------
         if request.method == "POST" and path.endswith("/v1/audio/transcriptions"):
-            raw_body = request.content.decode("latin-1", errors="ignore")
-            is_stream = 'name="stream"\r\n\r\ntrue' in raw_body
-            is_verbose = 'name="response_format"\r\n\r\nverbose_json' in raw_body
-
-            if is_stream:
-                sse_lines = (
-                    'data: {"type": "transcript.text.delta", "delta": "Hello world "}\n\n'
-                    'data: {"type": "transcript.text.done", "text": "Hello world from live stt."}\n\n'
-                    "data: [DONE]\n\n"
-                )
+            ct = request.headers.get("content-type", "")
+            fields, files = _parse_multipart_form(request.content, ct)
+            if "file" not in files or not files["file"]:
                 return httpx.Response(
-                    200,
-                    headers={"content-type": "text/event-stream; charset=utf-8"},
-                    content=sse_lines.encode("utf-8"),
+                    400,
+                    json={"error": {"message": "missing 'file' field in multipart upload"}},
                 )
 
-            if is_verbose:
+            wav_err = _validate_16khz_mono_16bit_wav(files["file"])
+            if wav_err:
+                return httpx.Response(400, json={"error": {"message": wav_err}})
+
+            model_id = fields.get("model", "parakeet-ctc-0.6b")
+            if model_id not in known_asr_ids:
                 return httpx.Response(
-                    200,
+                    400,
+                    json={"error": {"message": f"unknown model {model_id!r}"}},
+                )
+
+            resp_fmt = fields.get("response_format", "json")
+            if resp_fmt not in ("json", "verbose_json"):
+                return httpx.Response(
+                    400,
                     json={
-                        "task": "transcribe",
-                        "language": "en",
-                        "duration": 3.0,
-                        "text": "The quick brown fox jumps over the lazy dog.",
-                        "words": [
-                            {"word": "The", "start": 0.12, "end": 0.30, "confidence": 0.99},
-                            {"word": "quick", "start": 0.35, "end": 0.62, "confidence": 0.98},
-                            {"word": "brown", "start": 0.68, "end": 0.98, "confidence": 0.97},
-                            {"word": "fox", "start": 1.04, "end": 1.32, "confidence": 0.99},
-                        ],
+                        "error": {
+                            "message": f"unsupported response_format {resp_fmt!r} (expected 'json' or 'verbose_json')"
+                        }
                     },
                 )
 
-            return httpx.Response(200, json={"text": "Hello world testing."})
+            is_stream = fields.get("stream", "false").lower() == "true"
+            is_verbose = resp_fmt == "verbose_json"
 
+            # Admission budget check (WorkerBudget)
+            with state_lock:
+                if state["draining"]:
+                    state["transcribe_rejected_capacity_total"] += 1
+                    return httpx.Response(
+                        503,
+                        json={"error": {"message": "server is draining, not accepting new calls"}},
+                    )
+                if state["active_calls"] >= state["max_concurrent_calls"]:
+                    state["transcribe_rejected_capacity_total"] += 1
+                    return httpx.Response(
+                        503,
+                        json={"error": {"message": "at capacity, try again shortly"}},
+                    )
+                state["active_calls"] += 1
+                state["active_workers"] += 1
+                state["transcribe_active"] += 1
+
+            try:
+                if transcribe_hold_sec > 0:
+                    time.sleep(transcribe_hold_sec)
+
+                if is_stream:
+                    sse_lines = (
+                        'data: {"type": "transcript.text.delta", "delta": "Hello world "}\n\n'
+                        'data: {"type": "transcript.text.done", "text": "Hello world from live stt."}\n\n'
+                        "data: [DONE]\n\n"
+                    )
+                    return httpx.Response(
+                        200,
+                        headers={"content-type": "text/event-stream; charset=utf-8"},
+                        content=sse_lines.encode("utf-8"),
+                    )
+
+                if is_verbose:
+                    return httpx.Response(
+                        200,
+                        json={
+                            "task": "transcribe",
+                            "language": "en",
+                            "duration": 3.0,
+                            "text": "The quick brown fox jumps over the lazy dog.",
+                            "words": [
+                                {"word": "The", "start": 0.12, "end": 0.30, "confidence": 0.99},
+                                {"word": "quick", "start": 0.35, "end": 0.62, "confidence": 0.98},
+                                {"word": "brown", "start": 0.68, "end": 0.98, "confidence": 0.97},
+                                {"word": "fox", "start": 1.04, "end": 1.32, "confidence": 0.99},
+                            ],
+                        },
+                    )
+
+                return httpx.Response(200, json={"text": "Hello world testing."})
+            finally:
+                with state_lock:
+                    state["active_calls"] -= 1
+                    state["active_workers"] -= 1
+                    state["transcribe_active"] -= 1
+                    state["transcribe_completed_total"] += 1
+
+        # -------------------------------------------------------------------
+        # POST /v1/audio/diarization (with validation)
+        # -------------------------------------------------------------------
         if request.method == "POST" and path.endswith("/v1/audio/diarization"):
-            raw_body = request.content.decode("latin-1", errors="ignore")
-            include_text = 'name="include_text"\r\n\r\ntrue' in raw_body
+            ct = request.headers.get("content-type", "")
+            fields, files = _parse_multipart_form(request.content, ct)
+            if "file" not in files or not files["file"]:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": "missing 'file' field in multipart upload"}},
+                )
+
+            wav_err = _validate_16khz_mono_16bit_wav(files["file"])
+            if wav_err:
+                return httpx.Response(400, json={"error": {"message": wav_err}})
+
+            model_id = fields.get("model", "pyannote/speaker-diarization-community-1")
+            if model_id not in known_diar_ids:
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": f"Unknown diarization model {model_id!r}"}},
+                )
+
+            if "words" in fields and fields["words"]:
+                try:
+                    parsed_words = json.loads(fields["words"])
+                    if not isinstance(parsed_words, list):
+                        raise ValueError("words must be a JSON array")
+                except Exception as exc:
+                    return httpx.Response(
+                        400,
+                        json={"error": {"message": f"'words' field is not valid JSON: {exc}"}},
+                    )
+
+            for int_field in ("num_speakers", "min_speakers", "max_speakers"):
+                if int_field in fields and fields[int_field]:
+                    try:
+                        val = int(fields[int_field])
+                        if val < 1:
+                            raise ValueError("must be >= 1")
+                    except Exception:
+                        return httpx.Response(
+                            400,
+                            json={"error": {"message": f"invalid integer for {int_field!r}: {fields[int_field]!r}"}},
+                        )
+
+            include_text = fields.get("include_text", "false").lower() == "true"
             seg0_text = "good morning everyone" if include_text else ""
             seg1_text = "hello thanks joining" if include_text else ""
+            with state_lock:
+                state["diarization_completed_total"] += 1
             return httpx.Response(
                 200,
                 json={
                     "task": "diarize",
-                    "model": "pyannote/speaker-diarization-community-1",
+                    "model": model_id,
                     "duration": 4.0,
                     "num_speakers": 2,
                     "segments": [
@@ -271,10 +686,32 @@ def _create_mock_live_stt_transport(
                 },
             )
 
+        # -------------------------------------------------------------------
+        # POST /v1/audio/speech (with validation)
+        # -------------------------------------------------------------------
         if request.method == "POST" and path.endswith("/v1/audio/speech"):
-            body = json.loads(request.content.decode("utf-8"))
+            try:
+                body = json.loads(request.content.decode("utf-8"))
+            except Exception as exc:
+                return httpx.Response(400, json={"error": f"Invalid JSON body: {exc}"})
+
+            input_text = body.get("input")
+            if not isinstance(input_text, str) or not input_text.strip():
+                return httpx.Response(
+                    400,
+                    json={"error": "'input' field is required and must be a non-empty string"},
+                )
+
+            model_name = str(body.get("model", "kokoro-82m"))
+            if model_name not in known_tts_ids:
+                return httpx.Response(
+                    400,
+                    json={"error": f"Unknown TTS model: {model_name!r}"},
+                )
+
             fmt = body.get("response_format", "wav")
-            model_name = str(body.get("model", ""))
+            with state_lock:
+                state["tts_completed_total"] += 1
             if fmt == "mp3":
                 return httpx.Response(
                     200,
@@ -294,7 +731,7 @@ def _create_mock_live_stt_transport(
                 content=chosen_wav,
             )
 
-        return httpx.Response(404, json={"detail": f"Unhandled route {path}"})
+        return httpx.Response(404, json={"error": "not found"})
 
     return httpx.MockTransport(handler), recorded_requests
 
@@ -625,12 +1062,22 @@ def test_live_stt_tester_registration_and_aliases():
     tester = get_tester("live-stt")
     assert isinstance(tester, LiveSTTTester)
     assert tester.name == "live-stt"
-    assert tester.suites == ["transcriptions_json", "transcriptions_sse", "diarization", "tts"]
+    assert tester.suites == [
+        "transcriptions_json",
+        "transcriptions_sse",
+        "diarization",
+        "tts",
+        "admin",
+        "error_handling",
+        "concurrency",
+    ]
 
     # Verify aliases resolve to the same plugin
     assert get_tester("live_stt") is tester
     assert get_tester("live-stt-http") is tester
     assert get_tester("live_stt_http") is tester
+    assert get_tester("live-stt-admin") is tester
+    assert get_tester("live-stt-contract") is tester
     assert any(t.name == "live-stt" for t in list_testers())
 
     # Verify suite alias normalization
@@ -638,6 +1085,16 @@ def test_live_stt_tester_registration_and_aliases():
         "transcriptions_json",
         "transcriptions_sse",
         "tts",
+    ]
+    assert normalize_live_stt_suites(["contract"], tester.suites) == [
+        "admin",
+        "error_handling",
+        "concurrency",
+    ]
+    assert normalize_live_stt_suites(["models", "errors", "admission"], tester.suites) == [
+        "admin",
+        "error_handling",
+        "concurrency",
     ]
 
 
@@ -648,6 +1105,8 @@ def test_live_stt_tester_config_validation():
     assert cfg["model_parametrization"] == "per_engine"
     assert cfg["repetitions"] == 1
     assert cfg["discover_models"] is True
+    assert cfg["include_extended_admin"] is True
+    assert cfg["allow_mutating_admin"] is False
     assert cfg["tts_response_format"] == "wav"
     assert cfg["tts_stream_format"] == "pcm"
 
@@ -662,9 +1121,9 @@ def test_live_stt_tester_config_validation():
 
 
 def test_live_stt_tester_full_execution_per_engine(tmp_path: Path):
-    """Run all 4 suites with per_engine parametrization and verify cases, metrics, and artifacts."""
+    """Run all 4 core audio suites with per_engine parametrization and verify cases, metrics, and artifacts."""
     tester = LiveSTTTester()
-    transport, requests = _create_mock_live_stt_transport()
+    transport, requests = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
     ctx = TestContext(
         run_id=501,
         artifacts_dir=tmp_path / "artifacts_501",
@@ -725,7 +1184,7 @@ def test_live_stt_tester_full_execution_per_engine(tmp_path: Path):
 def test_live_stt_tester_error_and_cancellation_handling(tmp_path: Path):
     """Verify missing base_url, API error handling, and cancellation behavior."""
     tester = LiveSTTTester()
-    transport, _ = _create_mock_live_stt_transport()
+    transport, _ = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
 
     # 1. Missing base_url raises TesterConfigError
     ctx1 = TestContext(run_id=502, artifacts_dir=tmp_path / "a1", emit_stdout=False)
@@ -913,6 +1372,9 @@ def test_live_stt_worker_subprocess_end_to_end(app_and_client, monkeypatch):
             "transcriptions_sse",
             "diarization",
             "tts",
+            "admin",
+            "error_handling",
+            "concurrency",
         ]
 
         # 2. Create Target pointing to mock live-stt server
@@ -996,3 +1458,339 @@ def test_live_stt_worker_subprocess_end_to_end(app_and_client, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# ===========================================================================
+# 7. TES-24: Admin/Contract, Error-Path, and Concurrency Limit Tests
+# ===========================================================================
+
+def test_bad_audio_fixtures_catalog():
+    """Verify built-in bad audio fixtures produce corrupt, 8kHz, stereo, and 8-bit WAVs."""
+    bad_fixtures = get_builtin_bad_audio_fixtures()
+    assert len(bad_fixtures) == 4
+    assert [f.id for f in bad_fixtures] == [
+        "corrupt_non_wav",
+        "wrong_sample_rate_8khz",
+        "stereo_2ch_wav",
+        "wrong_bit_depth_8bit",
+    ]
+
+    corrupt = get_bad_audio_fixture("corrupt_non_wav")
+    assert parse_wav_audio_info(corrupt.wav_bytes) is None
+    assert _validate_16khz_mono_16bit_wav(corrupt.wav_bytes) == "could not parse WAV file"
+
+    fx_8k = get_bad_audio_fixture("wrong_sample_rate_8khz")
+    info_8k = parse_wav_audio_info(fx_8k.wav_bytes)
+    assert info_8k is not None and info_8k["sample_rate"] == 8000
+    assert "8000Hz" in (_validate_16khz_mono_16bit_wav(fx_8k.wav_bytes) or "")
+
+    fx_stereo = get_bad_audio_fixture("stereo_2ch_wav")
+    info_stereo = parse_wav_audio_info(fx_stereo.wav_bytes)
+    assert info_stereo is not None and info_stereo["channels"] == 2
+    assert "2ch" in (_validate_16khz_mono_16bit_wav(fx_stereo.wav_bytes) or "")
+
+    fx_8bit = get_bad_audio_fixture("wrong_bit_depth_8bit")
+    info_8bit = parse_wav_audio_info(fx_8bit.wav_bytes)
+    assert info_8bit is not None and info_8bit["sample_width"] == 1
+    assert "8-bit" in (_validate_16khz_mono_16bit_wav(fx_8bit.wav_bytes) or "")
+
+
+def test_validate_admin_and_contract_schemas():
+    """Verify schema validators for /v1/models (strict), /api/health, /api/stats, /metrics, and error shapes."""
+    # 1. Strict /v1/models catalog validation
+    strict_ok = validate_models_response(
+        _build_sample_models_payload(),
+        status_code=200,
+        content_type="application/json",
+        strict_catalog=True,
+    )
+    assert strict_ok.valid is True
+
+    # 2. /api/health: 200 when status=='ok' (even at capacity used==total!), 503 when draining/degraded
+    health_at_cap = {
+        "status": "ok",
+        "backend": "cuda",
+        "backends": {"parakeet": "cuda", "whisper": "cuda", "parakeet_tdt": "cuda"},
+        "model": "parakeet-ctc-0.6b",
+        "capacity": {"used": 4, "total": 4, "admitting": False},
+    }
+    assert validate_health_response(health_at_cap, status_code=200).valid is True
+    assert validate_health_response(health_at_cap, status_code=503).valid is False
+
+    health_draining = {
+        **health_at_cap,
+        "status": "draining",
+    }
+    assert validate_health_response(health_draining, status_code=503).valid is True
+    assert validate_health_response(health_draining, status_code=200).valid is False
+
+    # 3. /api/stats validation
+    valid_stats = {
+        "active_calls": 1,
+        "active_workers": 1,
+        "max_concurrent_calls": 4,
+        "max_workers": 6,
+        "draining": False,
+        "gpu": {
+            "free_vram_mb": 10240,
+            "total_vram_mb": 16384,
+            "used_vram_mb": 6144,
+            "utilization_pct": 25,
+            "reserve_mb": 2048,
+        },
+        "diarization": {
+            "active": 0,
+            "completed_total": 3,
+            "failed_total": 0,
+            "rejected_vram_total": 0,
+            "active_requests": [],
+        },
+        "transcribe": {
+            "active": 1,
+            "completed_total": 10,
+            "failed_total": 0,
+            "rejected_vram_total": 0,
+            "rejected_capacity_total": 2,
+            "active_requests": [{"id": "req-1"}],
+        },
+        "tts": {
+            "active": 0,
+            "completed_total": 5,
+            "failed_total": 0,
+            "rejected_vram_total": 0,
+            "rejected_capacity_total": 0,
+            "active_requests": [],
+            "warm_worker": None,
+        },
+        "stt_worker_pool": {"standby_workers": [], "standby_count": 0},
+        "warmed_workers": [],
+    }
+    assert validate_stats_response(valid_stats, status_code=200).valid is True
+    bad_stats = {**valid_stats, "gpu": {"reserve_mb": -1}}
+    assert validate_stats_response(bad_stats, status_code=200).valid is False
+
+    # 4. /metrics Prometheus validation & forbidden PII label check
+    valid_prom = (
+        "# HELP live_stt_streams_active Active streams\n"
+        "# TYPE live_stt_streams_active gauge\n"
+        "live_stt_streams_active 0\n"
+        "live_stt_transcribe_requests_total 1\n"
+        "live_stt_diarization_requests_total 1\n"
+        "live_stt_tts_requests_total 1\n"
+        "live_stt_admission_rejections_total 0\n"
+    )
+    assert validate_prometheus_metrics_response(valid_prom, status_code=200).valid is True
+
+    pii_prom = valid_prom + 'live_stt_streams_active{stream_id="secret-call-123"} 1\n'
+    res_pii = validate_prometheus_metrics_response(pii_prom, status_code=200)
+    assert res_pii.valid is False
+    assert "no_high_cardinality_pii_labels" in res_pii.summary_message
+
+    # 5. Error body shape validation (nested vs flat)
+    nested_err = {"error": {"message": "unsupported WAV format: 8000Hz, 1ch, 16-bit"}}
+    assert validate_error_response(
+        nested_err,
+        status_code=400,
+        expected_status=400,
+        shape="nested",
+        expected_substring="8000Hz",
+    ).valid is True
+    assert validate_error_response(
+        nested_err,
+        status_code=400,
+        expected_status=400,
+        shape="flat",
+    ).valid is False
+
+    flat_err = {"error": "Unknown TTS model: 'bad-tts'"}
+    assert validate_error_response(
+        flat_err,
+        status_code=400,
+        expected_status=400,
+        shape="flat",
+        expected_substring="Unknown TTS model",
+    ).valid is True
+
+
+def test_live_stt_admin_suite_read_only_no_mutating_calls(tmp_path: Path):
+    """Run the 'admin' suite and verify all read-only endpoints pass and zero mutating calls occur."""
+    tester = LiveSTTTester()
+    transport, requests = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    ctx = TestContext(
+        run_id=601,
+        artifacts_dir=tmp_path / "artifacts_601",
+        emit_stdout=False,
+    )
+
+    result = tester.run(
+        {
+            "_transport": transport,
+            "suites": ["admin"],
+            "discover_models": False,
+            "include_extended_admin": True,
+        },
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+
+    assert result.status == "pass"
+    assert len(result.cases) == 11
+    assert all(c.status == "pass" for c in result.cases)
+    case_ids = [c.case_id for c in result.cases]
+    assert case_ids == [
+        "admin:v1_models",
+        "admin:api_health",
+        "admin:api_stats",
+        "admin:api_version",
+        "admin:api_config",
+        "admin:api_settings",
+        "admin:api_backends",
+        "admin:api_diarization_engines",
+        "admin:api_tts_engines",
+        "admin:metrics",
+        "admin:dashboard",
+    ]
+
+    # Verify strictly read-only behavior: every single HTTP request was GET, zero POST/PUT/DELETE/PATCH
+    assert len(requests) == 11
+    assert all(req.method == "GET" for req in requests)
+    assert all(c.detail.get("read_only") is True and c.detail.get("mutating") is False for c in result.cases)
+    assert "admin_latency_mean_ms" in result.metrics
+
+
+def test_live_stt_error_handling_suite_bad_audio_unknown_model_missing_fields(tmp_path: Path):
+    """Run the 'error_handling' suite and verify bad audio, unknown models, missing fields, and error shapes."""
+    tester = LiveSTTTester()
+    transport, requests = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    ctx = TestContext(
+        run_id=602,
+        artifacts_dir=tmp_path / "artifacts_602",
+        emit_stdout=False,
+    )
+
+    result = tester.run(
+        {
+            "_transport": transport,
+            "suites": ["error_handling"],
+            "discover_models": False,
+        },
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+
+    assert result.status == "pass"
+    assert len(result.cases) == 15
+    assert all(c.status == "pass" for c in result.cases)
+
+    by_id = {c.case_id: c for c in result.cases}
+    # Missing fields
+    assert by_id["error_handling:transcriptions:missing_file"].detail["status_code"] == 400
+    assert by_id["error_handling:diarization:missing_file"].detail["status_code"] == 400
+    assert by_id["error_handling:tts:missing_input"].detail["status_code"] == 400
+
+    # Bad audio (corrupt, 8kHz, stereo, 8-bit)
+    assert by_id["error_handling:transcriptions:bad_audio_corrupt_non_wav"].detail["status_code"] == 400
+    assert by_id["error_handling:transcriptions:bad_audio_wrong_sample_rate_8khz"].detail["status_code"] == 400
+    assert by_id["error_handling:transcriptions:bad_audio_stereo_2ch_wav"].detail["status_code"] == 400
+    assert by_id["error_handling:transcriptions:bad_audio_wrong_bit_depth_8bit"].detail["status_code"] == 400
+    assert by_id["error_handling:diarization:bad_audio_corrupt_non_wav"].detail["status_code"] == 400
+
+    # Unknown model
+    assert by_id["error_handling:transcriptions:unknown_model"].detail["status_code"] == 400
+    assert by_id["error_handling:diarization:unknown_model"].detail["status_code"] == 400
+    assert by_id["error_handling:tts:unknown_model"].detail["status_code"] == 400
+
+    # Invalid parameters & 404
+    assert by_id["error_handling:transcriptions:unsupported_response_format"].detail["status_code"] == 400
+    assert by_id["error_handling:diarization:invalid_words_json"].detail["status_code"] == 400
+    assert by_id["error_handling:diarization:invalid_num_speakers"].detail["status_code"] == 400
+    assert by_id["error_handling:admin:unknown_route_404"].detail["status_code"] == 404
+    assert "error_handling_latency_mean_ms" in result.metrics
+
+
+def test_live_stt_concurrency_suite_503_over_budget_and_recovery(tmp_path: Path):
+    """Run the 'concurrency' suite and verify 503 when over max_concurrent_calls budget and slot release."""
+    tester = LiveSTTTester()
+    transport, _ = _create_mock_live_stt_transport(
+        max_concurrent_calls=2,
+        transcribe_hold_sec=0.06,
+    )
+    ctx = TestContext(
+        run_id=603,
+        artifacts_dir=tmp_path / "artifacts_603",
+        emit_stdout=False,
+    )
+
+    result = tester.run(
+        {
+            "_transport": transport,
+            "suites": ["concurrency"],
+            "discover_models": False,
+            "concurrency_burst_size": 5,
+        },
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+
+    assert result.status == "pass"
+    assert len(result.cases) == 3
+    assert [c.case_id for c in result.cases] == [
+        "concurrency:pre_check_budget",
+        "concurrency:over_budget_burst",
+        "concurrency:post_burst_recovery_and_stats",
+    ]
+    assert all(c.status == "pass" for c in result.cases)
+
+    burst_case = result.cases[1]
+    assert burst_case.detail["max_concurrent_calls"] == 2
+    assert burst_case.detail["burst_size"] == 5
+    assert burst_case.detail["ok_200_count"] == 2
+    assert burst_case.detail["rejected_503_count"] == 3
+    assert burst_case.detail["other_status_count"] == 0
+
+    post_case = result.cases[2]
+    assert post_case.detail["recovery_status_code"] == 200
+    assert post_case.detail["active_calls_after"] == 0
+    assert post_case.detail["rejected_delta"] == 3
+    assert "concurrency_latency_mean_ms" in result.metrics
+
+
+def test_live_stt_contract_suite_alias_and_full_7_suites(tmp_path: Path):
+    """Run all 7 suites (functional + admin/contract + error_handling + concurrency) together."""
+    tester = LiveSTTTester()
+    transport, _ = _create_mock_live_stt_transport(
+        max_concurrent_calls=2,
+        transcribe_hold_sec=0.05,
+    )
+    ctx = TestContext(
+        run_id=604,
+        artifacts_dir=tmp_path / "artifacts_604",
+        emit_stdout=False,
+    )
+
+    result = tester.run(
+        {
+            "_transport": transport,
+            "model_parametrization": "per_engine",
+            "concurrency_burst_size": 4,
+        },
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+
+    assert result.status == "pass"
+    # 15 functional audio cases + 11 admin cases + 15 error_handling cases + 3 concurrency cases = 44 cases
+    assert len(result.cases) == 44
+    assert all(c.status == "pass" for c in result.cases)
+    assert result.metrics["cases_total"]["value"] == 44
+    assert result.metrics["cases_passed"]["value"] == 44
+    assert result.metrics["pass_rate"]["value"] == 100.0
+    assert "admin_latency_mean_ms" in result.metrics
+    assert "error_handling_latency_mean_ms" in result.metrics
+    assert "concurrency_latency_mean_ms" in result.metrics
+
+    report_text = Path(result.artifacts[0].path).read_text(encoding="utf-8")
+    assert "Admin / Contract" in report_text
+    assert "Error Handling" in report_text
+    assert "Concurrency Limits" in report_text
+

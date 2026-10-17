@@ -1,4 +1,4 @@
-"""live-stt HTTP endpoint tester plugin: transcriptions (JSON + SSE), diarization, and TTS."""
+"""live-stt HTTP endpoint tester plugin: transcriptions, diarization, TTS, admin, error handling, and concurrency."""
 
 from __future__ import annotations
 
@@ -27,8 +27,10 @@ from backend.app.testers.live_stt.client import (
 )
 from backend.app.testers.live_stt.fixtures import (
     BUILTIN_AUDIO_FIXTURES,
+    BUILTIN_BAD_AUDIO_FIXTURES,
     BUILTIN_TTS_FIXTURES,
     get_audio_fixture,
+    get_bad_audio_fixture,
 )
 from backend.app.testers.live_stt.metrics import (
     compute_latency_and_rtf_summary,
@@ -37,12 +39,24 @@ from backend.app.testers.live_stt.metrics import (
 )
 from backend.app.testers.live_stt.report import format_live_stt_report
 from backend.app.testers.live_stt.schemas import (
+    SchemaCheckResult,
+    extract_error_message,
+    validate_backends_response,
+    validate_config_response,
+    validate_dashboard_html_response,
     validate_diarization_response,
+    validate_engine_status_response,
+    validate_error_response,
+    validate_health_response,
     validate_models_response,
+    validate_prometheus_metrics_response,
+    validate_settings_response,
+    validate_stats_response,
     validate_transcription_json_response,
     validate_transcription_sse_response,
     validate_transcription_verbose_json_response,
     validate_tts_response,
+    validate_version_response,
 )
 
 
@@ -61,11 +75,23 @@ _SUITE_EXPANSIONS: dict[str, list[str]] = {
     "diarize": ["diarization"],
     "tts": ["tts"],
     "speech": ["tts"],
+    "admin": ["admin"],
+    "models": ["admin"],
+    "stats": ["admin"],
+    "health": ["admin"],
+    "error_handling": ["error_handling"],
+    "errors": ["error_handling"],
+    "error": ["error_handling"],
+    "concurrency": ["concurrency"],
+    "concurrency_limits": ["concurrency"],
+    "admission": ["concurrency"],
+    "contract": ["admin", "error_handling", "concurrency"],
+    "admin_contract": ["admin", "error_handling", "concurrency"],
 }
 
 
 def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]) -> list[str]:
-    """Normalize suite names and expand shorthand aliases (e.g. 'transcriptions')."""
+    """Normalize suite names and expand shorthand aliases (e.g. 'transcriptions', 'contract')."""
     if not raw_suites:
         return list(available)
     expanded: list[str] = []
@@ -80,24 +106,36 @@ def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]
 
 
 class LiveSTTTester(TesterPlugin):
-    """Tester for live-stt HTTP endpoints:
+    """Tester for live-stt HTTP endpoints and admin/contract verification:
 
     - POST /v1/audio/transcriptions (JSON and verbose_json)
     - POST /v1/audio/transcriptions (stream=true Server-Sent Events)
     - POST /v1/audio/diarization (speaker segments and word-level text alignment)
     - POST /v1/audio/speech (batch WAV/MP3/PCM and chunked streaming TTS)
-    - Per-engine/model discovery and parametrization from GET /v1/models
-    - Latency percentiles and Real-Time Factor (RTF) telemetry
+    - Read-only checks of GET /v1/models, /api/health, /api/stats, /api/version,
+      /api/config, /api/settings, /api/backends, /api/*-engines, /metrics, /dashboard
+      (no mutating calls by default)
+    - Error-path contract tests (bad audio, unknown model, missing fields, status codes & error body shapes)
+    - Concurrency/admission tests (503 when over budget, capacity tracking, slot recovery)
     """
 
     name = "live-stt"
     description = (
-        "Functional and latency tester for live-stt HTTP endpoints: "
+        "Functional, latency, and contract tester for live-stt HTTP endpoints: "
         "POST /v1/audio/transcriptions (JSON + stream=true SSE), "
-        "POST /v1/audio/diarization, and POST /v1/audio/speech (TTS), "
-        "with /v1/models per-engine parametrization, schema validation, and RTF metrics."
+        "POST /v1/audio/diarization, POST /v1/audio/speech (TTS), "
+        "read-only admin/telemetry endpoints (/v1/models, /api/stats, /api/health, /metrics), "
+        "error handling, and concurrency/admission limits."
     )
-    suites = ["transcriptions_json", "transcriptions_sse", "diarization", "tts"]
+    suites = [
+        "transcriptions_json",
+        "transcriptions_sse",
+        "diarization",
+        "tts",
+        "admin",
+        "error_handling",
+        "concurrency",
+    ]
     suite_aliases = set(_SUITE_EXPANSIONS.keys())
 
     config_schema = {
@@ -107,10 +145,26 @@ class LiveSTTTester(TesterPlugin):
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "enum": ["transcriptions_json", "transcriptions_sse", "diarization", "tts"],
+                    "enum": [
+                        "transcriptions_json",
+                        "transcriptions_sse",
+                        "diarization",
+                        "tts",
+                        "admin",
+                        "error_handling",
+                        "concurrency",
+                    ],
                 },
-                "default": ["transcriptions_json", "transcriptions_sse", "diarization", "tts"],
-                "description": "HTTP endpoint test suites to execute",
+                "default": [
+                    "transcriptions_json",
+                    "transcriptions_sse",
+                    "diarization",
+                    "tts",
+                    "admin",
+                    "error_handling",
+                    "concurrency",
+                ],
+                "description": "HTTP endpoint and contract test suites to execute",
             },
             "model_parametrization": {
                 "type": "string",
@@ -125,6 +179,29 @@ class LiveSTTTester(TesterPlugin):
                 "type": "boolean",
                 "default": True,
                 "description": "Query GET /v1/models to discover and parametrize engines and models",
+            },
+            "include_extended_admin": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Include extended read-only admin checks (/api/version, /api/config, /api/settings, "
+                    "/api/backends, /api/diarization-engines, /api/tts-engines, /metrics, /dashboard) "
+                    "in addition to /v1/models, /api/health, and /api/stats"
+                ),
+            },
+            "allow_mutating_admin": {
+                "type": "boolean",
+                "default": False,
+                "description": "Mutating admin calls are strictly disabled by default",
+            },
+            "concurrency_burst_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "description": (
+                    "Optional explicit number of concurrent transcription requests for the concurrency suite; "
+                    "defaults to max_concurrent_calls + 2 discovered from /api/stats or /api/health"
+                ),
             },
             "engines": {
                 "type": "array",
@@ -365,6 +442,8 @@ class LiveSTTTester(TesterPlugin):
             discovered=discovered,
         )
 
+        include_extended_admin = bool(cfg.get("include_extended_admin", True))
+
         # Calculate total planned cases for progress reporting
         planned_cases = 0
         if "transcriptions_json" in suites_to_run:
@@ -376,6 +455,12 @@ class LiveSTTTester(TesterPlugin):
         if "tts" in suites_to_run:
             for tm in tts_models:
                 planned_cases += 2 if tm.supports_streaming else 1
+        if "admin" in suites_to_run:
+            planned_cases += 11 if include_extended_admin else 3
+        if "error_handling" in suites_to_run:
+            planned_cases += 15
+        if "concurrency" in suites_to_run:
+            planned_cases += 3
         planned_cases = max(1, planned_cases)
         completed_cases = 0
 
@@ -397,6 +482,10 @@ class LiveSTTTester(TesterPlugin):
         tts_latencies: list[float] = []
         tts_ttfbs: list[float] = []
         tts_rtfs: list[float] = []
+
+        admin_latencies: list[float] = []
+        error_latencies: list[float] = []
+        concurrency_latencies: list[float] = []
 
         tested_engines: set[str] = set()
         tested_models: set[str] = set()
@@ -1086,6 +1175,60 @@ class LiveSTTTester(TesterPlugin):
                     )
                     ctx.progress(completed_cases, planned_cases, f"Completed {case_id_tts_stream}")
 
+        # -------------------------------------------------------------------
+        # Suite 5: Read-Only Admin & Contract Endpoints (No Mutating Calls)
+        # -------------------------------------------------------------------
+        if "admin" in suites_to_run:
+            completed_cases = self._run_admin_suite(
+                client=client,
+                ctx=ctx,
+                result=result,
+                repetitions=repetitions,
+                include_extended_admin=include_extended_admin,
+                all_latencies_ms=all_latencies_ms,
+                admin_latencies=admin_latencies,
+                completed_cases=completed_cases,
+                planned_cases=planned_cases,
+            )
+
+        # -------------------------------------------------------------------
+        # Suite 6: Error-Path Contract Tests (Bad Audio, Unknown Model, Missing Fields)
+        # -------------------------------------------------------------------
+        if "error_handling" in suites_to_run:
+            default_asr_id = asr_models[0].id if asr_models else DEFAULT_ASR_MODEL.id
+            default_diar_id = diar_models[0].id if diar_models else DEFAULT_DIARIZATION_MODEL.id
+            default_tts_id = tts_models[0].id if tts_models else DEFAULT_TTS_MODEL.id
+            completed_cases = self._run_error_handling_suite(
+                client=client,
+                ctx=ctx,
+                result=result,
+                asr_model_id=default_asr_id,
+                diar_model_id=default_diar_id,
+                tts_model_id=default_tts_id,
+                all_latencies_ms=all_latencies_ms,
+                error_latencies=error_latencies,
+                completed_cases=completed_cases,
+                planned_cases=planned_cases,
+            )
+
+        # -------------------------------------------------------------------
+        # Suite 7: Concurrency & Admission Budget Behavior (503 Over Budget)
+        # -------------------------------------------------------------------
+        if "concurrency" in suites_to_run:
+            default_asr_id = asr_models[0].id if asr_models else DEFAULT_ASR_MODEL.id
+            completed_cases = self._run_concurrency_suite(
+                client=client,
+                ctx=ctx,
+                result=result,
+                cfg=cfg,
+                asr_model_id=default_asr_id,
+                language=language,
+                all_latencies_ms=all_latencies_ms,
+                concurrency_latencies=concurrency_latencies,
+                completed_cases=completed_cases,
+                planned_cases=planned_cases,
+            )
+
         total_wall_ms = round((time.perf_counter() - t_run_start) * 1000.0, 2)
 
         # -------------------------------------------------------------------
@@ -1225,6 +1368,51 @@ class LiveSTTTester(TesterPlugin):
                     better="lower",
                 )
 
+        if admin_latencies:
+            adm_pct = compute_percentiles(admin_latencies)
+            result.set_metric(
+                "admin_latency_mean_ms",
+                round(float(statistics.mean(admin_latencies)), 2),
+                unit="ms",
+                better="lower",
+            )
+            result.set_metric(
+                "admin_latency_p95_ms",
+                adm_pct[95],
+                unit="ms",
+                better="lower",
+            )
+
+        if error_latencies:
+            err_pct = compute_percentiles(error_latencies)
+            result.set_metric(
+                "error_handling_latency_mean_ms",
+                round(float(statistics.mean(error_latencies)), 2),
+                unit="ms",
+                better="lower",
+            )
+            result.set_metric(
+                "error_handling_latency_p95_ms",
+                err_pct[95],
+                unit="ms",
+                better="lower",
+            )
+
+        if concurrency_latencies:
+            conc_pct = compute_percentiles(concurrency_latencies)
+            result.set_metric(
+                "concurrency_latency_mean_ms",
+                round(float(statistics.mean(concurrency_latencies)), 2),
+                unit="ms",
+                better="lower",
+            )
+            result.set_metric(
+                "concurrency_latency_p95_ms",
+                conc_pct[95],
+                unit="ms",
+                better="lower",
+            )
+
         discovered_count = discovered.total_count if discovered else 0
         result.set_metric("models_discovered", discovered_count, unit="models", better="higher")
         result.set_metric("engines_tested", len(tested_engines), unit="engines", better="higher")
@@ -1286,3 +1474,896 @@ class LiveSTTTester(TesterPlugin):
 
         ctx.log(f"live-stt HTTP test finished with status: {result.status.upper()}")
         return result
+
+    def _run_admin_suite(
+        self,
+        client: LiveSTTHTTPClient,
+        ctx: TestContext,
+        result: TesterResult,
+        repetitions: int,
+        include_extended_admin: bool,
+        all_latencies_ms: list[float],
+        admin_latencies: list[float],
+        completed_cases: int,
+        planned_cases: int,
+    ) -> int:
+        """Execute read-only GET checks against /v1/models, /api/health, /api/stats, and admin endpoints."""
+        admin_specs: list[tuple[str, str, Any, Any]] = [
+            (
+                "admin:v1_models",
+                "/v1/models",
+                client.get_models_endpoint,
+                lambda r: validate_models_response(
+                    r.body,
+                    status_code=r.status_code,
+                    content_type=r.content_type,
+                    strict_catalog=True,
+                ),
+            ),
+            (
+                "admin:api_health",
+                "/api/health",
+                client.get_health,
+                lambda r: validate_health_response(
+                    r.body,
+                    status_code=r.status_code,
+                    content_type=r.content_type,
+                ),
+            ),
+            (
+                "admin:api_stats",
+                "/api/stats",
+                client.get_stats,
+                lambda r: validate_stats_response(
+                    r.body,
+                    status_code=r.status_code,
+                    content_type=r.content_type,
+                ),
+            ),
+        ]
+
+        if include_extended_admin:
+            admin_specs.extend([
+                (
+                    "admin:api_version",
+                    "/api/version",
+                    client.get_version,
+                    lambda r: validate_version_response(
+                        r.body,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                    ),
+                ),
+                (
+                    "admin:api_config",
+                    "/api/config",
+                    client.get_config,
+                    lambda r: validate_config_response(
+                        r.body,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                    ),
+                ),
+                (
+                    "admin:api_settings",
+                    "/api/settings",
+                    client.get_settings,
+                    lambda r: validate_settings_response(
+                        r.body,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                    ),
+                ),
+                (
+                    "admin:api_backends",
+                    "/api/backends",
+                    client.get_backends,
+                    lambda r: validate_backends_response(
+                        r.body,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                    ),
+                ),
+                (
+                    "admin:api_diarization_engines",
+                    "/api/diarization-engines",
+                    client.get_diarization_engines,
+                    lambda r: validate_engine_status_response(
+                        r.body,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                        expected_engines=("pyannote", "nemo_sortformer"),
+                    ),
+                ),
+                (
+                    "admin:api_tts_engines",
+                    "/api/tts-engines",
+                    client.get_tts_engines,
+                    lambda r: validate_engine_status_response(
+                        r.body,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                        expected_engines=("kokoro", "piper"),
+                    ),
+                ),
+                (
+                    "admin:metrics",
+                    "/metrics",
+                    client.get_metrics,
+                    lambda r: validate_prometheus_metrics_response(
+                        r.raw_text,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                    ),
+                ),
+                (
+                    "admin:dashboard",
+                    "/dashboard",
+                    client.get_dashboard,
+                    lambda r: validate_dashboard_html_response(
+                        r.raw_text,
+                        status_code=r.status_code,
+                        content_type=r.content_type,
+                    ),
+                ),
+            ])
+
+        for case_id, endpoint_path, fetch_fn, validator_fn in admin_specs:
+            ctx.check_cancelled()
+            ctx.log(f"Running [{completed_cases + 1}/{planned_cases}] {case_id} (GET {endpoint_path}, read-only)...")
+
+            lats: list[float] = []
+            last_res = None
+            for _ in range(repetitions):
+                ctx.check_cancelled()
+                try:
+                    res = fetch_fn()
+                except LiveSTTClientError as e:
+                    ctx.log(f"Error calling GET {endpoint_path}: {e}", level="error")
+                    raise TesterError(f"live-stt API error: {e}") from e
+                last_res = res
+                lats.append(res.latency_ms)
+                all_latencies_ms.append(res.latency_ms)
+                admin_latencies.append(res.latency_ms)
+
+            assert last_res is not None
+            schema_res: SchemaCheckResult = validator_fn(last_res)
+            case_status = "pass" if schema_res.valid else "fail"
+            mean_lat = round(float(statistics.mean(lats)), 2)
+
+            case_metrics: dict[str, Any] = {
+                "latency_ms": {"value": mean_lat, "unit": "ms", "better": "lower"},
+                "status_code": {"value": last_res.status_code, "unit": "code"},
+            }
+            if endpoint_path == "/v1/models" and isinstance(last_res.body, dict):
+                data_list = last_res.body.get("data")
+                if isinstance(data_list, list):
+                    case_metrics["models_count"] = {"value": len(data_list), "unit": "models"}
+            elif endpoint_path == "/api/health" and isinstance(last_res.body, dict):
+                cap = last_res.body.get("capacity")
+                if isinstance(cap, dict):
+                    if isinstance(cap.get("used"), int):
+                        case_metrics["capacity_used"] = {"value": cap["used"], "unit": "slots"}
+                    if isinstance(cap.get("total"), int):
+                        case_metrics["capacity_total"] = {"value": cap["total"], "unit": "slots"}
+            elif endpoint_path == "/api/stats" and isinstance(last_res.body, dict):
+                if isinstance(last_res.body.get("active_calls"), int):
+                    case_metrics["active_calls"] = {"value": last_res.body["active_calls"], "unit": "calls"}
+                if isinstance(last_res.body.get("max_concurrent_calls"), int):
+                    case_metrics["max_concurrent_calls"] = {
+                        "value": last_res.body["max_concurrent_calls"],
+                        "unit": "calls",
+                    }
+
+            result.add_case(
+                case_id=case_id,
+                suite="admin",
+                status=case_status,
+                metrics=case_metrics,
+                detail={
+                    "endpoint": endpoint_path,
+                    "method": "GET",
+                    "read_only": True,
+                    "mutating": False,
+                    "status_code": last_res.status_code,
+                    "content_type": last_res.content_type,
+                    "response_body": last_res.body if last_res.body is not None else last_res.raw_text[:500],
+                    "passed": schema_res.valid,
+                    "eval_message": schema_res.summary_message,
+                    "checks": schema_res.checks,
+                    "errors": schema_res.errors,
+                },
+            )
+            completed_cases += 1
+            ctx.log(
+                f"  {case_id} -> {case_status.upper()} | "
+                f"HTTP {last_res.status_code}, Latency={mean_lat:.2f}ms | {schema_res.summary_message}"
+            )
+            ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+
+        return completed_cases
+
+    def _run_error_handling_suite(
+        self,
+        client: LiveSTTHTTPClient,
+        ctx: TestContext,
+        result: TesterResult,
+        asr_model_id: str,
+        diar_model_id: str,
+        tts_model_id: str,
+        all_latencies_ms: list[float],
+        error_latencies: list[float],
+        completed_cases: int,
+        planned_cases: int,
+    ) -> int:
+        """Execute error-path contract checks: missing fields, bad audio, unknown models, invalid params, and 404."""
+        valid_wav = get_audio_fixture("short_speech").wav_bytes
+        corrupt_wav = get_bad_audio_fixture("corrupt_non_wav").wav_bytes
+        wav_8khz = get_bad_audio_fixture("wrong_sample_rate_8khz").wav_bytes
+        wav_stereo = get_bad_audio_fixture("stereo_2ch_wav").wav_bytes
+        wav_8bit = get_bad_audio_fixture("wrong_bit_depth_8bit").wav_bytes
+
+        error_specs: list[tuple[str, str, str, str, Any, int, str, str | None]] = [
+            # 1-3: Missing required fields
+            (
+                "error_handling:transcriptions:missing_file",
+                "/v1/audio/transcriptions",
+                "POST",
+                "Missing 'file' multipart field in /v1/audio/transcriptions",
+                lambda: client.post_multipart_raw(
+                    "/v1/audio/transcriptions",
+                    fields={"model": asr_model_id, "response_format": "json"},
+                    files=None,
+                ),
+                400,
+                "nested",
+                "file",
+            ),
+            (
+                "error_handling:diarization:missing_file",
+                "/v1/audio/diarization",
+                "POST",
+                "Missing 'file' multipart field in /v1/audio/diarization",
+                lambda: client.post_multipart_raw(
+                    "/v1/audio/diarization",
+                    fields={"model": diar_model_id},
+                    files=None,
+                ),
+                400,
+                "nested",
+                "file",
+            ),
+            (
+                "error_handling:tts:missing_input",
+                "/v1/audio/speech",
+                "POST",
+                "Missing or empty 'input' text field in /v1/audio/speech",
+                lambda: client.post_json_raw(
+                    "/v1/audio/speech",
+                    {"model": tts_model_id, "input": "   "},
+                ),
+                400,
+                "any",
+                "input",
+            ),
+            # 4-8: Bad audio (corrupt non-WAV, 8kHz, stereo, 8-bit)
+            (
+                "error_handling:transcriptions:bad_audio_corrupt_non_wav",
+                "/v1/audio/transcriptions",
+                "POST",
+                "Corrupt non-WAV bytes sent to /v1/audio/transcriptions",
+                lambda: client.transcribe_json(
+                    wav_bytes=corrupt_wav,
+                    model=asr_model_id,
+                    response_format="json",
+                    filename="corrupt.wav",
+                ),
+                400,
+                "nested",
+                "WAV",
+            ),
+            (
+                "error_handling:transcriptions:bad_audio_wrong_sample_rate_8khz",
+                "/v1/audio/transcriptions",
+                "POST",
+                "8kHz WAV sent to /v1/audio/transcriptions (16kHz required)",
+                lambda: client.transcribe_json(
+                    wav_bytes=wav_8khz,
+                    model=asr_model_id,
+                    response_format="json",
+                    filename="8khz.wav",
+                ),
+                400,
+                "nested",
+                "16kHz",
+            ),
+            (
+                "error_handling:transcriptions:bad_audio_stereo_2ch_wav",
+                "/v1/audio/transcriptions",
+                "POST",
+                "Stereo 2-channel WAV sent to /v1/audio/transcriptions (mono required)",
+                lambda: client.transcribe_json(
+                    wav_bytes=wav_stereo,
+                    model=asr_model_id,
+                    response_format="json",
+                    filename="stereo.wav",
+                ),
+                400,
+                "nested",
+                "mono",
+            ),
+            (
+                "error_handling:transcriptions:bad_audio_wrong_bit_depth_8bit",
+                "/v1/audio/transcriptions",
+                "POST",
+                "8-bit unsigned PCM WAV sent to /v1/audio/transcriptions (16-bit required)",
+                lambda: client.transcribe_json(
+                    wav_bytes=wav_8bit,
+                    model=asr_model_id,
+                    response_format="json",
+                    filename="8bit.wav",
+                ),
+                400,
+                "nested",
+                "16-bit",
+            ),
+            (
+                "error_handling:diarization:bad_audio_corrupt_non_wav",
+                "/v1/audio/diarization",
+                "POST",
+                "Corrupt non-WAV bytes sent to /v1/audio/diarization",
+                lambda: client.diarize(
+                    wav_bytes=corrupt_wav,
+                    model=diar_model_id,
+                    filename="corrupt.wav",
+                ),
+                400,
+                "nested",
+                "WAV",
+            ),
+            # 9-11: Unknown models across ASR, Diarization, and TTS
+            (
+                "error_handling:transcriptions:unknown_model",
+                "/v1/audio/transcriptions",
+                "POST",
+                "Unknown ASR model ID in /v1/audio/transcriptions",
+                lambda: client.transcribe_json(
+                    wav_bytes=valid_wav,
+                    model="unknown-asr-model-xyz",
+                    response_format="json",
+                ),
+                400,
+                "nested",
+                "unknown",
+            ),
+            (
+                "error_handling:diarization:unknown_model",
+                "/v1/audio/diarization",
+                "POST",
+                "Unknown diarization model ID in /v1/audio/diarization",
+                lambda: client.diarize(
+                    wav_bytes=valid_wav,
+                    model="unknown-diarization-model-xyz",
+                ),
+                400,
+                "nested",
+                "unknown",
+            ),
+            (
+                "error_handling:tts:unknown_model",
+                "/v1/audio/speech",
+                "POST",
+                "Unknown TTS model ID in /v1/audio/speech",
+                lambda: client.post_json_raw(
+                    "/v1/audio/speech",
+                    {"model": "unknown-tts-model-xyz", "input": "Hello world"},
+                ),
+                400,
+                "any",
+                "unknown",
+            ),
+            # 12-15: Invalid parameters & 404 route
+            (
+                "error_handling:transcriptions:unsupported_response_format",
+                "/v1/audio/transcriptions",
+                "POST",
+                "Unsupported response_format='srt' in /v1/audio/transcriptions",
+                lambda: client.transcribe_json(
+                    wav_bytes=valid_wav,
+                    model=asr_model_id,
+                    response_format="srt",
+                ),
+                400,
+                "nested",
+                "response_format",
+            ),
+            (
+                "error_handling:diarization:invalid_words_json",
+                "/v1/audio/diarization",
+                "POST",
+                "Malformed 'words' JSON in /v1/audio/diarization",
+                lambda: client.post_multipart_raw(
+                    "/v1/audio/diarization",
+                    fields={"model": diar_model_id, "words": "{not-valid-json"},
+                    files={"file": ("fixture.wav", valid_wav, "audio/wav")},
+                ),
+                400,
+                "nested",
+                "words",
+            ),
+            (
+                "error_handling:diarization:invalid_num_speakers",
+                "/v1/audio/diarization",
+                "POST",
+                "Non-integer 'num_speakers' field in /v1/audio/diarization",
+                lambda: client.post_multipart_raw(
+                    "/v1/audio/diarization",
+                    fields={"model": diar_model_id, "num_speakers": "not_an_integer"},
+                    files={"file": ("fixture.wav", valid_wav, "audio/wav")},
+                ),
+                400,
+                "nested",
+                "num_speakers",
+            ),
+            (
+                "error_handling:admin:unknown_route_404",
+                "/api/nonexistent-contract-route",
+                "GET",
+                "Unknown route returns HTTP 404 with JSON error body",
+                lambda: client.get_endpoint("/api/nonexistent-contract-route"),
+                404,
+                "any",
+                "not found",
+            ),
+        ]
+
+        for (
+            case_id,
+            endpoint_path,
+            method,
+            description,
+            invoke_fn,
+            expected_status,
+            expected_shape,
+            expected_sub,
+        ) in error_specs:
+            ctx.check_cancelled()
+            ctx.log(
+                f"Running [{completed_cases + 1}/{planned_cases}] {case_id} "
+                f"({method} {endpoint_path}, expect HTTP {expected_status})..."
+            )
+            try:
+                res = invoke_fn()
+            except LiveSTTClientError as e:
+                ctx.log(f"Error calling {method} {endpoint_path}: {e}", level="error")
+                raise TesterError(f"live-stt API error: {e}") from e
+
+            all_latencies_ms.append(res.latency_ms)
+            error_latencies.append(res.latency_ms)
+
+            err_schema = validate_error_response(
+                body=res.body,
+                status_code=res.status_code,
+                content_type=res.content_type,
+                expected_status=expected_status,
+                shape=expected_shape,
+                expected_substring=expected_sub,
+            )
+            case_status = "pass" if err_schema.valid else "fail"
+            err_msg = extract_error_message(res.body) or ""
+
+            result.add_case(
+                case_id=case_id,
+                suite="error_handling",
+                status=case_status,
+                metrics={
+                    "latency_ms": {"value": res.latency_ms, "unit": "ms", "better": "lower"},
+                    "status_code": {"value": res.status_code, "unit": "code"},
+                    "expected_status_code": {"value": expected_status, "unit": "code"},
+                },
+                detail={
+                    "endpoint": endpoint_path,
+                    "method": method,
+                    "description": description,
+                    "status_code": res.status_code,
+                    "expected_status_code": expected_status,
+                    "expected_shape": expected_shape,
+                    "expected_substring": expected_sub,
+                    "content_type": res.content_type,
+                    "error_message": err_msg,
+                    "response_body": res.body,
+                    "passed": err_schema.valid,
+                    "eval_message": err_schema.summary_message,
+                    "checks": err_schema.checks,
+                    "errors": err_schema.errors,
+                },
+            )
+            completed_cases += 1
+            ctx.log(
+                f"  {case_id} -> {case_status.upper()} | "
+                f"HTTP {res.status_code} ({err_msg!r}), Latency={res.latency_ms:.2f}ms | "
+                f"{err_schema.summary_message}"
+            )
+            ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+
+        return completed_cases
+
+    def _run_concurrency_suite(
+        self,
+        client: LiveSTTHTTPClient,
+        ctx: TestContext,
+        result: TesterResult,
+        cfg: dict[str, Any],
+        asr_model_id: str,
+        language: str,
+        all_latencies_ms: list[float],
+        concurrency_latencies: list[float],
+        completed_cases: int,
+        planned_cases: int,
+    ) -> int:
+        """Execute concurrency and admission limit tests (503 when over budget, slot release, stats counters)."""
+        short_fix = get_audio_fixture("short_speech")
+
+        # -------------------------------------------------------------------
+        # Case 7a: Pre-check admission budget via GET /api/stats & /api/health
+        # -------------------------------------------------------------------
+        ctx.check_cancelled()
+        case_pre = "concurrency:pre_check_budget"
+        ctx.log(f"Running [{completed_cases + 1}/{planned_cases}] {case_pre} (GET /api/stats & /api/health)...")
+        try:
+            stats_before = client.get_stats()
+            health_before = client.get_health()
+        except LiveSTTClientError as e:
+            ctx.log(f"Error querying pre-burst stats/health: {e}", level="error")
+            raise TesterError(f"live-stt API error: {e}") from e
+
+        pre_lat = round(stats_before.latency_ms + health_before.latency_ms, 2)
+        all_latencies_ms.append(pre_lat)
+        concurrency_latencies.append(pre_lat)
+
+        stats_schema = validate_stats_response(
+            stats_before.body,
+            status_code=stats_before.status_code,
+            content_type=stats_before.content_type,
+        )
+        health_schema = validate_health_response(
+            health_before.body,
+            status_code=health_before.status_code,
+            content_type=health_before.content_type,
+        )
+
+        stats_body = stats_before.body if isinstance(stats_before.body, dict) else {}
+        health_body = health_before.body if isinstance(health_before.body, dict) else {}
+        max_concurrent_calls = int(
+            stats_body.get("max_concurrent_calls")
+            or (health_body.get("capacity", {}) if isinstance(health_body.get("capacity"), dict) else {}).get("total")
+            or 2
+        )
+        trans_before = stats_body.get("transcribe") if isinstance(stats_body.get("transcribe"), dict) else {}
+        rej_cap_before = int(trans_before.get("rejected_capacity_total", 0) or 0)
+        rej_vram_before = int(trans_before.get("rejected_vram_total", 0) or 0)
+
+        pre_checks = stats_schema.checks + health_schema.checks
+        pre_errors = stats_schema.errors + health_schema.errors
+        pre_valid = len(pre_errors) == 0
+        pre_status = "pass" if pre_valid else "fail"
+
+        result.add_case(
+            case_id=case_pre,
+            suite="concurrency",
+            status=pre_status,
+            metrics={
+                "latency_ms": {"value": pre_lat, "unit": "ms", "better": "lower"},
+                "max_concurrent_calls": {"value": max_concurrent_calls, "unit": "calls"},
+                "rejected_capacity_before": {"value": rej_cap_before, "unit": "calls"},
+            },
+            detail={
+                "endpoint": "/api/stats + /api/health",
+                "method": "GET",
+                "max_concurrent_calls": max_concurrent_calls,
+                "rejected_capacity_before": rej_cap_before,
+                "rejected_vram_before": rej_vram_before,
+                "stats_body": stats_before.body,
+                "health_body": health_before.body,
+                "passed": pre_valid,
+                "eval_message": (
+                    f"Budget max_concurrent_calls={max_concurrent_calls} verified"
+                    if pre_valid
+                    else "; ".join(pre_errors)
+                ),
+                "checks": pre_checks,
+                "errors": pre_errors,
+            },
+        )
+        completed_cases += 1
+        ctx.log(
+            f"  {case_pre} -> {pre_status.upper()} | "
+            f"max_concurrent_calls={max_concurrent_calls}, Latency={pre_lat:.2f}ms"
+        )
+        ctx.progress(completed_cases, planned_cases, f"Completed {case_pre}")
+
+        # -------------------------------------------------------------------
+        # Case 7b: Concurrent burst over budget -> 503 admission rejection
+        # -------------------------------------------------------------------
+        ctx.check_cancelled()
+        burst_size = int(cfg.get("concurrency_burst_size") or (max_concurrent_calls + 2))
+        case_burst = "concurrency:over_budget_burst"
+        ctx.log(
+            f"Running [{completed_cases + 1}/{planned_cases}] {case_burst} "
+            f"(launching {burst_size} concurrent POST /v1/audio/transcriptions vs budget={max_concurrent_calls})..."
+        )
+        try:
+            burst_res = client.run_concurrent_transcriptions(
+                wav_bytes=short_fix.wav_bytes,
+                model=asr_model_id,
+                concurrency=burst_size,
+                response_format="json",
+                language=language,
+            )
+        except LiveSTTClientError as e:
+            ctx.log(f"Error during concurrent transcription burst: {e}", level="error")
+            raise TesterError(f"live-stt API error: {e}") from e
+
+        all_latencies_ms.append(burst_res.wall_ms)
+        concurrency_latencies.append(burst_res.wall_ms)
+
+        burst_checks: list[dict[str, Any]] = []
+        burst_errors: list[str] = []
+
+        only_200_503 = burst_res.other_status_count == 0
+        burst_checks.append({
+            "name": "only_200_or_503_statuses",
+            "passed": only_200_503,
+            "detail": (
+                f"200={burst_res.ok_200_count}, 503={burst_res.rejected_503_count}, "
+                f"other={burst_res.other_status_count}"
+            ),
+        })
+        if not only_200_503:
+            burst_errors.append(
+                f"only_200_or_503_statuses: got {burst_res.other_status_count} unexpected status code(s)"
+            )
+
+        has_admitted = burst_res.ok_200_count >= 1
+        burst_checks.append({
+            "name": "at_least_one_request_admitted_200",
+            "passed": has_admitted,
+            "detail": f"Admitted {burst_res.ok_200_count}/{burst_res.total_requests} requests with HTTP 200",
+        })
+        if not has_admitted:
+            burst_errors.append("at_least_one_request_admitted_200: 0 requests succeeded with HTTP 200")
+
+        ok_responses = [r for r in burst_res.responses if r.status_code == 200]
+        ok_schemas_valid = all(
+            validate_transcription_json_response(r.body, r.content_type, r.status_code).valid
+            for r in ok_responses
+        )
+        burst_checks.append({
+            "name": "admitted_200_responses_valid_schema",
+            "passed": ok_schemas_valid,
+            "detail": f"Validated {len(ok_responses)} HTTP 200 response(s)",
+        })
+        if not ok_schemas_valid:
+            burst_errors.append("admitted_200_responses_valid_schema: one or more 200 responses failed schema check")
+
+        if burst_size > max_concurrent_calls:
+            saw_503 = burst_res.rejected_503_count >= 1
+            burst_checks.append({
+                "name": "over_budget_requests_rejected_503",
+                "passed": saw_503,
+                "detail": (
+                    f"Rejected {burst_res.rejected_503_count} over-budget request(s) with HTTP 503 "
+                    f"(burst={burst_size}, max_concurrent_calls={max_concurrent_calls})"
+                ),
+            })
+            if not saw_503:
+                burst_errors.append(
+                    f"over_budget_requests_rejected_503: expected >=1 HTTP 503 when burst={burst_size} > "
+                    f"max_concurrent_calls={max_concurrent_calls}, got 0"
+                )
+
+        rej_responses = [r for r in burst_res.responses if r.status_code == 503]
+        if rej_responses:
+            rej_schemas = [
+                validate_error_response(
+                    body=r.body,
+                    status_code=r.status_code,
+                    content_type=r.content_type,
+                    expected_status=503,
+                    shape="nested",
+                )
+                for r in rej_responses
+            ]
+            all_503_valid = all(s.valid for s in rej_schemas)
+            sample_503_msg = extract_error_message(rej_responses[0].body) or ""
+            msg_matches_admission = any(
+                token in sample_503_msg.lower()
+                for token in ("capacity", "vram", "draining", "busy", "limit")
+            )
+            burst_checks.append({
+                "name": "rejected_503_error_body_contract",
+                "passed": all_503_valid and msg_matches_admission,
+                "detail": f"503 error.message={sample_503_msg!r}",
+            })
+            if not (all_503_valid and msg_matches_admission):
+                burst_errors.append(
+                    f"rejected_503_error_body_contract: invalid 503 body or unexpected message {sample_503_msg!r}"
+                )
+
+        burst_valid = len(burst_errors) == 0
+        burst_status = "pass" if burst_valid else "fail"
+        result.add_case(
+            case_id=case_burst,
+            suite="concurrency",
+            status=burst_status,
+            metrics={
+                "latency_ms": {"value": burst_res.wall_ms, "unit": "ms", "better": "lower"},
+                "burst_size": {"value": burst_res.total_requests, "unit": "requests"},
+                "admitted_200_count": {"value": burst_res.ok_200_count, "unit": "requests"},
+                "rejected_503_count": {"value": burst_res.rejected_503_count, "unit": "requests"},
+            },
+            detail={
+                "endpoint": "/v1/audio/transcriptions",
+                "method": "POST",
+                "model": asr_model_id,
+                "max_concurrent_calls": max_concurrent_calls,
+                "burst_size": burst_res.total_requests,
+                "ok_200_count": burst_res.ok_200_count,
+                "rejected_503_count": burst_res.rejected_503_count,
+                "other_status_count": burst_res.other_status_count,
+                "passed": burst_valid,
+                "eval_message": (
+                    f"Burst {burst_res.total_requests} reqs -> {burst_res.ok_200_count} HTTP 200, "
+                    f"{burst_res.rejected_503_count} HTTP 503"
+                    if burst_valid
+                    else "; ".join(burst_errors)
+                ),
+                "checks": burst_checks,
+                "errors": burst_errors,
+            },
+        )
+        completed_cases += 1
+        ctx.log(
+            f"  {case_burst} -> {burst_status.upper()} | "
+            f"200={burst_res.ok_200_count}, 503={burst_res.rejected_503_count}, Wall={burst_res.wall_ms:.2f}ms"
+        )
+        ctx.progress(completed_cases, planned_cases, f"Completed {case_burst}")
+
+        # -------------------------------------------------------------------
+        # Case 7c: Post-burst slot release recovery & /api/stats rejection counter
+        # -------------------------------------------------------------------
+        ctx.check_cancelled()
+        case_post = "concurrency:post_burst_recovery_and_stats"
+        ctx.log(
+            f"Running [{completed_cases + 1}/{planned_cases}] {case_post} "
+            "(verifying slot release and /api/stats rejection telemetry)..."
+        )
+        try:
+            rec_res = client.transcribe_json(
+                wav_bytes=short_fix.wav_bytes,
+                model=asr_model_id,
+                response_format="json",
+                language=language,
+                filename="recovery.wav",
+            )
+            stats_after = client.get_stats()
+            health_after = client.get_health()
+        except LiveSTTClientError as e:
+            ctx.log(f"Error during post-burst recovery check: {e}", level="error")
+            raise TesterError(f"live-stt API error: {e}") from e
+
+        post_lat = round(rec_res.latency_ms + stats_after.latency_ms + health_after.latency_ms, 2)
+        all_latencies_ms.append(post_lat)
+        concurrency_latencies.append(post_lat)
+
+        post_checks: list[dict[str, Any]] = []
+        post_errors: list[str] = []
+
+        rec_schema = validate_transcription_json_response(
+            rec_res.body,
+            rec_res.content_type,
+            rec_res.status_code,
+        )
+        post_checks.append({
+            "name": "recovery_transcription_200",
+            "passed": rec_schema.valid,
+            "detail": f"HTTP {rec_res.status_code}, {rec_schema.summary_message}",
+        })
+        if not rec_schema.valid:
+            post_errors.append(f"recovery_transcription_200: {rec_schema.summary_message}")
+
+        stats_after_body = stats_after.body if isinstance(stats_after.body, dict) else {}
+        health_after_body = health_after.body if isinstance(health_after.body, dict) else {}
+        active_after = stats_after_body.get("active_calls")
+        trans_after = (
+            stats_after_body.get("transcribe")
+            if isinstance(stats_after_body.get("transcribe"), dict)
+            else {}
+        )
+        trans_active_after = trans_after.get("active")
+        slots_released = active_after == 0 and trans_active_after == 0
+        post_checks.append({
+            "name": "active_calls_released_to_zero",
+            "passed": slots_released,
+            "detail": f"active_calls={active_after!r}, transcribe.active={trans_active_after!r}",
+        })
+        if not slots_released:
+            post_errors.append(
+                f"active_calls_released_to_zero: expected 0 active calls after burst, "
+                f"got active_calls={active_after!r}, transcribe.active={trans_active_after!r}"
+            )
+
+        cap_after = (
+            health_after_body.get("capacity")
+            if isinstance(health_after_body.get("capacity"), dict)
+            else {}
+        )
+        health_admitting = (
+            health_after.status_code == 200
+            and health_after_body.get("status") == "ok"
+            and cap_after.get("admitting") is True
+        )
+        post_checks.append({
+            "name": "health_status_ok_and_admitting",
+            "passed": health_admitting,
+            "detail": f"HTTP {health_after.status_code}, status={health_after_body.get('status')!r}, capacity={cap_after!r}",
+        })
+        if not health_admitting:
+            post_errors.append("health_status_ok_and_admitting: /api/health not ok or not admitting after burst")
+
+        rej_cap_after = int(trans_after.get("rejected_capacity_total", 0) or 0)
+        rej_vram_after = int(trans_after.get("rejected_vram_total", 0) or 0)
+        total_rej_delta = (rej_cap_after + rej_vram_after) - (rej_cap_before + rej_vram_before)
+        if burst_res.rejected_503_count > 0:
+            counter_incremented = total_rej_delta >= burst_res.rejected_503_count
+            post_checks.append({
+                "name": "stats_rejection_counter_incremented",
+                "passed": counter_incremented,
+                "detail": (
+                    f"Rejection counter delta={total_rej_delta} "
+                    f"(expected >={burst_res.rejected_503_count})"
+                ),
+            })
+            if not counter_incremented:
+                post_errors.append(
+                    f"stats_rejection_counter_incremented: delta={total_rej_delta} < "
+                    f"rejected_503_count={burst_res.rejected_503_count}"
+                )
+
+        post_valid = len(post_errors) == 0
+        post_status = "pass" if post_valid else "fail"
+        result.add_case(
+            case_id=case_post,
+            suite="concurrency",
+            status=post_status,
+            metrics={
+                "latency_ms": {"value": post_lat, "unit": "ms", "better": "lower"},
+                "active_calls_after": {"value": int(active_after or 0), "unit": "calls", "better": "lower"},
+                "rejected_delta": {"value": total_rej_delta, "unit": "calls"},
+            },
+            detail={
+                "endpoint": "/v1/audio/transcriptions + /api/stats + /api/health",
+                "recovery_status_code": rec_res.status_code,
+                "active_calls_after": active_after,
+                "rejected_capacity_before": rej_cap_before,
+                "rejected_capacity_after": rej_cap_after,
+                "rejected_delta": total_rej_delta,
+                "passed": post_valid,
+                "eval_message": (
+                    f"Post-burst recovery HTTP 200, active_calls=0, rejected_delta={total_rej_delta}"
+                    if post_valid
+                    else "; ".join(post_errors)
+                ),
+                "checks": post_checks,
+                "errors": post_errors,
+            },
+        )
+        completed_cases += 1
+        ctx.log(
+            f"  {case_post} -> {post_status.upper()} | "
+            f"active_calls={active_after}, rejected_delta={total_rej_delta}, Latency={post_lat:.2f}ms"
+        )
+        ctx.progress(completed_cases, planned_cases, f"Completed {case_post}")
+
+        return completed_cases
+

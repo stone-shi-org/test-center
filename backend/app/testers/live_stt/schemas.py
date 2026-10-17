@@ -34,10 +34,31 @@ def _record_check(
         errors.append(f"{name}: {detail}")
 
 
-def validate_models_response(body: Any) -> SchemaCheckResult:
+def validate_models_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+    strict_catalog: bool = False,
+) -> SchemaCheckResult:
     """Validate GET /v1/models OpenAI-style model catalog response."""
     checks: list[dict[str, Any]] = []
     errors: list[str] = []
+
+    if strict_catalog or status_code != 200:
+        _record_check(
+            checks,
+            errors,
+            "http_status_200",
+            status_code == 200,
+            f"HTTP status {status_code}",
+        )
+        _record_check(
+            checks,
+            errors,
+            "content_type_json",
+            "application/json" in (content_type or "").lower(),
+            f"Content-Type={content_type!r}",
+        )
 
     is_dict = isinstance(body, dict)
     _record_check(
@@ -70,14 +91,78 @@ def validate_models_response(body: Any) -> SchemaCheckResult:
     )
 
     if isinstance(data, list):
-        all_have_id = all(isinstance(item, dict) and isinstance(item.get("id"), str) and bool(item["id"].strip()) for item in data)
+        all_have_id = all(
+            isinstance(item, dict) and isinstance(item.get("id"), str) and bool(item["id"].strip())
+            for item in data
+        )
         _record_check(
             checks,
             errors,
             "items_have_valid_id",
             all_have_id,
-            "All model entries have non-empty string 'id'" if all_have_id else "One or more model entries missing valid 'id'",
+            "All model entries have non-empty string 'id'"
+            if all_have_id
+            else "One or more model entries missing valid 'id'",
         )
+
+        if strict_catalog and len(data) > 0:
+            all_have_obj = all(
+                isinstance(item, dict) and item.get("object") == "model"
+                for item in data
+            )
+            _record_check(
+                checks,
+                errors,
+                "items_have_model_object",
+                all_have_obj,
+                "All model entries have object='model'"
+                if all_have_obj
+                else "One or more model entries missing object='model'",
+            )
+
+            valid_types = {"asr", "diarization", "tts"}
+            all_have_type = all(
+                isinstance(item, dict) and item.get("type") in valid_types
+                for item in data
+            )
+            _record_check(
+                checks,
+                errors,
+                "items_have_valid_type",
+                all_have_type,
+                "All model entries have type in {'asr', 'diarization', 'tts'}"
+                if all_have_type
+                else "One or more model entries missing valid 'type'",
+            )
+
+            asr_items = [
+                item for item in data
+                if isinstance(item, dict) and item.get("type") == "asr"
+            ]
+            has_asr = len(asr_items) > 0
+            _record_check(
+                checks,
+                errors,
+                "catalog_has_asr_models",
+                has_asr,
+                f"Found {len(asr_items)} ASR model(s)",
+            )
+            if has_asr:
+                asr_meta_ok = all(
+                    isinstance(item.get("engine"), str)
+                    and bool(item["engine"].strip())
+                    and isinstance(item.get("default"), bool)
+                    for item in asr_items
+                )
+                _record_check(
+                    checks,
+                    errors,
+                    "asr_models_have_engine_and_default",
+                    asr_meta_ok,
+                    "All ASR models define string 'engine' and boolean 'default'"
+                    if asr_meta_ok
+                    else "One or more ASR models missing 'engine' or boolean 'default'",
+                )
 
     return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
 
@@ -624,3 +709,785 @@ def validate_tts_response(
             duration_sec = round(max(0.05, len(audio_bytes) / float(sr * 2)), 4)
 
     return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors), duration_sec
+
+
+def _is_non_neg_int(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool) and val >= 0
+
+
+def _is_pos_int(val: Any) -> bool:
+    return isinstance(val, int) and not isinstance(val, bool) and val >= 1
+
+
+def _is_opt_int(val: Any) -> bool:
+    return val is None or (isinstance(val, int) and not isinstance(val, bool))
+
+
+def validate_health_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+) -> SchemaCheckResult:
+    """Validate GET /api/health response contract.
+
+    Per live-stt contract:
+    - HTTP 200 when status == 'ok' (even when capacity.used == capacity.total!)
+    - HTTP 503 when status in ('draining', 'degraded')
+    """
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(
+        checks,
+        errors,
+        "http_status_valid",
+        status_code in (200, 503),
+        f"HTTP status {status_code} (expected 200 or 503)",
+    )
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    status_val = body.get("status")
+    status_valid = status_val in ("ok", "draining", "degraded")
+    _record_check(
+        checks,
+        errors,
+        "status_enum_valid",
+        status_valid,
+        f"status={status_val!r}",
+    )
+
+    if status_valid:
+        expected_http = 200 if status_val == "ok" else 503
+        _record_check(
+            checks,
+            errors,
+            "http_status_matches_health_status",
+            status_code == expected_http,
+            f"status={status_val!r} -> HTTP {status_code} (expected {expected_http})",
+        )
+
+    backend_val = body.get("backend")
+    _record_check(
+        checks,
+        errors,
+        "backend_field_string",
+        isinstance(backend_val, str) and len(backend_val.strip()) > 0,
+        f"backend={backend_val!r}",
+    )
+
+    backends = body.get("backends")
+    backends_ok = (
+        isinstance(backends, dict)
+        and all(
+            k in backends and isinstance(backends.get(k), str) and len(backends[k].strip()) > 0
+            for k in ("parakeet", "whisper", "parakeet_tdt")
+        )
+    )
+    _record_check(
+        checks,
+        errors,
+        "backends_map_schema",
+        backends_ok,
+        f"backends={backends!r}",
+    )
+
+    model_val = body.get("model")
+    _record_check(
+        checks,
+        errors,
+        "model_field_string",
+        isinstance(model_val, str) and len(model_val.strip()) > 0,
+        f"model={model_val!r}",
+    )
+
+    capacity = body.get("capacity")
+    cap_ok = (
+        isinstance(capacity, dict)
+        and _is_non_neg_int(capacity.get("used"))
+        and _is_pos_int(capacity.get("total"))
+        and isinstance(capacity.get("admitting"), bool)
+    )
+    _record_check(
+        checks,
+        errors,
+        "capacity_schema",
+        cap_ok,
+        f"capacity={capacity!r}",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_stats_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+) -> SchemaCheckResult:
+    """Validate GET /api/stats detailed runtime telemetry and admission counter response."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(
+        checks,
+        errors,
+        "http_status_200",
+        status_code == 200,
+        f"HTTP status {status_code}",
+    )
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    top_counters_ok = (
+        _is_non_neg_int(body.get("active_calls"))
+        and _is_non_neg_int(body.get("active_workers"))
+        and _is_pos_int(body.get("max_concurrent_calls"))
+        and _is_pos_int(body.get("max_workers"))
+        and isinstance(body.get("draining"), bool)
+    )
+    _record_check(
+        checks,
+        errors,
+        "top_level_concurrency_fields",
+        top_counters_ok,
+        f"active_calls={body.get('active_calls')!r}, max_concurrent_calls={body.get('max_concurrent_calls')!r}, "
+        f"active_workers={body.get('active_workers')!r}, max_workers={body.get('max_workers')!r}, "
+        f"draining={body.get('draining')!r}",
+    )
+
+    gpu = body.get("gpu")
+    gpu_ok = (
+        isinstance(gpu, dict)
+        and _is_non_neg_int(gpu.get("reserve_mb"))
+        and _is_opt_int(gpu.get("free_vram_mb"))
+        and _is_opt_int(gpu.get("total_vram_mb"))
+        and _is_opt_int(gpu.get("used_vram_mb"))
+        and _is_opt_int(gpu.get("utilization_pct"))
+    )
+    _record_check(
+        checks,
+        errors,
+        "gpu_telemetry_schema",
+        gpu_ok,
+        f"gpu={gpu!r}",
+    )
+
+    transcribe = body.get("transcribe")
+    transcribe_ok = (
+        isinstance(transcribe, dict)
+        and _is_non_neg_int(transcribe.get("active"))
+        and _is_non_neg_int(transcribe.get("completed_total"))
+        and _is_non_neg_int(transcribe.get("failed_total"))
+        and _is_non_neg_int(transcribe.get("rejected_vram_total"))
+        and _is_non_neg_int(transcribe.get("rejected_capacity_total"))
+        and isinstance(transcribe.get("active_requests"), list)
+    )
+    _record_check(
+        checks,
+        errors,
+        "transcribe_section_schema",
+        transcribe_ok,
+        f"transcribe={transcribe!r}",
+    )
+
+    diarization = body.get("diarization")
+    diar_ok = (
+        isinstance(diarization, dict)
+        and _is_non_neg_int(diarization.get("active"))
+        and _is_non_neg_int(diarization.get("completed_total"))
+        and _is_non_neg_int(diarization.get("failed_total"))
+        and _is_non_neg_int(diarization.get("rejected_vram_total"))
+        and isinstance(diarization.get("active_requests"), list)
+    )
+    _record_check(
+        checks,
+        errors,
+        "diarization_section_schema",
+        diar_ok,
+        f"diarization={diarization!r}",
+    )
+
+    tts = body.get("tts")
+    tts_ok = (
+        isinstance(tts, dict)
+        and _is_non_neg_int(tts.get("active"))
+        and _is_non_neg_int(tts.get("completed_total"))
+        and _is_non_neg_int(tts.get("failed_total"))
+        and _is_non_neg_int(tts.get("rejected_vram_total"))
+        and _is_non_neg_int(tts.get("rejected_capacity_total"))
+        and isinstance(tts.get("active_requests"), list)
+        and (tts.get("warm_worker") is None or isinstance(tts.get("warm_worker"), dict))
+    )
+    _record_check(
+        checks,
+        errors,
+        "tts_section_schema",
+        tts_ok,
+        f"tts={tts!r}",
+    )
+
+    pool = body.get("stt_worker_pool")
+    pool_ok = (
+        isinstance(pool, dict)
+        and isinstance(pool.get("standby_workers"), list)
+        and _is_non_neg_int(pool.get("standby_count"))
+    )
+    _record_check(
+        checks,
+        errors,
+        "stt_worker_pool_schema",
+        pool_ok,
+        f"stt_worker_pool={pool!r}",
+    )
+
+    warmed = body.get("warmed_workers")
+    _record_check(
+        checks,
+        errors,
+        "warmed_workers_list",
+        isinstance(warmed, list),
+        f"warmed_workers count={len(warmed) if isinstance(warmed, list) else 'N/A'}",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_version_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+) -> SchemaCheckResult:
+    """Validate GET /api/version response contract."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    for key in ("hash", "timestamp", "parakeet_ref", "whisper_ref"):
+        val = body.get(key)
+        _record_check(
+            checks,
+            errors,
+            f"{key}_is_string",
+            isinstance(val, str) and len(val.strip()) > 0,
+            f"{key}={val!r}",
+        )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_config_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+) -> SchemaCheckResult:
+    """Validate GET /api/config read-only runtime settings response."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    _record_check(
+        checks,
+        errors,
+        "max_concurrent_calls_positive_int",
+        _is_pos_int(body.get("max_concurrent_calls")),
+        f"max_concurrent_calls={body.get('max_concurrent_calls')!r}",
+    )
+    _record_check(
+        checks,
+        errors,
+        "default_model_string",
+        isinstance(body.get("default_model"), str) and bool(body["default_model"].strip()),
+        f"default_model={body.get('default_model')!r}",
+    )
+    backends_present = all(
+        isinstance(body.get(k), str) and bool(body[k].strip())
+        for k in ("parakeet_backend", "whisper_backend")
+    )
+    _record_check(
+        checks,
+        errors,
+        "backend_settings_present",
+        backends_present,
+        f"parakeet_backend={body.get('parakeet_backend')!r}, whisper_backend={body.get('whisper_backend')!r}",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_settings_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+) -> SchemaCheckResult:
+    """Validate GET /api/settings read-only settings metadata response."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    settings_obj = body.get("settings")
+    _record_check(
+        checks,
+        errors,
+        "settings_is_object",
+        isinstance(settings_obj, dict) and len(settings_obj) > 0,
+        f"settings keys={len(settings_obj) if isinstance(settings_obj, dict) else 'N/A'}",
+    )
+
+    hot_reload = body.get("hot_reload_fields")
+    _record_check(
+        checks,
+        errors,
+        "hot_reload_fields_list",
+        isinstance(hot_reload, list) and len(hot_reload) > 0 and all(isinstance(x, str) for x in hot_reload),
+        f"hot_reload_fields count={len(hot_reload) if isinstance(hot_reload, list) else 'N/A'}",
+    )
+
+    restart_req = body.get("restart_required_fields")
+    _record_check(
+        checks,
+        errors,
+        "restart_required_fields_list",
+        isinstance(restart_req, list) and len(restart_req) > 0 and all(isinstance(x, str) for x in restart_req),
+        f"restart_required_fields count={len(restart_req) if isinstance(restart_req, list) else 'N/A'}",
+    )
+
+    _record_check(
+        checks,
+        errors,
+        "store_available_bool",
+        isinstance(body.get("store_available"), bool),
+        f"store_available={body.get('store_available')!r}",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_backends_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+) -> SchemaCheckResult:
+    """Validate GET /api/backends read-only backend store status response."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    _record_check(
+        checks,
+        errors,
+        "store_available_bool",
+        isinstance(body.get("store_available"), bool),
+        f"store_available={body.get('store_available')!r}",
+    )
+
+    registered = body.get("registered")
+    reg_ok = (
+        isinstance(registered, list)
+        and len(registered) > 0
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("engine"), str)
+            and isinstance(item.get("device"), str)
+            and isinstance(item.get("name"), str)
+            for item in registered
+        )
+    )
+    _record_check(
+        checks,
+        errors,
+        "registered_backends_list",
+        reg_ok,
+        f"registered count={len(registered) if isinstance(registered, list) else 'N/A'}",
+    )
+
+    installed = body.get("installed")
+    _record_check(
+        checks,
+        errors,
+        "installed_backends_list",
+        isinstance(installed, list),
+        f"installed count={len(installed) if isinstance(installed, list) else 'N/A'}",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_engine_status_response(
+    body: Any,
+    status_code: int = 200,
+    content_type: str = "application/json",
+    expected_engines: tuple[str, ...] | None = None,
+) -> SchemaCheckResult:
+    """Validate GET /api/diarization-engines or GET /api/tts-engines read-only response."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    engines = body.get("engines")
+    engines_ok = (
+        isinstance(engines, dict)
+        and len(engines) > 0
+        and all(
+            isinstance(info, dict) and isinstance(info.get("installed"), bool)
+            for info in engines.values()
+        )
+    )
+    _record_check(
+        checks,
+        errors,
+        "engines_map_schema",
+        engines_ok,
+        f"engines keys={list(engines.keys()) if isinstance(engines, dict) else 'N/A'}",
+    )
+
+    if expected_engines and isinstance(engines, dict):
+        has_expected = all(eng in engines for eng in expected_engines)
+        _record_check(
+            checks,
+            errors,
+            "expected_engines_present",
+            has_expected,
+            f"Found engines={list(engines.keys())} (expected {list(expected_engines)})",
+        )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_prometheus_metrics_response(
+    raw_text: str,
+    status_code: int = 200,
+    content_type: str = "text/plain",
+) -> SchemaCheckResult:
+    """Validate GET /metrics Prometheus text exposition response and label safety."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_text_plain",
+        "text/plain" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    text_str = raw_text if isinstance(raw_text, str) else ""
+    non_empty = len(text_str.strip()) > 0
+    _record_check(
+        checks,
+        errors,
+        "non_empty_metrics_body",
+        non_empty,
+        f"Metrics payload length={len(text_str)} chars",
+    )
+
+    has_help_and_type = "# HELP " in text_str and "# TYPE " in text_str
+    _record_check(
+        checks,
+        errors,
+        "prometheus_help_and_type_headers",
+        has_help_and_type,
+        "Found '# HELP' and '# TYPE' lines" if has_help_and_type else "Missing Prometheus '# HELP' or '# TYPE' headers",
+    )
+
+    required_metrics = (
+        "live_stt_streams_active",
+        "live_stt_transcribe_requests_total",
+        "live_stt_diarization_requests_total",
+        "live_stt_tts_requests_total",
+        "live_stt_admission_rejections_total",
+    )
+    missing_metrics = [m for m in required_metrics if m not in text_str]
+    _record_check(
+        checks,
+        errors,
+        "core_live_stt_metrics_present",
+        len(missing_metrics) == 0,
+        f"All {len(required_metrics)} core live_stt_* metric families present"
+        if not missing_metrics
+        else f"Missing metric families: {missing_metrics}",
+    )
+
+    forbidden_labels = ("stream_id=", "call_id=", "call_ref=")
+    found_forbidden = [lbl for lbl in forbidden_labels if lbl in text_str]
+    _record_check(
+        checks,
+        errors,
+        "no_high_cardinality_pii_labels",
+        len(found_forbidden) == 0,
+        "No forbidden per-stream PII labels found"
+        if not found_forbidden
+        else f"Forbidden high-cardinality labels found: {found_forbidden}",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def validate_dashboard_html_response(
+    raw_text: str,
+    status_code: int = 200,
+    content_type: str = "text/html",
+) -> SchemaCheckResult:
+    """Validate GET /dashboard read-only HTML admin dashboard response."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    _record_check(checks, errors, "http_status_200", status_code == 200, f"HTTP status {status_code}")
+    _record_check(
+        checks,
+        errors,
+        "content_type_html",
+        "text/html" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    text_lower = (raw_text or "").lower()
+    is_html = "<html" in text_lower or "<!doctype html" in text_lower
+    _record_check(
+        checks,
+        errors,
+        "valid_html_document",
+        is_html,
+        f"HTML length={len(raw_text or '')} chars",
+    )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+
+
+def extract_error_message(body: Any) -> str | None:
+    """Extract error message string from either nested {'error': {'message': ...}} or flat {'error': '...'}."""
+    if not isinstance(body, dict):
+        return None
+    err = body.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+    elif isinstance(err, str) and err.strip():
+        return err.strip()
+    return None
+
+
+def validate_error_response(
+    body: Any,
+    status_code: int,
+    content_type: str = "application/json",
+    expected_status: int | tuple[int, ...] = 400,
+    shape: str = "any",  # "nested" | "flat" | "any"
+    expected_substring: str | None = None,
+) -> SchemaCheckResult:
+    """Validate an error HTTP response status code, JSON content-type, error body shape, and message substring."""
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    allowed_statuses = (expected_status,) if isinstance(expected_status, int) else tuple(expected_status)
+    _record_check(
+        checks,
+        errors,
+        "http_status_matches_expected",
+        status_code in allowed_statuses,
+        f"HTTP status {status_code} (expected {allowed_statuses})",
+    )
+    _record_check(
+        checks,
+        errors,
+        "content_type_json",
+        "application/json" in (content_type or "").lower(),
+        f"Content-Type={content_type!r}",
+    )
+
+    is_dict = isinstance(body, dict)
+    _record_check(
+        checks,
+        errors,
+        "body_is_object",
+        is_dict,
+        "Response body is a JSON object" if is_dict else f"Expected dict, got {type(body).__name__}",
+    )
+    if not is_dict:
+        return SchemaCheckResult(valid=False, checks=checks, errors=errors)
+
+    has_error_key = "error" in body
+    _record_check(
+        checks,
+        errors,
+        "has_error_field",
+        has_error_key,
+        "Found top-level 'error' key" if has_error_key else f"Missing 'error' key in {list(body.keys())}",
+    )
+
+    err_val = body.get("error")
+    norm_shape = (shape or "any").strip().lower()
+    if norm_shape == "nested":
+        shape_ok = (
+            isinstance(err_val, dict)
+            and isinstance(err_val.get("message"), str)
+            and bool(err_val["message"].strip())
+        )
+        shape_detail = (
+            f"error.message={err_val.get('message')!r}"
+            if isinstance(err_val, dict)
+            else f"Expected nested dict {'{message: str}'}, got {type(err_val).__name__}"
+        )
+    elif norm_shape == "flat":
+        shape_ok = isinstance(err_val, str) and bool(err_val.strip())
+        shape_detail = (
+            f"error={err_val!r}"
+            if isinstance(err_val, str)
+            else f"Expected flat string error, got {type(err_val).__name__}"
+        )
+    else:
+        msg = extract_error_message(body)
+        shape_ok = msg is not None
+        shape_detail = f"error message={msg!r}" if msg is not None else f"Invalid error field shape: {err_val!r}"
+
+    _record_check(
+        checks,
+        errors,
+        "error_body_shape",
+        shape_ok,
+        shape_detail,
+    )
+
+    extracted_msg = extract_error_message(body) or ""
+    if expected_substring:
+        sub_ok = expected_substring.lower() in extracted_msg.lower()
+        _record_check(
+            checks,
+            errors,
+            "error_message_contains_expected",
+            sub_ok,
+            f"Message {extracted_msg!r} contains {expected_substring!r}"
+            if sub_ok
+            else f"Expected {expected_substring!r} in error message {extracted_msg!r}",
+        )
+
+    return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
+

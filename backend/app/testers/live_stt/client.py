@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 from dataclasses import dataclass, field
 import json
+import threading
 import time
 from typing import Any, Sequence
 import httpx
@@ -104,6 +106,54 @@ class SpeechResult:
     ttfb_ms: float
     latency_ms: float
     error_body: Any = None
+
+
+@dataclass
+class AdminEndpointResult:
+    """Telemetry and response from a read-only GET admin or contract endpoint."""
+    endpoint: str
+    status_code: int
+    content_type: str
+    body: Any
+    raw_text: str
+    latency_ms: float
+
+
+@dataclass
+class ConcurrentBurstResult:
+    """Aggregated telemetry from a concurrent burst of transcription requests."""
+    total_requests: int
+    ok_200_count: int
+    rejected_503_count: int
+    other_status_count: int
+    wall_ms: float
+    responses: list[TranscribeJsonResult] = field(default_factory=list)
+
+
+def build_multipart_body(
+    fields: dict[str, str],
+    files: dict[str, tuple[str, bytes, str]] | None = None,
+    boundary: str = "----LiveSTTTesterBoundary7MA4YWxkTrZu0gW",
+) -> tuple[bytes, str]:
+    """Construct a multipart/form-data payload even when no files are attached."""
+    parts: list[bytes] = []
+    for name, val in (fields or {}).items():
+        parts.append(f"--{boundary}\r\n".encode("utf-8"))
+        parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        parts.append(str(val).encode("utf-8") + b"\r\n")
+
+    for field_name, file_tuple in (files or {}).items():
+        filename, file_bytes, content_type = file_tuple
+        parts.append(f"--{boundary}\r\n".encode("utf-8"))
+        parts.append(
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"\r\n'.encode("utf-8")
+        )
+        parts.append(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        parts.append(bytes(file_bytes) + b"\r\n")
+
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    content_type_header = f"multipart/form-data; boundary={boundary}"
+    return b"".join(parts), content_type_header
 
 
 DEFAULT_ASR_MODEL = ModelInfo(
@@ -271,7 +321,7 @@ def select_parametrized_models(
 
 
 class LiveSTTHTTPClient:
-    """HTTP client for live-stt /v1/models, /v1/audio/transcriptions, /v1/audio/diarization, and /v1/audio/speech."""
+    """HTTP client for live-stt /v1/models, /v1/audio/*, and read-only /api/*, /metrics, /dashboard endpoints."""
 
     def __init__(
         self,
@@ -291,6 +341,16 @@ class LiveSTTHTTPClient:
         self.transcriptions_url = f"{self.root_url}/v1/audio/transcriptions"
         self.diarization_url = f"{self.root_url}/v1/audio/diarization"
         self.speech_url = f"{self.root_url}/v1/audio/speech"
+        self.health_url = f"{self.root_url}/api/health"
+        self.stats_url = f"{self.root_url}/api/stats"
+        self.version_url = f"{self.root_url}/api/version"
+        self.config_url = f"{self.root_url}/api/config"
+        self.settings_url = f"{self.root_url}/api/settings"
+        self.backends_url = f"{self.root_url}/api/backends"
+        self.diarization_engines_url = f"{self.root_url}/api/diarization-engines"
+        self.tts_engines_url = f"{self.root_url}/api/tts-engines"
+        self.metrics_url = f"{self.root_url}/metrics"
+        self.dashboard_url = f"{self.root_url}/dashboard"
 
     @staticmethod
     def _normalize_root_url(base_url: str) -> str:
@@ -301,6 +361,17 @@ class LiveSTTHTTPClient:
             "/v1/audio/speech",
             "/v1/models",
             "/v1",
+            "/api/diarization-engines",
+            "/api/tts-engines",
+            "/api/backends",
+            "/api/settings",
+            "/api/config",
+            "/api/version",
+            "/api/stats",
+            "/api/health",
+            "/api",
+            "/dashboard",
+            "/metrics",
         ):
             if url.endswith(suffix):
                 url = url[: -len(suffix)].rstrip("/")
@@ -751,3 +822,216 @@ class LiveSTTHTTPClient:
             ttfb_ms=latency_ms,
             latency_ms=latency_ms,
         )
+
+    def get_endpoint(self, path: str, accept: str = "application/json") -> AdminEndpointResult:
+        """Perform a read-only GET request against a relative path (e.g. '/api/health')."""
+        clean_path = "/" + path.lstrip("/")
+        url = f"{self.root_url}{clean_path}"
+        headers = self._build_headers({"Accept": accept})
+        t0 = time.perf_counter()
+        try:
+            with httpx.Client(timeout=min(self.timeout, 15.0), transport=self.transport) as client:
+                resp = client.get(url, headers=headers)
+        except httpx.RequestError as e:
+            raise LiveSTTClientError(f"HTTP GET {url} failed: {e}") from e
+
+        latency_ms = round(max(0.01, (time.perf_counter() - t0) * 1000.0), 2)
+        if resp.status_code in (401, 403):
+            raise LiveSTTClientError(
+                f"Authentication failed at {url} (status {resp.status_code}): {resp.text}"
+            )
+
+        content_type = resp.headers.get("content-type", "")
+        raw_text = resp.text
+        try:
+            body = resp.json() if "json" in content_type.lower() or raw_text.lstrip().startswith(("{", "[")) else None
+        except Exception:
+            body = None
+
+        return AdminEndpointResult(
+            endpoint=clean_path,
+            status_code=resp.status_code,
+            content_type=content_type,
+            body=body,
+            raw_text=raw_text,
+            latency_ms=latency_ms,
+        )
+
+    def get_models_endpoint(self) -> AdminEndpointResult:
+        """Read-only GET /v1/models check."""
+        return self.get_endpoint("/v1/models", accept="application/json")
+
+    def get_health(self) -> AdminEndpointResult:
+        """Read-only GET /api/health check."""
+        return self.get_endpoint("/api/health", accept="application/json")
+
+    def get_stats(self) -> AdminEndpointResult:
+        """Read-only GET /api/stats check."""
+        return self.get_endpoint("/api/stats", accept="application/json")
+
+    def get_version(self) -> AdminEndpointResult:
+        """Read-only GET /api/version check."""
+        return self.get_endpoint("/api/version", accept="application/json")
+
+    def get_config(self) -> AdminEndpointResult:
+        """Read-only GET /api/config check."""
+        return self.get_endpoint("/api/config", accept="application/json")
+
+    def get_settings(self) -> AdminEndpointResult:
+        """Read-only GET /api/settings check (never mutates settings)."""
+        return self.get_endpoint("/api/settings", accept="application/json")
+
+    def get_backends(self) -> AdminEndpointResult:
+        """Read-only GET /api/backends check (never installs or activates backends)."""
+        return self.get_endpoint("/api/backends", accept="application/json")
+
+    def get_diarization_engines(self) -> AdminEndpointResult:
+        """Read-only GET /api/diarization-engines check (never installs engines)."""
+        return self.get_endpoint("/api/diarization-engines", accept="application/json")
+
+    def get_tts_engines(self) -> AdminEndpointResult:
+        """Read-only GET /api/tts-engines check (never installs engines)."""
+        return self.get_endpoint("/api/tts-engines", accept="application/json")
+
+    def get_metrics(self) -> AdminEndpointResult:
+        """Read-only GET /metrics Prometheus exposition check."""
+        return self.get_endpoint("/metrics", accept="text/plain")
+
+    def get_dashboard(self) -> AdminEndpointResult:
+        """Read-only GET /dashboard HTML check."""
+        return self.get_endpoint("/dashboard", accept="text/html")
+
+    def post_multipart_raw(
+        self,
+        path: str,
+        fields: dict[str, str] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
+    ) -> TranscribeJsonResult:
+        """Send an explicit multipart/form-data POST request even when files is empty/None."""
+        clean_path = "/" + path.lstrip("/")
+        url = f"{self.root_url}{clean_path}"
+        body_bytes, multipart_ct = build_multipart_body(fields=fields or {}, files=files)
+        headers = self._build_headers({
+            "Accept": "application/json",
+            "Content-Type": multipart_ct,
+        })
+
+        t0 = time.perf_counter()
+        try:
+            with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
+                resp = client.post(url, content=body_bytes, headers=headers)
+        except httpx.RequestError as e:
+            raise LiveSTTClientError(f"HTTP POST {url} failed: {e}") from e
+
+        latency_ms = round(max(0.01, (time.perf_counter() - t0) * 1000.0), 2)
+        if resp.status_code in (401, 403):
+            raise LiveSTTClientError(
+                f"Authentication failed at {url} (status {resp.status_code}): {resp.text}"
+            )
+
+        content_type = resp.headers.get("content-type", "")
+        raw_text = resp.text
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+        return TranscribeJsonResult(
+            status_code=resp.status_code,
+            content_type=content_type,
+            body=body,
+            raw_text=raw_text,
+            latency_ms=latency_ms,
+        )
+
+    def post_json_raw(
+        self,
+        path: str,
+        payload: dict[str, Any] | bytes | str,
+    ) -> TranscribeJsonResult:
+        """Send an arbitrary JSON or raw payload POST request for error-path testing."""
+        clean_path = "/" + path.lstrip("/")
+        url = f"{self.root_url}{clean_path}"
+        headers = self._build_headers({
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
+        if isinstance(payload, dict):
+            raw_content = json.dumps(payload).encode("utf-8")
+        elif isinstance(payload, str):
+            raw_content = payload.encode("utf-8")
+        else:
+            raw_content = bytes(payload)
+
+        t0 = time.perf_counter()
+        try:
+            with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
+                resp = client.post(url, content=raw_content, headers=headers)
+        except httpx.RequestError as e:
+            raise LiveSTTClientError(f"HTTP POST {url} failed: {e}") from e
+
+        latency_ms = round(max(0.01, (time.perf_counter() - t0) * 1000.0), 2)
+        if resp.status_code in (401, 403):
+            raise LiveSTTClientError(
+                f"Authentication failed at {url} (status {resp.status_code}): {resp.text}"
+            )
+
+        content_type = resp.headers.get("content-type", "")
+        raw_text = resp.text
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+
+        return TranscribeJsonResult(
+            status_code=resp.status_code,
+            content_type=content_type,
+            body=body,
+            raw_text=raw_text,
+            latency_ms=latency_ms,
+        )
+
+    def run_concurrent_transcriptions(
+        self,
+        wav_bytes: bytes,
+        model: str,
+        concurrency: int,
+        response_format: str = "json",
+        language: str | None = "en",
+    ) -> ConcurrentBurstResult:
+        """Launch `concurrency` simultaneous POST /v1/audio/transcriptions calls to test admission budget."""
+        n = max(1, int(concurrency))
+        barrier = threading.Barrier(n)
+
+        def _worker(idx: int) -> TranscribeJsonResult:
+            try:
+                barrier.wait(timeout=5.0)
+            except threading.BrokenBarrierError:
+                pass
+            return self.transcribe_json(
+                wav_bytes=wav_bytes,
+                model=model,
+                response_format=response_format,
+                language=language,
+                filename=f"burst_{idx}.wav",
+            )
+
+        t0 = time.perf_counter()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_worker, i) for i in range(n)]
+            responses = [f.result() for f in futures]
+        wall_ms = round(max(0.01, (time.perf_counter() - t0) * 1000.0), 2)
+
+        ok_200 = sum(1 for r in responses if r.status_code == 200)
+        rej_503 = sum(1 for r in responses if r.status_code == 503)
+        other = len(responses) - ok_200 - rej_503
+
+        return ConcurrentBurstResult(
+            total_requests=len(responses),
+            ok_200_count=ok_200,
+            rejected_503_count=rej_503,
+            other_status_count=other,
+            wall_ms=wall_ms,
+            responses=responses,
+        )
+
