@@ -18,7 +18,7 @@ const mockHistoryRuns: Run[] = [
     config_snapshot: {
       tester: 'llm',
       suites: ['coding', 'reasoning'],
-      config: { model: 'Qwen2.5-7B-Instruct', temperature: 0.05 },
+      config: { model: 'Qwen2.5-7B-Instruct', max_tokens: 2048 },
     },
     target_snapshot: {
       id: 10,
@@ -62,7 +62,7 @@ const mockHistoryRuns: Run[] = [
     config_snapshot: {
       tester: 'llm',
       suites: ['coding', 'reasoning'],
-      config: { model: 'Qwen2.5-32B-Instruct', temperature: 0.1 },
+      config: { model: 'Qwen2.5-32B-Instruct', max_tokens: 4096 },
     },
     target_snapshot: {
       id: 11,
@@ -124,7 +124,7 @@ const mockCompareResponse: CompareResponse = {
       model: 'Qwen2.5-7B-Instruct',
       models: ['Qwen2.5-7B-Instruct'],
       suites: ['coding', 'reasoning'],
-      config: { model: 'Qwen2.5-7B-Instruct', temperature: 0.05 },
+      config: { model: 'Qwen2.5-7B-Instruct', max_tokens: 2048 },
       config_snapshot: {},
       target_snapshot: {},
       git_info: null,
@@ -165,7 +165,7 @@ const mockCompareResponse: CompareResponse = {
       model: 'Qwen2.5-32B-Instruct',
       models: ['Qwen2.5-32B-Instruct'],
       suites: ['coding', 'reasoning'],
-      config: { model: 'Qwen2.5-32B-Instruct', temperature: 0.1 },
+      config: { model: 'Qwen2.5-32B-Instruct', max_tokens: 4096 },
       config_snapshot: {},
       target_snapshot: {},
       git_info: null,
@@ -193,15 +193,15 @@ const mockCompareResponse: CompareResponse = {
     targets_differ: true,
     models_differ: true,
     suites_differ: false,
-    config_keys_changed: ['model', 'temperature'],
+    config_keys_changed: ['model', 'max_tokens'],
     config_changes: {
       model: [
         { run_id: 1, result_id: 101, value: 'Qwen2.5-7B-Instruct' },
         { run_id: 2, result_id: 102, value: 'Qwen2.5-32B-Instruct' },
       ],
-      temperature: [
-        { run_id: 1, result_id: 101, value: 0.05 },
-        { run_id: 2, result_id: 102, value: 0.1 },
+      max_tokens: [
+        { run_id: 1, result_id: 101, value: 2048 },
+        { run_id: 2, result_id: 102, value: 4096 },
       ],
     },
     targets: [
@@ -767,7 +767,7 @@ describe('CompareView and Compare UI components', () => {
     expect(configHeader.textContent).toContain('vllm-h100')
     expect(configHeader.textContent).toContain('Qwen2.5-7B-Instruct')
     expect(configHeader.textContent).toContain('Qwen2.5-32B-Instruct')
-    expect(screen.getByTestId('config-diff-table').textContent).toContain('config.temperature')
+    expect(screen.getByTestId('config-diff-table').textContent).toContain('config.max_tokens')
 
     // 2. Bar and Line Charts for Key Metrics
     expect(screen.getByTestId('metrics-chart-section')).toBeDefined()

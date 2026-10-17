@@ -114,7 +114,6 @@ class OpenAIChatClient:
         self,
         messages: list[dict[str, str]],
         model: str,
-        temperature: float = 0.05,
         max_tokens: int = 2048,
         stop: list[str] | None = None,
     ) -> ChatStreamResult:
@@ -122,7 +121,6 @@ class OpenAIChatClient:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -290,7 +288,6 @@ class OpenAIChatClient:
         self,
         messages: list[dict[str, str]],
         model: str,
-        temperature: float = 0.1,
         max_tokens: int = 1024,
         response_format: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, int], float]:
@@ -302,7 +299,6 @@ class OpenAIChatClient:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
         }

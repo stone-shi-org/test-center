@@ -172,7 +172,7 @@ def test_compare_two_runs_metrics_and_cases(app_and_client):
         config_snapshot={
             "tester": "llm",
             "suites": ["coding", "reasoning"],
-            "config": {"model": "Qwen2.5-7B-Instruct", "temperature": 0.05},
+            "config": {"model": "Qwen2.5-7B-Instruct", "max_tokens": 2048},
         },
         metrics={
             "ttft_p50_ms": {"value": 100.0, "unit": "ms", "better": "lower"},
@@ -228,7 +228,7 @@ def test_compare_two_runs_metrics_and_cases(app_and_client):
         config_snapshot={
             "tester": "llm",
             "suites": ["coding", "reasoning"],
-            "config": {"model": "Qwen2.5-32B-Instruct", "temperature": 0.1},
+            "config": {"model": "Qwen2.5-32B-Instruct", "max_tokens": 4096},
         },
         metrics={
             "ttft_p50_ms": {"value": 102.0, "unit": "ms", "better": "lower"},  # +2% (slight slowdown)
@@ -294,7 +294,7 @@ def test_compare_two_runs_metrics_and_cases(app_and_client):
     assert data["config_diff"]["targets_differ"] is True
     assert data["config_diff"]["models_differ"] is True
     assert "model" in data["config_diff"]["config_keys_changed"]
-    assert "temperature" in data["config_diff"]["config_keys_changed"]
+    assert "max_tokens" in data["config_diff"]["config_keys_changed"]
 
     # Verify aligned metrics
     mmap = data["metric_map"]
