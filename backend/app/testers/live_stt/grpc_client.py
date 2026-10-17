@@ -1851,6 +1851,8 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         emit_eob_on_first_delta: bool = False,
         emit_warning: dict[str, Any] | None = None,
         emit_recycled_at_sec: float | None = None,
+        recycle_every_sec: float | None = None,
+        repeat_words_for_long_audio: bool = True,
         worker_generations: int = 1,
         decode_delay_sec: float = 0.0,
         final_delay_sec: float = 0.0,
@@ -1888,6 +1890,8 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         self.emit_eob_on_first_delta = emit_eob_on_first_delta
         self.emit_warning = emit_warning
         self.emit_recycled_at_sec = emit_recycled_at_sec
+        self.recycle_every_sec = recycle_every_sec
+        self.repeat_words_for_long_audio = repeat_words_for_long_audio
         self.worker_generations = worker_generations
         self.decode_delay_sec = decode_delay_sec
         self.final_delay_sec = final_delay_sec
@@ -1896,6 +1900,8 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         self.active_calls = 0
         self.peak_active_calls = 0
         self.total_calls = 0
+        self.completed_calls = 0
+        self.aborted_calls = 0
         self.received_Metadata: list[dict[str, str]] = []
 
     async def GetServerInfo(  # noqa: N802
@@ -1929,10 +1935,18 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         self.received_Metadata.append(md)
 
         if self.draining:
+            try:
+                await asyncio.wait_for(request_iterator.__anext__(), timeout=0.05)
+            except Exception:
+                pass
             await context.abort(grpc.StatusCode.UNAVAILABLE, "draining")
             return
 
         if self.active_calls >= self.max_concurrent_calls:
+            try:
+                await asyncio.wait_for(request_iterator.__anext__(), timeout=0.05)
+            except Exception:
+                pass
             await context.abort(
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
                 "at capacity, try again shortly",
@@ -1944,6 +1958,7 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         if self.active_calls > self.peak_active_calls:
             self.peak_active_calls = self.active_calls
 
+        completed_cleanly = False
         try:
             try:
                 first = await request_iterator.__anext__()
@@ -2029,10 +2044,23 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
             emitted_word_idx = 0
             delta_count = 0
             recycled_emitted = False
+            recycled_count = 0
+            completed_cleanly = False
 
             # Reserve the last word for Final (matching real parakeet stream_finalize behavior)
-            stream_words = self.words_sequence[:-1] if len(self.words_sequence) > 1 else []
-            final_words = self.words_sequence[-1:] if self.words_sequence else []
+            stream_words = list(self.words_sequence[:-1]) if len(self.words_sequence) > 1 else []
+            final_words = list(self.words_sequence[-1:]) if self.words_sequence else []
+            base_cycle_sec = (
+                max(4.5, round(float(self.words_sequence[-1].end_sec) + 1.0, 2))
+                if self.words_sequence
+                else 4.5
+            )
+            next_cycle_offset_sec = base_cycle_sec
+            next_periodic_recycle_sec = (
+                float(self.recycle_every_sec)
+                if (self.recycle_every_sec is not None and self.recycle_every_sec > 0.0)
+                else None
+            )
 
             async for req in request_iterator:
                 which = req.WhichOneof("payload")
@@ -2061,11 +2089,59 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
                         await asyncio.sleep(self.decode_delay_sec)
 
                     if (
+                        self.repeat_words_for_long_audio
+                        and self.words_sequence
+                        and audio_offset_sec >= next_cycle_offset_sec
+                    ):
+                        while audio_offset_sec >= next_cycle_offset_sec:
+                            stream_words.extend(final_words)
+                            shifted_stream = [
+                                WordTimestamp(
+                                    text=w.text,
+                                    start_sec=round(w.start_sec + next_cycle_offset_sec, 3),
+                                    end_sec=round(w.end_sec + next_cycle_offset_sec, 3),
+                                )
+                                for w in (
+                                    self.words_sequence[:-1]
+                                    if len(self.words_sequence) > 1
+                                    else []
+                                )
+                            ]
+                            stream_words.extend(shifted_stream)
+                            final_words = [
+                                WordTimestamp(
+                                    text=w.text,
+                                    start_sec=round(w.start_sec + next_cycle_offset_sec, 3),
+                                    end_sec=round(w.end_sec + next_cycle_offset_sec, 3),
+                                )
+                                for w in self.words_sequence[-1:]
+                            ]
+                            next_cycle_offset_sec = round(next_cycle_offset_sec + base_cycle_sec, 3)
+
+                    if (
+                        next_periodic_recycle_sec is not None
+                        and audio_offset_sec >= next_periodic_recycle_sec
+                    ):
+                        recycled_emitted = True
+                        recycled_count += 1
+                        next_periodic_recycle_sec = round(
+                            next_periodic_recycle_sec + float(self.recycle_every_sec or 0.0), 3
+                        )
+                        yield asr_pb2.TranscriptionEvent(
+                            recycled=asr_pb2.Recycled(
+                                reason=asr_pb2.RECYCLE_REASON_RSS_THRESHOLD,
+                                gap_sec=0.0,
+                                at_audio_sec=audio_offset_sec,
+                                warm=True,
+                            )
+                        )
+                    elif (
                         self.emit_recycled_at_sec is not None
                         and not recycled_emycled_check(recycled_emitted)
                         and audio_offset_sec >= self.emit_recycled_at_sec
                     ):
                         recycled_emitted = True
+                        recycled_count += 1
                         yield asr_pb2.TranscriptionEvent(
                             recycled=asr_pb2.Recycled(
                                 reason=asr_pb2.RECYCLE_REASON_RSS_THRESHOLD,
@@ -2150,7 +2226,7 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
                 final_text = ""
                 pb_final_words = []
 
-            generations = 2 if recycled_emitted else self.worker_generations
+            generations = (1 + recycled_count) if recycled_count > 0 else self.worker_generations
             yield asr_pb2.TranscriptionEvent(
                 final=asr_pb2.Final(
                     text=final_text,
@@ -2159,7 +2235,12 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
                     worker_generations=generations,
                 )
             )
+            completed_cleanly = True
         finally:
+            if completed_cleanly:
+                self.completed_calls += 1
+            else:
+                self.aborted_calls += 1
             self.active_calls = max(0, self.active_calls - 1)
 
 

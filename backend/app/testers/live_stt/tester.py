@@ -62,6 +62,7 @@ from backend.app.testers.live_stt.metrics import (
     compute_rtf,
 )
 from backend.app.testers.live_stt.report import format_live_stt_report
+from backend.app.testers.live_stt.streaming import execute_grpc_streaming_suites
 from backend.app.testers.live_stt.schemas import (
     SchemaCheckResult,
     extract_error_message,
@@ -111,6 +112,17 @@ _SUITE_EXPANSIONS: dict[str, list[str]] = {
     "admission": ["concurrency"],
     "contract": ["admin", "error_handling", "concurrency"],
     "admin_contract": ["admin", "error_handling", "concurrency"],
+    "grpc_streaming": ["grpc_streaming"],
+    "grpc": ["grpc_streaming"],
+    "grpc_transcribe": ["grpc_streaming"],
+    "streaming_grpc": ["grpc_streaming"],
+    "grpc_long_call": ["grpc_long_call"],
+    "grpc_long_calls": ["grpc_long_call"],
+    "long_call": ["grpc_long_call"],
+    "long_calls": ["grpc_long_call"],
+    "long-call": ["grpc_long_call"],
+    "long-calls": ["grpc_long_call"],
+    "grpc_all": ["grpc_streaming", "grpc_long_call"],
     "accuracy_wer": ["accuracy_wer"],
     "wer": ["accuracy_wer"],
     "http_wer": ["accuracy_wer"],
@@ -134,7 +146,7 @@ _SUITE_EXPANSIONS: dict[str, list[str]] = {
 
 
 def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]) -> list[str]:
-    """Normalize suite names and expand shorthand aliases (e.g. 'transcriptions', 'contract', 'accuracy')."""
+    """Normalize suite names and expand shorthand aliases (e.g. 'transcriptions', 'contract', 'grpc', 'accuracy')."""
     if not raw_suites:
         return list(available)
     expanded: list[str] = []
@@ -149,7 +161,7 @@ def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]
 
 
 class LiveSTTTester(TesterPlugin):
-    """Tester for live-stt HTTP/gRPC endpoints, contract verification, and NOTSOFAR-1 accuracy:
+    """Tester for live-stt HTTP/gRPC endpoints, contract verification, gRPC streaming, and NOTSOFAR-1 accuracy:
 
     - POST /v1/audio/transcriptions (JSON and verbose_json)
     - POST /v1/audio/transcriptions (stream=true Server-Sent Events)
@@ -160,17 +172,21 @@ class LiveSTTTester(TesterPlugin):
       (no mutating calls by default)
     - Error-path contract tests (bad audio, unknown model, missing fields, status codes & error body shapes)
     - Concurrency/admission tests (503 when over budget, capacity tracking, slot recovery)
+    - gRPC StreamingASR.Transcribe suite (grpc_streaming): TTFP, finalization latency, RTF,
+      concurrent sessions, mid-stream abort + reconnect, clean half-close shutdown, and protocol error handling
+    - Opt-in long-call stability suite (grpc_long_call): sustained streaming with worker rotation / Recycled events
     - NOTSOFAR-1 accuracy suites: batch HTTP WER/cpWER (accuracy_wer), streaming gRPC/SSE WER/cpWER
       (accuracy_streaming), and diarization DER/speaker-count error (accuracy_diarization) with SQLite result cache
     """
 
     name = "live-stt"
     description = (
-        "Functional, latency, contract, and NOTSOFAR-1 accuracy tester for live-stt HTTP/gRPC endpoints: "
+        "Functional, latency, contract, gRPC streaming, and NOTSOFAR-1 accuracy tester for live-stt HTTP/gRPC endpoints: "
         "POST /v1/audio/transcriptions (JSON + stream=true SSE), "
         "POST /v1/audio/diarization, POST /v1/audio/speech (TTS), "
         "read-only admin/telemetry endpoints (/v1/models, /api/stats, /api/health, /metrics), "
-        "error handling, concurrency/admission limits, and NOTSOFAR-1 WER/cpWER/DER/speaker-count accuracy suites."
+        "error handling, concurrency/admission limits, gRPC Transcribe streaming & long-call stability, "
+        "and NOTSOFAR-1 WER/cpWER/DER/speaker-count accuracy suites."
     )
     suites = [
         "transcriptions_json",
@@ -180,6 +196,8 @@ class LiveSTTTester(TesterPlugin):
         "admin",
         "error_handling",
         "concurrency",
+        "grpc_streaming",
+        "grpc_long_call",
         "accuracy_wer",
         "accuracy_streaming",
         "accuracy_diarization",
@@ -201,6 +219,8 @@ class LiveSTTTester(TesterPlugin):
                         "admin",
                         "error_handling",
                         "concurrency",
+                        "grpc_streaming",
+                        "grpc_long_call",
                         "accuracy_wer",
                         "accuracy_streaming",
                         "accuracy_diarization",
@@ -215,7 +235,7 @@ class LiveSTTTester(TesterPlugin):
                     "error_handling",
                     "concurrency",
                 ],
-                "description": "HTTP endpoint, contract, and NOTSOFAR-1 accuracy test suites to execute",
+                "description": "HTTP endpoint, contract, gRPC streaming, and NOTSOFAR-1 accuracy test suites to execute",
             },
             "model_parametrization": {
                 "type": "string",
@@ -385,6 +405,79 @@ class LiveSTTTester(TesterPlugin):
                 "maximum": 5000.0,
                 "description": "PCM frame chunk size in milliseconds for gRPC streaming evaluation",
             },
+            "grpc_chunk_ms": {
+                "type": "number",
+                "minimum": 10.0,
+                "maximum": 5000.0,
+                "description": "Optional PCM chunk size in milliseconds override for grpc_streaming and grpc_long_call suites",
+            },
+            "grpc_speed": {
+                "type": "number",
+                "default": 4.0,
+                "minimum": 0.1,
+                "maximum": 100.0,
+                "description": "Chunk pacing speed multiplier for paced gRPC streaming cases",
+            },
+            "grpc_burst_speed": {
+                "type": "number",
+                "default": 20.0,
+                "minimum": 1.0,
+                "maximum": 1000.0,
+                "description": "Chunk pacing speed multiplier for fast-burst gRPC streaming cases",
+            },
+            "grpc_realtime": {
+                "type": "boolean",
+                "default": False,
+                "description": "Whether to use real-time pacing by default in grpc_streaming suite",
+            },
+            "grpc_concurrency_burst_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "description": "Optional explicit number of concurrent streams for gRPC over-budget admission test",
+            },
+            "grpc_model": {
+                "type": "string",
+                "description": "Optional single ASR model override for gRPC Transcribe suite",
+            },
+            "grpc_models": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional explicit list of ASR models for gRPC Transcribe suite",
+            },
+            "include_long_call": {
+                "type": "boolean",
+                "default": False,
+                "description": "Opt-in flag to include the slow grpc_long_call stability suite",
+            },
+            "long_call_duration_sec": {
+                "type": "number",
+                "default": 12.0,
+                "minimum": 2.0,
+                "maximum": 7200.0,
+                "description": "Duration in seconds of synthesized audio for the opt-in grpc_long_call stability suite",
+            },
+            "long_call_speed": {
+                "type": "number",
+                "default": 20.0,
+                "minimum": 0.5,
+                "maximum": 200.0,
+                "description": "Pacing speed multiplier for the opt-in grpc_long_call stability suite",
+            },
+            "long_call_max_rtf": {
+                "type": "number",
+                "default": 2.0,
+                "minimum": 0.05,
+                "maximum": 20.0,
+                "description": "Maximum allowed processing RTF for the grpc_long_call stability suite",
+            },
+            "long_call_max_drift_ratio": {
+                "type": "number",
+                "default": 5.0,
+                "minimum": 1.0,
+                "maximum": 50.0,
+                "description": "Maximum allowed late-vs-early inter-partial latency drift ratio in grpc_long_call",
+            },
             "realtime_pacing": {
                 "type": "boolean",
                 "default": False,
@@ -477,8 +570,18 @@ class LiveSTTTester(TesterPlugin):
 
     def _resolve_client(self, config: dict[str, Any], target: dict[str, Any]) -> LiveSTTHTTPClient:
         base_url = target.get("base_url") or config.get("base_url")
+        extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
+        grpc_target = (
+            config.get("grpc_target")
+            or target.get("grpc_target")
+            or extra.get("grpc_target")
+            or extra.get("grpc_address")
+        )
         if not base_url or not str(base_url).strip():
-            raise TesterConfigError("Target definition is missing required 'base_url'")
+            if grpc_target and str(grpc_target).strip():
+                base_url = "http://127.0.0.1:8000"
+            else:
+                raise TesterConfigError("Target definition is missing required 'base_url'")
 
         api_key = self._resolve_api_key(target, config)
         timeout = float(config.get("timeout_seconds", 120.0))
@@ -578,6 +681,8 @@ class LiveSTTTester(TesterPlugin):
         suites_to_run = [s for s in self.suites if s in suites_to_run]
         if not suites_to_run:
             suites_to_run = list(self.suites[:7])
+        if bool(cfg.get("include_long_call", False)) and "grpc_long_call" not in suites_to_run:
+            suites_to_run.append("grpc_long_call")
 
         repetitions = int(cfg.get("repetitions", 1))
         language = str(cfg.get("language", "en") or "en")
@@ -586,6 +691,7 @@ class LiveSTTTester(TesterPlugin):
         tts_voice_override = cfg.get("tts_voice")
         discover_enabled = bool(cfg.get("discover_models", True))
         param_mode = str(cfg.get("model_parametrization", "per_engine"))
+        grpc_only = bool(suites_to_run) and set(suites_to_run) <= {"grpc_streaming", "grpc_long_call"}
 
         ctx.check_cancelled()
         ctx.log(
@@ -601,24 +707,33 @@ class LiveSTTTester(TesterPlugin):
             try:
                 discovered = client.discover_models()
             except LiveSTTClientError as e:
-                ctx.log(f"Error calling {client.models_url}: {e}", level="error")
-                raise TesterError(f"live-stt API error: {e}") from e
+                if grpc_only:
+                    ctx.log(
+                        f"GET {client.models_url} unreachable in gRPC-only mode ({e}); "
+                        "falling back to GetServerInfo / built-in models",
+                        level="warning",
+                    )
+                    discovered = None
+                else:
+                    ctx.log(f"Error calling {client.models_url}: {e}", level="error")
+                    raise TesterError(f"live-stt API error: {e}") from e
 
-            if discovered.status_code == 200 and discovered.raw_body is not None:
-                schema_check = validate_models_response(discovered.raw_body)
-                models_schema_valid = schema_check.valid
-                ctx.log(
-                    f"Discovered {discovered.total_count} models from /v1/models "
-                    f"(ASR={len(discovered.asr_models)}, Diarization={len(discovered.diarization_models)}, "
-                    f"TTS={len(discovered.tts_models)}) in {discovered.latency_ms:.2f}ms | "
-                    f"{schema_check.summary_message}"
-                )
-            else:
-                ctx.log(
-                    f"GET /v1/models returned non-200 or invalid payload ({discovered.error}); "
-                    "falling back to built-in default models",
-                    level="warning",
-                )
+            if discovered is not None:
+                if discovered.status_code == 200 and discovered.raw_body is not None:
+                    schema_check = validate_models_response(discovered.raw_body)
+                    models_schema_valid = schema_check.valid
+                    ctx.log(
+                        f"Discovered {discovered.total_count} models from /v1/models "
+                        f"(ASR={len(discovered.asr_models)}, Diarization={len(discovered.diarization_models)}, "
+                        f"TTS={len(discovered.tts_models)}) in {discovered.latency_ms:.2f}ms | "
+                        f"{schema_check.summary_message}"
+                    )
+                else:
+                    ctx.log(
+                        f"GET /v1/models returned non-200 or invalid payload ({discovered.error}); "
+                        "falling back to built-in default models",
+                        level="warning",
+                    )
 
         asr_models, diar_models, tts_models = self._resolve_parametrized_models(
             cfg=cfg,
@@ -674,6 +789,10 @@ class LiveSTTTester(TesterPlugin):
             planned_cases += 15
         if "concurrency" in suites_to_run:
             planned_cases += 3
+        if "grpc_streaming" in suites_to_run:
+            planned_cases += 1 + len(asr_models) * 2 + 5
+        if "grpc_long_call" in suites_to_run:
+            planned_cases += len(asr_models)
         if "accuracy_wer" in suites_to_run:
             planned_cases += len(asr_models) * len(notsofar_meetings)
         if "accuracy_streaming" in suites_to_run:
@@ -1449,6 +1568,28 @@ class LiveSTTTester(TesterPlugin):
             )
 
         # -------------------------------------------------------------------
+        # Suites 7b / 7c: gRPC Transcribe Streaming & Opt-In Long-Call Stability
+        # -------------------------------------------------------------------
+        if "grpc_streaming" in suites_to_run or "grpc_long_call" in suites_to_run:
+            completed_cases = execute_grpc_streaming_suites(
+                cfg=cfg,
+                target=target,
+                ctx=ctx,
+                result=result,
+                suites_to_run=suites_to_run,
+                asr_models=asr_models,
+                language=language,
+                repetitions=repetitions,
+                api_key=self._resolve_api_key(target, cfg),
+                tested_engines=tested_engines,
+                tested_models=tested_models,
+                all_latencies_ms=all_latencies_ms,
+                all_rtfs=all_rtfs,
+                completed_cases=completed_cases,
+                planned_cases=planned_cases,
+            )
+
+        # -------------------------------------------------------------------
         # Suites 8, 9, 10: NOTSOFAR-1 Accuracy Suites (WER, Streaming WER, Diarization DER)
         # -------------------------------------------------------------------
         accuracy_cache_stats: dict[str, Any] | None = None
@@ -1671,6 +1812,10 @@ class LiveSTTTester(TesterPlugin):
 
         result.status = "fail" if passed_cases < total_cases else "pass"
         acc_summary_parts: list[str] = []
+        if "grpc_ttfp_mean_ms" in result.metrics:
+            acc_summary_parts.append(f"TTFP={result.metrics['grpc_ttfp_mean_ms']['value']:.2f}ms")
+        if "grpc_final_latency_mean_ms" in result.metrics:
+            acc_summary_parts.append(f"Final={result.metrics['grpc_final_latency_mean_ms']['value']:.2f}ms")
         if "wer" in result.metrics:
             acc_summary_parts.append(f"WER={result.metrics['wer']['value'] * 100.0:.2f}%")
         if "cpwer" in result.metrics:
@@ -1690,7 +1835,14 @@ class LiveSTTTester(TesterPlugin):
 
         asr_active = any(
             s in suites_to_run
-            for s in ("transcriptions_json", "transcriptions_sse", "accuracy_wer", "accuracy_streaming")
+            for s in (
+                "transcriptions_json",
+                "transcriptions_sse",
+                "grpc_streaming",
+                "grpc_long_call",
+                "accuracy_wer",
+                "accuracy_streaming",
+            )
         )
         diar_active = any(s in suites_to_run for s in ("diarization", "accuracy_diarization"))
         models_summary = {

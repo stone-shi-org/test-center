@@ -1070,6 +1070,8 @@ def test_live_stt_tester_registration_and_aliases():
         "admin",
         "error_handling",
         "concurrency",
+        "grpc_streaming",
+        "grpc_long_call",
         "accuracy_wer",
         "accuracy_streaming",
         "accuracy_diarization",
@@ -1079,6 +1081,10 @@ def test_live_stt_tester_registration_and_aliases():
     assert get_tester("live_stt") is tester
     assert get_tester("live-stt-http") is tester
     assert get_tester("live_stt_http") is tester
+    assert get_tester("live-stt-grpc") is tester
+    assert get_tester("live_stt_grpc") is tester
+    assert get_tester("live-stt-streaming") is tester
+    assert get_tester("live_stt_streaming") is tester
     assert get_tester("live-stt-admin") is tester
     assert get_tester("live-stt-contract") is tester
     assert get_tester("live-stt-accuracy") is tester
@@ -1380,6 +1386,8 @@ def test_live_stt_worker_subprocess_end_to_end(app_and_client, monkeypatch):
             "admin",
             "error_handling",
             "concurrency",
+            "grpc_streaming",
+            "grpc_long_call",
             "accuracy_wer",
             "accuracy_streaming",
             "accuracy_diarization",

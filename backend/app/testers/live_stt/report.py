@@ -77,6 +77,20 @@ def format_live_stt_report(
             f"  Concurrency Limits  : {metrics['concurrency_latency_mean_ms']['value']:.2f} ms "
             f"(p95 {metrics.get('concurrency_latency_p95_ms', {}).get('value', 0.0):.2f} ms)"
         )
+    if "grpc_ttfp_mean_ms" in metrics:
+        endpoint_lines.append(
+            f"  gRPC Transcribe     : TTFP {metrics['grpc_ttfp_mean_ms']['value']:.2f} ms "
+            f"(p95 {metrics.get('grpc_ttfp_p95_ms', {}).get('value', 0.0):.2f} ms), "
+            f"Final {metrics.get('grpc_final_latency_mean_ms', {}).get('value', 0.0):.2f} ms, "
+            f"RTF {metrics.get('grpc_rtf_mean', {}).get('value', 0.0):.4f}x"
+        )
+    if "grpc_long_call_duration_sec" in metrics:
+        endpoint_lines.append(
+            f"  gRPC Long-Call      : {metrics['grpc_long_call_duration_sec']['value']:.1f} s audio, "
+            f"RTF {metrics.get('grpc_long_call_rtf', {}).get('value', 0.0):.4f}x, "
+            f"gens={int(metrics.get('grpc_long_call_worker_generations', {}).get('value', 1))}, "
+            f"recycled={int(metrics.get('grpc_long_call_recycled_count', {}).get('value', 0))}"
+        )
     if "wer" in metrics:
         endpoint_lines.append(
             f"  NOTSOFAR-1 WER      : {metrics['wer']['value'] * 100.0:.2f}% "
