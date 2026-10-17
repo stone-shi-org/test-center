@@ -225,3 +225,39 @@ def get_result_artifact_content(
         limit=limit,
     )
 
+
+@router.get("/{result_id}/junit.xml")
+@router.get("/{result_id}/junit")
+def get_result_junit_xml(
+    result_id: int,
+    suite: str | None = Query(None, description="Optional filter by suite name"),
+    download: bool = Query(False, description="If true, force attachment download"),
+    _token: str | None = Depends(
+        __import__(
+            "backend.app.api.bamboo",
+            fromlist=["optional_verify_bamboo_token"],
+        ).optional_verify_bamboo_token
+    ),
+    db: Session = Depends(get_db),
+):
+    """Export test cases of a specific result as standard JUnit XML."""
+    from backend.app.api.bamboo import build_junit_xml_http_response
+    from backend.app.runner.junit import build_result_junit_xml
+
+    stmt = (
+        select(Result)
+        .options(selectinload(Result.cases), selectinload(Result.run))
+        .where(Result.id == result_id)
+    )
+    res = db.execute(stmt).scalars().first()
+    if not res:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Result {result_id} not found")
+
+    xml_str = build_result_junit_xml(res, run=res.run, suite_filter=suite)
+    return build_junit_xml_http_response(
+        xml_str,
+        filename=f"result-{result_id}-junit.xml",
+        download=download,
+    )
+
+

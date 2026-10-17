@@ -15,6 +15,10 @@ from backend.app.api.runs import (
 from backend.app.api.results import router as results_router
 from backend.app.api.compare import router as compare_router
 from backend.app.api.jobs import router as jobs_router
+from backend.app.api.bamboo import (
+    router as bamboo_router,
+    ci_alias_router,
+)
 
 __all__ = [
     "health_router",
@@ -28,5 +32,8 @@ __all__ = [
     "retention_alias_router",
     "results_router",
     "compare_router",
+    "bamboo_router",
+    "ci_alias_router",
 ]
+
 

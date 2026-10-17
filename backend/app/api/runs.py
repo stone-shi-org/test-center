@@ -425,6 +425,20 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
         if isinstance(run.config_snapshot, dict)
         else None
     )
+    bamboo_meta = (
+        run.config_snapshot.get("bamboo")
+        if isinstance(run.config_snapshot, dict) and isinstance(run.config_snapshot.get("bamboo"), dict)
+        else (
+            run.git_info
+            if isinstance(run.git_info, dict) and run.git_info.get("source") == "bamboo"
+            else None
+        )
+    )
+    bamboo_report = (
+        run.config_snapshot.get("bamboo_report")
+        if isinstance(run.config_snapshot, dict) and isinstance(run.config_snapshot.get("bamboo_report"), dict)
+        else None
+    )
 
     return {
         "id": run.id,
@@ -437,6 +451,9 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
         "config_snapshot": run.config_snapshot,
         "target_snapshot": run.target_snapshot,
         "git_info": run.git_info,
+        "bamboo": bamboo_meta,
+        "bamboo_report": bamboo_report,
+        "junit_url": f"/api/runs/{run.id}/junit.xml",
         "notification_report": notif_report,
         "notifications_sent": notifs_sent,
         "results": results_list,
@@ -932,6 +949,41 @@ def get_run_results(
     sync_run_disk_artifacts(db, run)
     detail = _format_run_detail(run)
     return detail["results"]
+
+
+@router.get("/{run_id}/junit.xml")
+@router.get("/{run_id}/junit")
+@router.get("/{run_id}/export/junit.xml", include_in_schema=False)
+def get_run_junit_xml(
+    run_id: int,
+    suite: str | None = Query(None, description="Optional filter by suite name"),
+    tester: str | None = Query(None, description="Optional filter by tester plugin name"),
+    result_id: int | None = Query(None, description="Optional filter by Result ID"),
+    download: bool = Query(False, description="If true, force attachment download"),
+    _token: str | None = Depends(
+        __import__(
+            "backend.app.api.bamboo",
+            fromlist=["optional_verify_bamboo_token"],
+        ).optional_verify_bamboo_token
+    ),
+    db: Session = Depends(get_db),
+):
+    """Export all test cases of a run as standard JUnit XML for Bamboo's JUnit parser."""
+    from backend.app.api.bamboo import _load_run_with_relations, build_junit_xml_http_response
+    from backend.app.runner.junit import build_run_junit_xml
+
+    run = _load_run_with_relations(db, run_id)
+    xml_str = build_run_junit_xml(
+        run,
+        suite_filter=suite,
+        tester_filter=tester,
+        result_id_filter=result_id,
+    )
+    return build_junit_xml_http_response(
+        xml_str,
+        filename=f"run-{run_id}-junit.xml",
+        download=download,
+    )
 
 
 @router.post("/{run_id}/cancel")

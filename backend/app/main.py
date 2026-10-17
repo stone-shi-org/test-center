@@ -17,6 +17,8 @@ from backend.app.api import (
     retention_alias_router,
     results_router,
     compare_router,
+    bamboo_router,
+    ci_alias_router,
 )
 from backend.app.config import get_settings
 from backend.app.db.session import SessionLocal
@@ -63,6 +65,7 @@ OPENAPI_TAGS = [
     {"name": "runs", "description": "Test execution queueing, status, cancellation, and live streaming."},
     {"name": "results", "description": "Execution results, per-case details, metrics, and artifact downloads."},
     {"name": "compare", "description": "Side-by-side comparison of 2+ runs or results, aligned metrics, deltas, and per-case diffs."},
+    {"name": "bamboo", "description": "Optional Bamboo / CI integration: token-protected job triggering, run status polling, status reporting, and JUnit XML export."},
 ]
 
 
@@ -71,7 +74,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.VERSION,
-        description="Test Center REST API: targets, testers, test definitions, jobs, runs, results, and compare.",
+        description="Test Center REST API: targets, testers, test definitions, jobs, runs, results, compare, and Bamboo CI integration.",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -100,6 +103,8 @@ def create_app() -> FastAPI:
     app.include_router(retention_alias_router, prefix="/api", include_in_schema=False)
     app.include_router(results_router, prefix="/api")
     app.include_router(compare_router, prefix="/api")
+    app.include_router(bamboo_router, prefix="/api")
+    app.include_router(ci_alias_router, prefix="/api", include_in_schema=False)
 
     # Static assets and SPA handling for frontend
     static_dir = Path(settings.STATIC_DIR)

@@ -460,5 +460,92 @@ describe('JobsView & Grouped Run Results', () => {
       )
     })
   })
+
+  it('displays Bamboo CI integration endpoints & plan snippet in JobsView and JUnit XML download in RunDetailView', async () => {
+    vi.spyOn(api.jobs, 'list').mockResolvedValue(mockJobs)
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(mockDefinitions)
+    vi.spyOn(api.testers, 'list').mockResolvedValue(mockTesters)
+    vi.spyOn(api.targets, 'list').mockResolvedValue([])
+    vi.spyOn(api.runs, 'list').mockResolvedValue([])
+
+    const { unmount } = render(
+      <RouterProvider>
+        <JobsView />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('nightly-suite')).toBeDefined()
+    })
+
+    // Open job editor
+    fireEvent.click(screen.getByRole('button', { name: /^Edit$/i }))
+
+    expect(screen.getByTestId('job-bamboo-card')).toBeDefined()
+    expect(screen.getByText('/api/bamboo/jobs/1/trigger')).toBeDefined()
+
+    // Toggle Bamboo Plan Script snippet
+    const snippetToggleBtn = screen.getByTestId('toggle-bamboo-snippet-btn')
+    fireEvent.click(snippetToggleBtn)
+    expect(screen.getByTestId('bamboo-plan-script-container').textContent).toContain(
+      '/api/bamboo/jobs/1/trigger'
+    )
+    expect(screen.getByTestId('bamboo-plan-script-container').textContent).toContain(
+      '/junit.xml'
+    )
+
+    unmount()
+
+    // Render RunDetailView for a Bamboo-triggered run and verify JUnit XML link + Bamboo badge
+    vi.spyOn(api.runs, 'get').mockResolvedValue({
+      id: 88,
+      job_id: 1,
+      job_name: 'nightly-suite',
+      status: 'completed',
+      queued_at: '2026-10-16T00:00:00Z',
+      started_at: '2026-10-16T00:00:01Z',
+      finished_at: '2026-10-16T00:00:02Z',
+      config_snapshot: {
+        job_id: 1,
+        job_name: 'nightly-suite',
+        bamboo: {
+          plan_key: 'TES-SPEECH',
+          build_number: 42,
+          build_result_key: 'TES-SPEECH-42',
+        },
+      },
+      target_snapshot: {},
+      git_info: null,
+      bamboo: {
+        plan_key: 'TES-SPEECH',
+        build_number: 42,
+        build_result_key: 'TES-SPEECH-42',
+      },
+      junit_url: '/api/runs/88/junit.xml',
+      results: [],
+    })
+    vi.spyOn(api.runs, 'getLogs').mockResolvedValue({
+      run_id: 88,
+      status: 'completed',
+      lines: [],
+      raw: '',
+    })
+
+    render(
+      <RouterProvider>
+        <RunDetailView runId={88} />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('run-junit-download')).toBeDefined()
+    })
+
+    const junitLink = screen.getByTestId('run-junit-download') as HTMLAnchorElement
+    expect(junitLink.getAttribute('href')).toBe('/api/runs/88/junit.xml')
+    expect(junitLink.getAttribute('download')).toBe('run-88-junit.xml')
+    expect(screen.getByTestId('run-bamboo-badge').textContent).toContain('TES-SPEECH-42')
+  })
 })
+
 

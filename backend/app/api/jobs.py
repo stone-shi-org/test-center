@@ -6,7 +6,7 @@ and optional per-definition or job-wide overrides.
 
 from datetime import datetime
 from typing import Any, Literal
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -1219,3 +1219,85 @@ def list_job_runs(
     runs = db.execute(stmt).scalars().all()
     from backend.app.api.runs import _format_run_detail
     return [_format_run_detail(r) for r in runs]
+
+
+@router.get("/{job_id}/bamboo")
+def get_job_bamboo_info(
+    job_id: int,
+    base_url: str = Query("http://localhost:8000", description="Base URL of Test Center for snippet generation"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Get Bamboo / CI integration configuration and ready-to-use plan script for a job."""
+    from backend.app.api.bamboo import (
+        build_bamboo_plan_script,
+        get_configured_bamboo_token_env_vars,
+        is_bamboo_token_configured,
+    )
+
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    env_vars = get_configured_bamboo_token_env_vars(job)
+    primary_env_var = env_vars[0] if env_vars else "BAMBOO_API_TOKEN"
+    return {
+        "job_id": job.id,
+        "job_name": job.name,
+        "token_configured": is_bamboo_token_configured(job),
+        "token_env_var": primary_env_var,
+        "candidate_token_env_vars": env_vars,
+        "trigger_url": f"/api/bamboo/jobs/{job.id}/trigger",
+        "poll_url_template": "/api/bamboo/runs/{run_id}",
+        "junit_url_template": "/api/bamboo/runs/{run_id}/junit.xml",
+        "public_junit_url_template": "/api/runs/{run_id}/junit.xml",
+        "script": build_bamboo_plan_script(
+            job,
+            base_url=base_url,
+            token_env_var=primary_env_var,
+        ),
+    }
+
+
+@router.post("/{job_id}/bamboo/trigger", status_code=status.HTTP_201_CREATED)
+@router.post("/{job_id}/bamboo/run", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+@router.post("/{job_id}/ci/trigger", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+async def trigger_job_from_bamboo_route(
+    job_id: int,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    _token: str = Depends(
+        __import__(
+            "backend.app.api.bamboo",
+            fromlist=["require_bamboo_token"],
+        ).require_bamboo_token
+    ),
+) -> dict[str, Any]:
+    """Token-protected alias under /api/jobs/{job_id}/bamboo/trigger to trigger a job from CI."""
+    from backend.app.api.bamboo import (
+        BambooTriggerRequest,
+        _trigger_bamboo_job_impl,
+        verify_bamboo_token_value,
+    )
+
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    verify_bamboo_token_value(_token, job=job)
+
+    body_dict: dict[str, Any] = {}
+    try:
+        raw_bytes = await request.body()
+        if raw_bytes and raw_bytes.strip():
+            import json
+            parsed = json.loads(raw_bytes)
+            if isinstance(parsed, dict):
+                body_dict = parsed
+    except Exception:
+        pass
+
+    req_data = BambooTriggerRequest(**body_dict)
+    return await _trigger_bamboo_job_impl(job, req_data, request, response, db)
+
+

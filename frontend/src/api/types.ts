@@ -333,6 +333,8 @@ export interface Run {
     definitions?: Array<Record<string, unknown>>
     overrides?: Record<string, unknown>
     notifications?: JobNotificationSettings
+    bamboo?: BambooBuildMetadata
+    bamboo_report?: BambooReportSummary
     timeout?: number
     [key: string]: unknown
   }
@@ -349,6 +351,9 @@ export interface Run {
   git_info: Record<string, unknown> | null
   notification_report?: Record<string, unknown> | null
   notifications_sent?: JobNotificationDelivery[] | null
+  bamboo?: BambooBuildMetadata | null
+  bamboo_report?: BambooReportSummary | null
+  junit_url?: string
   results: RunResult[]
 }
 
@@ -745,6 +750,68 @@ export interface RetentionCleanupRequest {
   artifacts_only?: boolean
   keep_failed?: boolean
   dry_run?: boolean
+}
+
+export interface BambooBuildMetadata {
+  triggered_by?: string
+  plan_key?: string | null
+  build_number?: number | string | null
+  build_key?: string | null
+  build_result_key?: string | null
+  branch?: string | null
+  commit?: string | null
+  build_url?: string | null
+  callback_url?: string | null
+  bamboo_base_url?: string | null
+  report_comment?: boolean
+  report_labels?: boolean
+  token_env_var?: string
+  triggered_at?: string
+  [key: string]: unknown
+}
+
+export interface BambooReportSummary {
+  run_id: number
+  job_id: number | null
+  reported: boolean
+  ok: boolean
+  deliveries: Array<{
+    channel: string
+    target: string
+    status: string
+    ok: boolean
+    status_code?: number | null
+    error?: string | null
+    sent_at: string
+  }>
+  reported_at: string
+}
+
+export interface JobBambooInfo {
+  job_id: number
+  job_name: string
+  token_env_var: string
+  token_configured: boolean
+  trigger_url: string
+  poll_url_template: string
+  junit_url_template: string
+  plan_script: string
+}
+
+export interface BambooIntegrationInfo {
+  enabled: boolean
+  token_configured: boolean
+  token_env_var: string
+  bamboo_base_url_configured: boolean
+  bamboo_creds_configured: boolean
+  bamboo_creds_env_var: string
+  endpoints: {
+    trigger_job: string
+    poll_run: string
+    junit_xml: string
+    report_back: string
+  }
+  plan_script_example: string
 }
 
 

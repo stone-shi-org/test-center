@@ -74,6 +74,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
   const [webhookSecretEnvVar, setWebhookSecretEnvVar] = useState<string>('')
   const [emailTo, setEmailTo] = useState<string>('')
   const [testingNotification, setTestingNotification] = useState<boolean>(false)
+  const [showBambooSnippet, setShowBambooSnippet] = useState<boolean>(false)
 
   // Inline Quick Definition Builder state (uses SchemaForm)
   const [showDefBuilder, setShowDefBuilder] = useState<boolean>(false)
@@ -873,6 +874,68 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                 />
               </div>
             </div>
+          </div>
+
+          {/* Bamboo / CI Integration Section */}
+          <div className="job-bamboo-card card" data-testid="job-bamboo-card">
+            <div className="job-definitions-header">
+              <div>
+                <h4>🎋 Bamboo / CI Integration (Optional)</h4>
+                <p className="text-muted">
+                  Trigger this job from a Bamboo plan step using a token-protected endpoint, poll its result, and export cases as JUnit XML for Bamboo&apos;s JUnit Parser task.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={() => setShowBambooSnippet((prev) => !prev)}
+                data-testid="toggle-bamboo-snippet-btn"
+              >
+                {showBambooSnippet ? 'Hide Bamboo Plan Snippet' : 'Show Bamboo Plan Snippet'}
+              </button>
+            </div>
+
+            <div className="form-row" style={{ marginTop: '8px' }}>
+              <div className="form-group flex-1">
+                <label>Trigger Endpoint (POST)</label>
+                <code className="font-mono text-sm">
+                  /api/bamboo/jobs/{editingJob ? editingJob.id : encodeURIComponent(jobName.trim() || '<job_id>')}/trigger
+                </code>
+              </div>
+              <div className="form-group flex-1">
+                <label>Poll Status Endpoint (GET)</label>
+                <code className="font-mono text-sm">/api/bamboo/runs/&lt;run_id&gt;</code>
+              </div>
+              <div className="form-group flex-1">
+                <label>JUnit XML Export (GET)</label>
+                <code className="font-mono text-sm">/api/bamboo/runs/&lt;run_id&gt;/junit.xml</code>
+              </div>
+            </div>
+
+            {showBambooSnippet && (
+              <div style={{ marginTop: '10px' }} data-testid="bamboo-plan-script-container">
+                <p className="text-muted text-sm" style={{ marginBottom: '6px' }}>
+                  Set <code>BAMBOO_API_TOKEN</code> on the Test Center server and pass it via{' '}
+                  <code>Authorization: Bearer $&#123;bamboo.test_center_token_secret&#125;</code> or{' '}
+                  <code>X-Bamboo-Token</code> header in a Bamboo Script task:
+                </p>
+                <pre className="json-block font-mono text-sm">
+                  {`# 1. Trigger job and capture run_id
+RESP=$(curl -fsSL -X POST "$TEST_CENTER_URL/api/bamboo/jobs/${editingJob ? editingJob.id : encodeURIComponent(jobName.trim() || '<job_id>')}/trigger" \\
+  -H "Authorization: Bearer \${bamboo.test_center_token_secret}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"plan_key":"\${bamboo.planKey}","build_number":"\${bamboo.buildNumber}","build_result_key":"\${bamboo.buildResultKey}"}')
+RUN_ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['run_id'])")
+
+# 2. Poll until finished and export JUnit XML for Bamboo JUnit Parser
+curl -fsSL "$TEST_CENTER_URL/api/bamboo/runs/$RUN_ID?wait=true&timeout=300" \\
+  -H "Authorization: Bearer \${bamboo.test_center_token_secret}"
+curl -fsSL "$TEST_CENTER_URL/api/bamboo/runs/$RUN_ID/junit.xml" \\
+  -H "Authorization: Bearer \${bamboo.test_center_token_secret}" \\
+  -o "test-reports/test-center-run-$RUN_ID.xml"`}
+                </pre>
+              </div>
+            )}
           </div>
 
           {/* Bundled Test Definitions Section */}

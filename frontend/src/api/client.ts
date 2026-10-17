@@ -1,6 +1,7 @@
 import type {
   Artifact,
   ArtifactContentResponse,
+  BambooIntegrationInfo,
   CaseResult,
   CompareParams,
   CompareResponse,
@@ -8,6 +9,7 @@ import type {
   CronValidationResult,
   HealthResponse,
   Job,
+  JobBambooInfo,
   JobCreate,
   JobNotificationSettings,
   JobUpdate,
@@ -237,6 +239,10 @@ export const api = {
       const qs = query.toString()
       return request<Run[]>(`/jobs/${id}/runs${qs ? `?${qs}` : ''}`)
     },
+    getBambooInfo: (id: number, baseUrl?: string) => {
+      const qs = baseUrl ? `?base_url=${encodeURIComponent(baseUrl)}` : ''
+      return request<JobBambooInfo>(`/jobs/${id}/bamboo${qs}`)
+    },
   },
 
   runs: {
@@ -301,6 +307,14 @@ export const api = {
       }),
     getLogs: (id: number) => request<RunLogsResponse>(`/runs/${id}/logs`),
     getLogStreamUrl: (id: number) => `/api/runs/${id}/logs/stream`,
+    getJunitXmlUrl: (runId: number) => `/api/runs/${runId}/junit.xml`,
+    getJunitXml: async (runId: number): Promise<string> => {
+      const response = await fetch(`/api/runs/${runId}/junit.xml`)
+      if (!response.ok) {
+        throw new ApiError(response.status, `Failed to export JUnit XML for Run #${runId}`)
+      }
+      return response.text()
+    },
     listArtifacts: (runId: number, kind?: string) => {
       const qs = kind ? `?kind=${encodeURIComponent(kind)}` : ''
       return request<Artifact[]>(`/runs/${runId}/artifacts${qs}`)
@@ -341,6 +355,11 @@ export const api = {
       return request<CaseResult[]>(`/results/${resultId}/cases${qs ? `?${qs}` : ''}`)
     },
     getArtifacts: (resultId: number) => request<Artifact[]>(`/results/${resultId}/artifacts`),
+    getJunitXmlUrl: (resultId: number) => `/api/results/${resultId}/junit.xml`,
+  },
+
+  bamboo: {
+    getInfo: () => request<BambooIntegrationInfo>('/bamboo/info'),
   },
 
   compare: {

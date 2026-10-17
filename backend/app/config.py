@@ -39,6 +39,10 @@ class Settings(BaseModel):
     SMTP_FROM: str = os.getenv("SMTP_FROM", "test-center@localhost")
     SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes")
     SMTP_USE_SSL: bool = os.getenv("SMTP_USE_SSL", "false").lower() in ("1", "true", "yes")
+    BAMBOO_TOKEN_ENV_VAR: str = os.getenv("BAMBOO_TOKEN_ENV_VAR", "BAMBOO_API_TOKEN")
+    BAMBOO_BASE_URL: str = os.getenv("BAMBOO_BASE_URL", os.getenv("BAMBOO_URL", ""))
+    BAMBOO_USER: str = os.getenv("BAMBOO_USER", os.getenv("BAMBOO_USERNAME", ""))
+    BAMBOO_CREDS_ENV_VAR: str = os.getenv("BAMBOO_CREDS_ENV_VAR", "BAMBOO_API_TOKEN")
 
     def model_post_init(self, __context):
         if not self.DATABASE_URL:

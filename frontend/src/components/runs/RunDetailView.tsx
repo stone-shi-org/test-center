@@ -133,6 +133,8 @@ export function RunDetailView({ runId }: { runId: number }) {
   const targetUrl = (run.target_snapshot?.base_url as string) || ''
   const jobName = run.job_name || (run.config_snapshot?.job_name as string | undefined) || null
   const jobRunMode = (run.config_snapshot?.run_mode as string | undefined) || null
+  const bambooMeta = run.bamboo || run.config_snapshot?.bamboo || null
+  const junitUrl = run.junit_url || api.runs.getJunitXmlUrl(run.id)
 
   // Calculate duration without calling Date.now() during render
   let durationStr = '—'
@@ -170,6 +172,18 @@ export function RunDetailView({ runId }: { runId: number }) {
                 {jobRunMode ? ` (${jobRunMode.toUpperCase()})` : ''}
               </span>
             )}
+            {bambooMeta && (
+              <span
+                className="job-run-tag"
+                data-testid="run-bamboo-badge"
+                title="Triggered via Bamboo CI integration"
+              >
+                🎋 Bamboo:{' '}
+                {(bambooMeta.build_result_key as string) ||
+                  (bambooMeta.plan_key as string) ||
+                  'CI'}
+              </span>
+            )}
           </div>
 
           <div className="detail-header-actions">
@@ -182,6 +196,15 @@ export function RunDetailView({ runId }: { runId: number }) {
                 Cancel Run
               </button>
             )}
+            <a
+              href={junitUrl}
+              download={`run-${run.id}-junit.xml`}
+              className="btn btn-secondary"
+              data-testid="run-junit-download"
+              title="Download JUnit XML report for CI / Bamboo JUnit Parser"
+            >
+              ⬇ JUnit XML
+            </a>
             <button
               className="btn btn-secondary"
               onClick={() => navigate(`/compare?run_ids=${run.id}&baseline_run_id=${run.id}`)}

@@ -743,6 +743,11 @@ class RunWorker:
             overall_summary = " | ".join(summaries) if summaries else f"Completed {len(step_outcomes)} steps"
             self._append_main_log(main_log_file, run.status.upper(), overall_summary)
             db.commit()
+            try:
+                from backend.app.runner.junit import write_run_junit_artifact
+                write_run_junit_artifact(db, run_id, self.artifacts_dir)
+            except Exception as exc:
+                logger.warning(f"Failed to write junit.xml artifact for run #{run_id}: {exc}")
             final_status = run.status
         finally:
             db.close()
@@ -761,7 +766,7 @@ class RunWorker:
         )
 
     async def _maybe_notify_completed_run(self, run_id: int) -> None:
-        """Evaluate and dispatch per-job failure/regression notifications after a run finishes."""
+        """Evaluate and dispatch per-job failure/regression notifications and Bamboo status callbacks after a run finishes."""
         try:
             from backend.app.runner.notifications import process_run_notifications
 
@@ -781,6 +786,26 @@ class RunWorker:
                 db.close()
         except Exception as exc:
             logger.warning(f"Failed to process notifications for run #{run_id}: {exc}")
+
+        try:
+            from backend.app.api.bamboo import process_run_bamboo_report
+
+            db = self.session_factory()
+            try:
+                run_obj = db.get(Run, run_id)
+                if run_obj and isinstance(run_obj.config_snapshot, dict) and isinstance(run_obj.config_snapshot.get("bamboo"), dict):
+                    b_report = await process_run_bamboo_report(db, run_id)
+                    if b_report.get("triggered"):
+                        log_file = self.artifacts_dir / str(run_id) / "run.log"
+                        channels_str = ", ".join(
+                            f"{d.get('channel')} ({d.get('status')})"
+                            for d in (b_report.get("deliveries") or [])
+                        )
+                        self._append_main_log(log_file, "INFO", f"Bamboo status reported: {channels_str}")
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning(f"Failed to process Bamboo status report for run #{run_id}: {exc}")
 
     async def _kill_process_group(self, process: asyncio.subprocess.Process) -> None:
         """Send SIGTERM, then SIGKILL if process doesn't exit promptly."""
@@ -867,6 +892,11 @@ class RunWorker:
                 )
 
             db.commit()
+            try:
+                from backend.app.runner.junit import write_run_junit_artifact
+                write_run_junit_artifact(db, run_id, self.artifacts_dir)
+            except Exception as exc:
+                logger.warning(f"Failed to write junit.xml artifact for run #{run_id}: {exc}")
         finally:
             db.close()
 
@@ -991,6 +1021,11 @@ class RunWorker:
                 )
 
             db.commit()
+            try:
+                from backend.app.runner.junit import write_run_junit_artifact
+                write_run_junit_artifact(db, run_id, self.artifacts_dir)
+            except Exception as exc:
+                logger.warning(f"Failed to write junit.xml artifact for run #{run_id}: {exc}")
             final_status = run.status
             final_summary = result.summary
         finally:
