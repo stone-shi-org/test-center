@@ -4,6 +4,7 @@ import type {
   CompareParams,
   CompareResponse,
   CreateRunRequest,
+  CronValidationResult,
   HealthResponse,
   Job,
   JobCreate,
@@ -141,10 +142,17 @@ export const api = {
   },
 
   jobs: {
-    list: (params?: { enabled?: boolean; run_mode?: string; limit?: number; offset?: number }) => {
+    list: (params?: {
+      enabled?: boolean
+      run_mode?: string
+      scheduled?: boolean
+      limit?: number
+      offset?: number
+    }) => {
       const query = new URLSearchParams()
       if (params?.enabled !== undefined) query.set('enabled', String(params.enabled))
       if (params?.run_mode) query.set('run_mode', params.run_mode)
+      if (params?.scheduled !== undefined) query.set('scheduled', String(params.scheduled))
       if (params?.limit) query.set('limit', String(params.limit))
       if (params?.offset) query.set('offset', String(params.offset))
       const qs = query.toString()
@@ -160,6 +168,23 @@ export const api = {
       request<Job>(`/jobs/${id}`, {
         method: 'PUT',
         body: JSON.stringify(data),
+      }),
+    enable: (id: number) =>
+      request<Job>(`/jobs/${id}/enable`, {
+        method: 'POST',
+      }),
+    disable: (id: number) =>
+      request<Job>(`/jobs/${id}/disable`, {
+        method: 'POST',
+      }),
+    toggle: (id: number) =>
+      request<Job>(`/jobs/${id}/toggle`, {
+        method: 'POST',
+      }),
+    validateCron: (schedule: string, count = 5) =>
+      request<CronValidationResult>('/jobs/validate-cron', {
+        method: 'POST',
+        body: JSON.stringify({ schedule, count }),
       }),
     reorder: (id: number, definition_ids: number[]) =>
       request<Job>(`/jobs/${id}/order`, {

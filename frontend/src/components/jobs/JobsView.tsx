@@ -5,6 +5,7 @@ import {
   type JobCreate,
   type JobRunMode,
   type JobStepOverride,
+  type MissedRunPolicy,
   type Run,
   type Target,
   type TestDefinition,
@@ -15,6 +16,12 @@ import { Badge } from '../common/Badge.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 import { SchemaForm } from '../schema/SchemaForm.tsx'
+import {
+  formatUtcTimestamp,
+  isManualSchedule,
+  SCHEDULE_PRESETS,
+  validateCronSchedule,
+} from './cronUtils.ts'
 
 interface BundledStepState {
   test_definition_id: number
@@ -40,6 +47,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
 
   const [search, setSearch] = useState<string>('')
   const [modeFilter, setModeFilter] = useState<string>('all')
+  const [statusFilter, setStatusFilter] = useState<string>('all')
 
   // Editor state
   const [isEditorOpen, setIsEditorOpen] = useState<boolean>(false)
@@ -48,12 +56,14 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
   const [jobDescription, setJobDescription] = useState<string>('')
   const [jobRunMode, setJobRunMode] = useState<JobRunMode>('sequential')
   const [jobSchedule, setJobSchedule] = useState<string>('')
+  const [jobMissedRunPolicy, setJobMissedRunPolicy] = useState<MissedRunPolicy>('skip')
   const [jobEnabled, setJobEnabled] = useState<boolean>(true)
   const [steps, setSteps] = useState<BundledStepState[]>([])
   const [expandedStepIdx, setExpandedStepIdx] = useState<number | null>(null)
   const [selectedDefToAdd, setSelectedDefToAdd] = useState<string>('')
   const [savingJob, setSavingJob] = useState<boolean>(false)
   const [runningJobId, setRunningJobId] = useState<number | null>(null)
+  const [togglingJobId, setTogglingJobId] = useState<number | null>(null)
 
   // Inline Quick Definition Builder state (uses SchemaForm)
   const [showDefBuilder, setShowDefBuilder] = useState<boolean>(false)
@@ -111,6 +121,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
     setJobDescription(job.description || '')
     setJobRunMode(job.run_mode || 'sequential')
     setJobSchedule(job.schedule || '')
+    setJobMissedRunPolicy(job.missed_run_policy || 'skip')
     setJobEnabled(job.enabled ?? true)
 
     const initialSteps: BundledStepState[] = (job.definition_ids || []).map((defId, idx) => {
@@ -197,6 +208,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
     setJobDescription('')
     setJobRunMode('sequential')
     setJobSchedule('')
+    setJobMissedRunPolicy('skip')
     setJobEnabled(true)
     setSteps([])
     setExpandedStepIdx(null)
@@ -364,10 +376,13 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
       schedule: jobSchedule.trim(),
       enabled: jobEnabled,
       run_mode: jobRunMode,
+      missed_run_policy: jobMissedRunPolicy,
       definition_ids,
       overrides,
     }
   }
+
+  const cronValidation = validateCronSchedule(jobSchedule)
 
   const handleSaveJob = async (runNow = false) => {
     setError(null)
@@ -375,6 +390,10 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
 
     if (!jobName.trim()) {
       setError('Job name is required')
+      return
+    }
+    if (!cronValidation.valid) {
+      setError(`Invalid cron expression: ${cronValidation.error}`)
       return
     }
     if (steps.length === 0) {
@@ -427,6 +446,25 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
     }
   }
 
+  const handleToggleJobEnabled = async (job: Job) => {
+    setError(null)
+    setSuccessMessage(null)
+    try {
+      setTogglingJobId(job.id)
+      const updated = job.enabled
+        ? await api.jobs.disable(job.id)
+        : await api.jobs.enable(job.id)
+      setJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)))
+      setSuccessMessage(
+        `Job "${updated.name}" ${updated.enabled ? 'enabled' : 'disabled'}.`
+      )
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setTogglingJobId(null)
+    }
+  }
+
   const handleDeleteJob = async () => {
     if (!deletingJob) return
     try {
@@ -441,12 +479,17 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
 
   const filteredJobs = jobs.filter((j) => {
     const matchesMode = modeFilter === 'all' || j.run_mode === modeFilter
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'enabled' && j.enabled) ||
+      (statusFilter === 'disabled' && !j.enabled) ||
+      (statusFilter === 'scheduled' && !isManualSchedule(j.schedule))
     const q = search.toLowerCase()
     const matchesSearch =
       !q ||
       j.name.toLowerCase().includes(q) ||
       (j.description && j.description.toLowerCase().includes(q))
-    return matchesMode && matchesSearch
+    return matchesMode && matchesStatus && matchesSearch
   })
 
   const builderTesterInfo = testers.find((t) => t.name === newDefTester)
@@ -461,7 +504,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
         <div>
           <h2>Test Jobs</h2>
           <p className="view-subtitle">
-            Bundle ordered test definitions with sequential or parallel execution and schema-driven overrides.
+            Bundle ordered test definitions with cron scheduling, sequential or parallel execution, and schema-driven overrides.
           </p>
         </div>
         <div className="header-actions">
@@ -524,12 +567,46 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
               <input
                 id="job-schedule-input"
                 type="text"
-                className="form-input font-mono"
+                className={`form-input font-mono ${!cronValidation.valid ? 'input-error' : ''}`}
                 value={jobSchedule}
                 onChange={(e) => setJobSchedule(e.target.value)}
-                placeholder="e.g. 0 2 * * *"
+                placeholder="e.g. 0 2 * * * or manual"
                 disabled={savingJob}
               />
+              <div className="cron-presets-row">
+                {SCHEDULE_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className={`cron-preset-chip ${
+                      (jobSchedule.trim() || 'manual') === preset.value ? 'active' : ''
+                    }`}
+                    onClick={() => setJobSchedule(preset.value === 'manual' ? '' : preset.value)}
+                    disabled={savingJob}
+                    title={preset.desc}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              {!cronValidation.valid ? (
+                <div className="cron-validation-error" role="alert">
+                  Invalid cron: {cronValidation.error}
+                </div>
+              ) : !cronValidation.isManual ? (
+                <div className="cron-preview-box">
+                  <strong>{cronValidation.description}</strong>
+                  {' · '}
+                  <span>
+                    Next run:{' '}
+                    {jobEnabled
+                      ? formatUtcTimestamp(cronValidation.nextRunAt)
+                      : 'Paused (Disabled)'}
+                  </span>
+                </div>
+              ) : (
+                <div className="cron-preview-box text-muted">Manual trigger only</div>
+              )}
             </div>
           </div>
 
@@ -545,6 +622,22 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                 placeholder="Describe the purpose of this bundled test job..."
                 disabled={savingJob}
               />
+            </div>
+
+            <div className="form-group flex-1">
+              <label htmlFor="job-missed-policy-select">
+                Missed-Run Policy (After Downtime)
+              </label>
+              <select
+                id="job-missed-policy-select"
+                className="form-select"
+                value={jobMissedRunPolicy}
+                onChange={(e) => setJobMissedRunPolicy(e.target.value as MissedRunPolicy)}
+                disabled={savingJob}
+              >
+                <option value="skip">Skip missed runs (Wait for next future slot)</option>
+                <option value="run_once">Run once immediately (Coalesce missed runs)</option>
+              </select>
             </div>
 
             <div className="form-group flex-1 job-enabled-group">
@@ -939,6 +1032,23 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
         </div>
 
         <div className="filter-group">
+          <label htmlFor="jobs-status-filter" className="filter-label">
+            Status:
+          </label>
+          <select
+            id="jobs-status-filter"
+            className="filter-select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+          >
+            <option value="all">All Jobs</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+            <option value="scheduled">Cron Scheduled</option>
+          </select>
+        </div>
+
+        <div className="filter-group">
           <label htmlFor="jobs-mode-filter" className="filter-label">
             Run Mode:
           </label>
@@ -978,7 +1088,8 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                 <th>Job Name</th>
                 <th>Run Mode</th>
                 <th>Ordered Test Definitions</th>
-                <th>Schedule</th>
+                <th>Schedule & Policy</th>
+                <th>Next Run</th>
                 <th>Latest Run</th>
                 <th>Actions</th>
               </tr>
@@ -987,6 +1098,17 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
               {filteredJobs.map((job) => {
                 const jobRuns = runs.filter((r) => r.job_id === job.id)
                 const latestRun = jobRuns.length > 0 ? jobRuns[0] : null
+                const isManual = isManualSchedule(job.schedule)
+                const schedValidation = !isManual ? validateCronSchedule(job.schedule) : null
+                const schedDesc =
+                  job.schedule_description || schedValidation?.description || 'Manual trigger only'
+                const effectiveNextRun =
+                  job.next_run_at !== undefined
+                    ? job.next_run_at
+                    : job.enabled && schedValidation?.valid
+                      ? schedValidation.nextRunAt
+                      : null
+                const policy = job.missed_run_policy || 'skip'
 
                 return (
                   <tr key={job.id}>
@@ -1023,7 +1145,39 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                         </span>
                       )}
                     </td>
-                    <td className="font-mono text-muted">{job.schedule || 'Manual'}</td>
+                    <td>
+                      <div className="schedule-cell">
+                        <span className="font-mono">{isManual ? 'Manual' : job.schedule}</span>
+                        {!isManual && (
+                          <div className="schedule-meta-row">
+                            <span className="text-muted text-sm">{schedDesc}</span>
+                            <span
+                              className="missed-policy-badge"
+                              title={
+                                policy === 'run_once'
+                                  ? 'Coalesce missed runs after downtime into 1 run'
+                                  : 'Skip missed runs after downtime'
+                              }
+                            >
+                              Missed: {policy}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      {isManual ? (
+                        <span className="text-muted text-sm">Manual only</span>
+                      ) : !job.enabled ? (
+                        <span className="text-muted text-sm">Paused (Disabled)</span>
+                      ) : effectiveNextRun ? (
+                        <span className="font-mono text-sm next-run-timestamp">
+                          {formatUtcTimestamp(effectiveNextRun)}
+                        </span>
+                      ) : (
+                        <span className="text-muted text-sm">—</span>
+                      )}
+                    </td>
                     <td>
                       {latestRun ? (
                         <div className="result-pill-group">
@@ -1050,6 +1204,19 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                           disabled={runningJobId === job.id}
                         >
                           {runningJobId === job.id ? 'Starting...' : '🚀 Run Now'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-secondary"
+                          onClick={() => handleToggleJobEnabled(job)}
+                          disabled={togglingJobId === job.id}
+                          aria-label={job.enabled ? `Disable job ${job.name}` : `Enable job ${job.name}`}
+                        >
+                          {togglingJobId === job.id
+                            ? '...'
+                            : job.enabled
+                              ? 'Disable'
+                              : 'Enable'}
                         </button>
                         <button
                           type="button"

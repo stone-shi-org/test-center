@@ -19,6 +19,21 @@ from backend.app.db.models.run import Run
 from backend.app.db.models.target import Target
 from backend.app.db.models.test_definition import TestDefinition
 from backend.app.db.session import get_db
+from backend.app.runner.cron import (
+    _ensure_utc,
+    describe_cron_expression,
+    get_next_cron_time,
+    get_upcoming_cron_times,
+    is_manual_schedule,
+    normalize_schedule,
+    validate_and_preview_schedule,
+)
+from backend.app.runner.scheduler import (
+    get_active_job_run,
+    get_scheduler,
+    normalize_missed_run_policy,
+    sync_job_schedule_fields,
+)
 from backend.app.runner.worker import get_worker
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -55,6 +70,11 @@ def _normalize_run_mode(value: str | None) -> Literal["sequential", "parallel"]:
     if mode not in ("sequential", "parallel"):
         raise ValueError("run_mode must be 'sequential' or 'parallel'")
     return mode  # type: ignore[return-value]
+
+
+def _normalize_and_validate_schedule(value: str | None) -> str:
+    return normalize_schedule(value)
+
 
 
 def _parse_single_override_dict(raw: dict[str, Any]) -> dict[str, Any]:
@@ -374,13 +394,45 @@ def _format_job(job: Job, db: Session) -> dict[str, Any]:
             "timeout": step_ovr.get("timeout"),
         })
 
+    is_manual = is_manual_schedule(job.schedule)
+    next_run_iso: str | None = None
+    upcoming_runs: list[str] = []
+
+    if job.enabled and not is_manual:
+        try:
+            if job.next_run_at is not None:
+                first_dt = _ensure_utc(job.next_run_at)
+                next_run_iso = first_dt.isoformat()
+                rest = get_upcoming_cron_times(job.schedule, count=4, after=first_dt)
+                upcoming_runs = [next_run_iso] + [dt.isoformat() for dt in rest]
+            else:
+                upcoming = get_upcoming_cron_times(job.schedule, count=5)
+                if upcoming:
+                    next_run_iso = upcoming[0].isoformat()
+                    upcoming_runs = [dt.isoformat() for dt in upcoming]
+        except ValueError:
+            next_run_iso = None
+            upcoming_runs = []
+
+    active_run = get_active_job_run(db, job.id)
+
     return {
         "id": job.id,
         "name": job.name,
         "description": job.description,
         "schedule": job.schedule,
+        "is_scheduled": not is_manual,
+        "schedule_description": describe_cron_expression(job.schedule),
         "enabled": job.enabled,
         "run_mode": job.run_mode or "sequential",
+        "missed_run_policy": job.missed_run_policy or "skip",
+        "next_run_at": next_run_iso,
+        "upcoming_runs": upcoming_runs,
+        "last_scheduled_at": (
+            _ensure_utc(job.last_scheduled_at).isoformat() if job.last_scheduled_at else None
+        ),
+        "is_running": active_run is not None,
+        "active_run_id": active_run.id if active_run else None,
         "definition_ids": def_ids,
         "overrides": overrides,
         "definitions": definitions_list,
@@ -392,30 +444,49 @@ def _format_job(job: Job, db: Session) -> dict[str, Any]:
 class JobCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Unique job name")
     description: str | None = Field(default=None, description="Optional job description")
-    schedule: str = Field(default="manual", min_length=1, max_length=128, description="Schedule ('manual' or cron expression)")
+    schedule: str = Field(default="manual", max_length=128, description="Schedule ('manual' or 5-field cron expression)")
     enabled: bool = Field(default=True, description="Whether job is enabled")
     run_mode: str = Field(default="sequential", description="Execution mode: 'sequential' or 'parallel'")
+    missed_run_policy: str = Field(default="skip", description="Missed-run policy after downtime: 'skip' or 'run_once'")
     definition_ids: list[int] | None = Field(default=None, description="Ordered list of TestDefinition IDs")
     overrides: dict[str, Any] | None = Field(default=None, description="Optional per-definition or global overrides")
     definitions: list[Any] | None = Field(default=None, description="Optional ordered list of definition items with inline overrides")
     steps: list[Any] | None = Field(default=None, description="Optional alias for definitions")
+
+    @field_validator("schedule")
+    @classmethod
+    def check_schedule(cls, v: str) -> str:
+        return _normalize_and_validate_schedule(v)
 
     @field_validator("run_mode")
     @classmethod
     def check_run_mode(cls, v: str) -> str:
         return _normalize_run_mode(v)
 
+    @field_validator("missed_run_policy")
+    @classmethod
+    def check_missed_run_policy(cls, v: str) -> str:
+        return normalize_missed_run_policy(v)
+
 
 class JobUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None)
-    schedule: str | None = Field(default=None, min_length=1, max_length=128)
+    schedule: str | None = Field(default=None, max_length=128)
     enabled: bool | None = Field(default=None)
     run_mode: str | None = Field(default=None)
+    missed_run_policy: str | None = Field(default=None)
     definition_ids: list[int] | None = Field(default=None)
     overrides: dict[str, Any] | None = Field(default=None)
     definitions: list[Any] | None = Field(default=None)
     steps: list[Any] | None = Field(default=None)
+
+    @field_validator("schedule")
+    @classmethod
+    def check_schedule(cls, v: str | None) -> str | None:
+        if v is not None:
+            return _normalize_and_validate_schedule(v)
+        return v
 
     @field_validator("run_mode")
     @classmethod
@@ -424,9 +495,22 @@ class JobUpdate(BaseModel):
             return _normalize_run_mode(v)
         return v
 
+    @field_validator("missed_run_policy")
+    @classmethod
+    def check_missed_run_policy(cls, v: str | None) -> str | None:
+        if v is not None:
+            return normalize_missed_run_policy(v)
+        return v
+
 
 class JobOrderUpdate(BaseModel):
     definition_ids: list[int] = Field(..., description="New ordered list of TestDefinition IDs")
+
+
+class CronValidateRequest(BaseModel):
+    schedule: str | None = Field(default=None, description="Schedule string ('manual' or cron expression)")
+    expression: str | None = Field(default=None, description="Alias for schedule")
+    count: int = Field(default=5, ge=1, le=20, description="Number of upcoming run timestamps to preview")
 
 
 class TriggerJobRunRequest(BaseModel):
@@ -437,6 +521,7 @@ class TriggerJobRunRequest(BaseModel):
     target_id: int | None = Field(default=None, description="Optional global target ID override")
     timeout: float | None = Field(default=None, description="Optional timeout in seconds")
     definition_ids: list[int] | None = Field(default=None, description="Optional subset/reordered definition IDs")
+    prevent_overlap: bool = Field(default=False, description="If true, return 409 when a run for this job is already active")
 
     @field_validator("run_mode")
     @classmethod
@@ -446,12 +531,42 @@ class TriggerJobRunRequest(BaseModel):
         return v
 
 
+@router.post("/validate-cron")
+def validate_cron_post(req: CronValidateRequest) -> dict[str, Any]:
+    """Validate a cron expression or schedule string and preview upcoming run timestamps."""
+    expr = req.schedule if req.schedule is not None else req.expression
+    return validate_and_preview_schedule(expr, upcoming_count=req.count)
+
+
+@router.get("/validate-cron")
+def validate_cron_get(
+    schedule: str | None = Query(None, description="Schedule or cron expression"),
+    expression: str | None = Query(None, description="Alias for schedule"),
+    count: int = Query(5, ge=1, le=20, description="Number of upcoming run timestamps"),
+) -> dict[str, Any]:
+    """Validate a cron expression via query parameters and preview upcoming runs."""
+    expr = schedule if schedule is not None else expression
+    return validate_and_preview_schedule(expr, upcoming_count=count)
+
+
+@router.get("/scheduler/status")
+def get_scheduler_status(db: Session = Depends(get_db)) -> dict[str, Any]:
+    """Get current status of the in-process cron scheduler."""
+    return get_scheduler().get_status(db)
+
+
+@router.post("/scheduler/tick")
+def trigger_scheduler_tick() -> dict[str, Any]:
+    """Manually evaluate due cron jobs immediately."""
+    return get_scheduler().tick()
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_job(
     req: JobCreate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Create a new job bundling test definitions with ordering, run mode, and optional overrides."""
+    """Create a new job bundling test definitions with ordering, run mode, schedule, and optional overrides."""
     existing = db.execute(select(Job).where(Job.name == req.name)).scalars().first()
     if existing:
         raise HTTPException(
@@ -476,12 +591,15 @@ def create_job(
         schedule=req.schedule,
         enabled=req.enabled,
         run_mode=req.run_mode,
+        missed_run_policy=req.missed_run_policy,
         definition_ids=final_def_ids,
         overrides=final_overrides,
     )
+    sync_job_schedule_fields(job)
     db.add(job)
     db.commit()
     db.refresh(job)
+    get_scheduler().trigger()
     return _format_job(job, db)
 
 
@@ -489,6 +607,7 @@ def create_job(
 def list_jobs(
     enabled: bool | None = Query(None, description="Filter by enabled status"),
     run_mode: str | None = Query(None, description="Filter by run_mode ('sequential' or 'parallel')"),
+    scheduled: bool | None = Query(None, description="Filter by whether job has a cron schedule"),
     limit: int = Query(50, ge=1, le=200, description="Max jobs to return"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
     db: Session = Depends(get_db),
@@ -499,6 +618,10 @@ def list_jobs(
         stmt = stmt.where(Job.enabled == enabled)
     if run_mode:
         stmt = stmt.where(Job.run_mode == run_mode.lower())
+    if scheduled is True:
+        stmt = stmt.where(Job.schedule != "manual")
+    elif scheduled is False:
+        stmt = stmt.where(Job.schedule == "manual")
 
     jobs = db.execute(stmt).scalars().all()
     return [_format_job(j, db) for j in jobs]
@@ -523,7 +646,7 @@ def update_job(
     req: JobUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Update job fields, definition ordering, run mode, or overrides."""
+    """Update job fields, definition ordering, run mode, schedule, missed-run policy, or overrides."""
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
@@ -537,6 +660,9 @@ def update_job(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Job with name '{update_data['name']}' already exists",
             )
+
+    prev_schedule = job.schedule
+    prev_enabled = job.enabled
 
     def_ids_in = update_data.pop("definition_ids", None)
     overrides_in = update_data.pop("overrides", None)
@@ -565,8 +691,69 @@ def update_job(
         if val is not None or field == "description":
             setattr(job, field, val)
 
+    schedule_or_enabled_changed = (job.schedule != prev_schedule) or (job.enabled != prev_enabled)
+    if schedule_or_enabled_changed or (
+        job.enabled and not is_manual_schedule(job.schedule) and job.next_run_at is None
+    ) or not job.enabled or is_manual_schedule(job.schedule):
+        sync_job_schedule_fields(job)
+
     db.commit()
     db.refresh(job)
+    get_scheduler().trigger()
+    return _format_job(job, db)
+
+
+@router.post("/{job_id}/enable")
+def enable_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Enable a job and compute its next scheduled run time if it has a cron schedule."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    job.enabled = True
+    sync_job_schedule_fields(job)
+    db.commit()
+    db.refresh(job)
+    get_scheduler().trigger()
+    return _format_job(job, db)
+
+
+@router.post("/{job_id}/disable")
+def disable_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Disable a job and clear its next scheduled run time."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    job.enabled = False
+    job.next_run_at = None
+    db.commit()
+    db.refresh(job)
+    get_scheduler().trigger()
+    return _format_job(job, db)
+
+
+@router.post("/{job_id}/toggle")
+def toggle_job_enabled(
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Toggle a job's enabled state and update its next scheduled run time."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    job.enabled = not job.enabled
+    sync_job_schedule_fields(job)
+    db.commit()
+    db.refresh(job)
+    get_scheduler().trigger()
     return _format_job(job, db)
 
 
@@ -601,6 +788,7 @@ def delete_job(
 
     db.delete(job)
     db.commit()
+    get_scheduler().trigger()
 
 
 @router.post("/{job_id}/run", status_code=status.HTTP_201_CREATED)
@@ -620,6 +808,14 @@ def trigger_job_run(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
 
     req_data = req or TriggerJobRunRequest()
+    if req_data.prevent_overlap:
+        active_run = get_active_job_run(db, job.id)
+        if active_run is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Job {job_id} already has an active run (#{active_run.id} is {active_run.status})",
+            )
+
     def_ids = (
         list(req_data.definition_ids)
         if req_data.definition_ids is not None

@@ -40,6 +40,7 @@ def app_and_client(tmp_path):
     from backend.app.config import get_settings
     from backend.app.db.session import get_db
     from backend.app.main import create_app
+    from backend.app.runner.scheduler import get_scheduler
     from backend.app.runner.worker import get_worker
 
     db_path = tmp_path / "test_api.db"
@@ -63,6 +64,9 @@ def app_and_client(tmp_path):
     worker = get_worker()
     worker.session_factory = TestingSessionLocal
     worker.artifacts_dir = tmp_path / "artifacts"
+
+    scheduler = get_scheduler()
+    scheduler.session_factory = TestingSessionLocal
 
     settings = get_settings()
     settings.DATA_DIR = tmp_path

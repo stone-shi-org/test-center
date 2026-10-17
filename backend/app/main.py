@@ -19,6 +19,7 @@ from backend.app.api import (
 from backend.app.config import get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.runner.recovery import recover_stale_runs
+from backend.app.runner.scheduler import get_scheduler
 from backend.app.runner.worker import get_worker
 
 
@@ -37,13 +38,17 @@ async def lifespan(app: FastAPI):
         import logging
         logging.getLogger(__name__).warning(f"Failed to recover stale runs on startup: {e}")
 
-    # Start runner worker
+    # Start runner worker and cron scheduler
     worker = get_worker()
     worker.start()
 
+    scheduler = get_scheduler()
+    scheduler.start()
+
     yield
 
-    # Cleanly stop worker on shutdown
+    # Cleanly stop scheduler and worker on shutdown
+    await scheduler.stop()
     await worker.stop()
 
 
@@ -52,7 +57,7 @@ OPENAPI_TAGS = [
     {"name": "testers", "description": "Tester plugins discovery and configuration schemas."},
     {"name": "targets", "description": "Target service endpoints and authentication environment variable references."},
     {"name": "test-definitions", "description": "Test definitions, suite selections, and manual run triggers."},
-    {"name": "jobs", "description": "Jobs bundling ordered test definitions, sequential/parallel run modes, overrides, and manual triggers."},
+    {"name": "jobs", "description": "Jobs bundling ordered test definitions, cron scheduling, enable/disable, missed-run policies, and manual triggers."},
     {"name": "runs", "description": "Test execution queueing, status, cancellation, and live streaming."},
     {"name": "results", "description": "Execution results, per-case details, metrics, and artifact downloads."},
     {"name": "compare", "description": "Side-by-side comparison of 2+ runs or results, aligned metrics, deltas, and per-case diffs."},

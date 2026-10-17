@@ -158,6 +158,39 @@ describe('API client', () => {
         method: 'POST',
       })
     )
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...mockJob, enabled: false, next_run_at: null }),
+    } as Response)
+
+    const disabledJob = await api.jobs.disable(7)
+    expect(disabledJob.enabled).toBe(false)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/jobs/7/disable',
+      expect.objectContaining({ method: 'POST' })
+    )
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        valid: true,
+        schedule: '0 2 * * *',
+        normalized: '0 2 * * *',
+        is_manual: false,
+        description: 'Daily at 02:00 UTC',
+        next_run_at: '2026-10-17T02:00:00Z',
+        upcoming_runs: ['2026-10-17T02:00:00Z'],
+        error: null,
+      }),
+    } as Response)
+
+    const cronPreview = await api.jobs.validateCron('0 2 * * *')
+    expect(cronPreview.valid).toBe(true)
+    expect(cronPreview.description).toBe('Daily at 02:00 UTC')
   })
 })
+
 

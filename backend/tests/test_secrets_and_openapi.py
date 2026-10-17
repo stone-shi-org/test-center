@@ -120,6 +120,9 @@ def test_openapi_documentation_enabled(app_and_client):
     assert "/api/jobs" in paths
     assert "/api/jobs/{job_id}" in paths
     assert "/api/jobs/{job_id}/run" in paths
+    assert "/api/jobs/{job_id}/enable" in paths
+    assert "/api/jobs/{job_id}/disable" in paths
+    assert "/api/jobs/validate-cron" in paths
     assert "/api/testers" in paths
     assert "/api/testers/{name}" in paths
     assert "/api/runs" in paths

@@ -94,6 +94,18 @@ export interface TriggerDefinitionRunRequest {
 }
 
 export type JobRunMode = 'sequential' | 'parallel'
+export type MissedRunPolicy = 'skip' | 'run_once'
+
+export interface CronValidationResult {
+  valid: boolean
+  schedule: string
+  normalized: string | null
+  is_manual: boolean
+  description: string | null
+  next_run_at: string | null
+  upcoming_runs: string[]
+  error: string | null
+}
 
 export interface JobStepOverride {
   suites?: string[]
@@ -125,8 +137,16 @@ export interface Job {
   name: string
   description: string | null
   schedule: string
+  is_scheduled?: boolean
+  schedule_description?: string | null
   enabled: boolean
   run_mode: JobRunMode
+  missed_run_policy?: MissedRunPolicy
+  next_run_at?: string | null
+  upcoming_runs?: string[]
+  last_scheduled_at?: string | null
+  is_running?: boolean
+  active_run_id?: number | null
   definition_ids: number[]
   overrides: Record<string, JobStepOverride | unknown>
   definitions: JobDefinitionItem[]
@@ -140,6 +160,7 @@ export interface JobCreate {
   schedule?: string
   enabled?: boolean
   run_mode?: JobRunMode
+  missed_run_policy?: MissedRunPolicy
   definition_ids?: number[]
   overrides?: Record<string, unknown>
   definitions?: Array<{
@@ -158,6 +179,7 @@ export interface JobUpdate {
   schedule?: string
   enabled?: boolean
   run_mode?: JobRunMode
+  missed_run_policy?: MissedRunPolicy
   definition_ids?: number[]
   overrides?: Record<string, unknown>
   definitions?: Array<{
@@ -178,6 +200,7 @@ export interface TriggerJobRunRequest {
   target_id?: number | null
   timeout?: number | null
   definition_ids?: number[]
+  prevent_overlap?: boolean
 }
 
 export interface CreateRunRequest {

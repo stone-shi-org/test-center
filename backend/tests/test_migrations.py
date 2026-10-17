@@ -41,6 +41,9 @@ def test_alembic_migrations_lifecycle(tmp_path):
     assert "run_mode" in job_columns
     assert "overrides" in job_columns
     assert "description" in job_columns
+    assert "missed_run_policy" in job_columns
+    assert "next_run_at" in job_columns
+    assert "last_scheduled_at" in job_columns
 
     run_columns = {col["name"] for col in inspector.get_columns("runs")}
     assert "config_snapshot" in run_columns

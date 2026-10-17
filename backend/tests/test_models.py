@@ -91,12 +91,15 @@ def test_test_definition_crud(db_session):
 
 
 def test_job_crud(db_session):
+    now = datetime.now(timezone.utc)
     job = Job(
         name="Nightly Benchmark Suite",
         description="Bundled nightly regression suite",
         schedule="0 2 * * *",
         enabled=True,
         run_mode="parallel",
+        missed_run_policy="run_once",
+        next_run_at=now,
         definition_ids=[1, 2, 3],
         overrides={"1": {"suites": ["smoke"], "config": {"batch_size": 16}}},
     )
@@ -110,12 +113,16 @@ def test_job_crud(db_session):
     assert job.schedule == "0 2 * * *"
     assert job.enabled is True
     assert job.run_mode == "parallel"
+    assert job.missed_run_policy == "run_once"
+    assert job.next_run_at is not None
     assert job.definition_ids == [1, 2, 3]
     assert job.overrides["1"]["config"]["batch_size"] == 16
 
     snap = job.to_snapshot()
     assert snap["id"] == job.id
     assert snap["run_mode"] == "parallel"
+    assert snap["missed_run_policy"] == "run_once"
+    assert snap["next_run_at"] is not None
     assert snap["definition_ids"] == [1, 2, 3]
     assert snap["overrides"]["1"]["suites"] == ["smoke"]
 

@@ -101,13 +101,26 @@ class RunWorker:
         """Find the oldest queued/pending run and atomically mark it as running."""
         db: Session = self.session_factory()
         try:
+            running_job_ids = set(
+                db.execute(
+                    select(Run.job_id).where(
+                        Run.status.in_(["running", "cancelling"]),
+                        Run.job_id.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
             stmt = (
                 select(Run)
                 .where(Run.status.in_(["queued", "pending"]))
                 .order_by(Run.queued_at.asc().nulls_last(), Run.id.asc())
-                .limit(1)
             )
-            run = db.execute(stmt).scalars().first()
+            if running_job_ids:
+                stmt = stmt.where(
+                    (Run.job_id.is_(None)) | (Run.job_id.not_in(running_job_ids))
+                )
+            run = db.execute(stmt.limit(1)).scalars().first()
             if not run:
                 return None
 

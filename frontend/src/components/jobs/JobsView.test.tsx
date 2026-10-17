@@ -301,4 +301,63 @@ describe('JobsView & Grouped Run Results', () => {
     expect(screen.queryByText('Smoke suite passed')).toBeNull()
     expect(screen.getByText('Load suite failed threshold')).toBeDefined()
   })
+
+  it('validates cron expressions, displays next run and missed-run policy, and toggles enable/disable', async () => {
+    const scheduledJob = {
+      ...mockJobs[0],
+      schedule: '0 2 * * *',
+      schedule_description: 'Daily at 02:00 UTC',
+      missed_run_policy: 'run_once' as const,
+      next_run_at: '2026-10-17T02:00:00Z',
+      enabled: true,
+    }
+    vi.spyOn(api.jobs, 'list').mockResolvedValue([scheduledJob])
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(mockDefinitions)
+    vi.spyOn(api.testers, 'list').mockResolvedValue(mockTesters)
+    vi.spyOn(api.targets, 'list').mockResolvedValue([])
+    vi.spyOn(api.runs, 'list').mockResolvedValue([])
+
+    const disableSpy = vi.spyOn(api.jobs, 'disable').mockResolvedValue({
+      ...scheduledJob,
+      enabled: false,
+      next_run_at: null,
+    })
+
+    render(
+      <RouterProvider>
+        <JobsView />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('nightly-suite')).toBeDefined()
+    })
+
+    // Displays schedule description, missed-run policy, and formatted next run time
+    expect(screen.getByText('Daily at 02:00 UTC')).toBeDefined()
+    expect(screen.getByText('Missed: run_once')).toBeDefined()
+    expect(screen.getByText('2026-10-17 02:00 UTC')).toBeDefined()
+
+    // Click Disable button on the job row
+    const disableBtn = screen.getByRole('button', { name: /Disable job nightly-suite/i })
+    fireEvent.click(disableBtn)
+
+    await waitFor(() => {
+      expect(disableSpy).toHaveBeenCalledWith(1)
+    })
+    expect(screen.getByText('Paused (Disabled)')).toBeDefined()
+
+    // Open New Job editor and test cron expression validation
+    fireEvent.click(screen.getByRole('button', { name: /\+ New Job/i }))
+    const scheduleInput = screen.getByLabelText(/Schedule \(Optional\)/i)
+    fireEvent.change(scheduleInput, { target: { value: '99 * * * *' } })
+
+    expect(screen.getByRole('alert').textContent).toContain('Invalid cron')
+
+    // Select a valid preset
+    fireEvent.click(screen.getByRole('button', { name: 'Every 15m' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('Every 15 minutes')).toBeDefined()
+  })
 })
+

@@ -2164,4 +2164,70 @@
   gap: 4px;
 }
 
+/* Cron Scheduler UI */
+.cron-presets-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.cron-preset-chip {
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.cron-preset-chip:hover,
+.cron-preset-chip.active {
+  border-color: var(--accent-primary);
+  color: var(--text-main);
+  background-color: rgba(59, 130, 246, 0.14);
+}
+
+.cron-validation-error {
+  margin-top: 6px;
+  color: #f87171;
+  font-size: 12px;
+}
+
+.cron-preview-box {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.schedule-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedule-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.missed-policy-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-input);
+  color: var(--text-muted);
+}
+
+.next-run-timestamp {
+  color: var(--accent-primary);
+  font-weight: 500;
+}
+
+
 
