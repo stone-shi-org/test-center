@@ -128,6 +128,7 @@ def test_openapi_documentation_enabled(app_and_client):
     assert "/api/results/{result_id}" in paths
     assert "/api/results/{result_id}/cases" in paths
     assert "/api/results/{result_id}/artifacts" in paths
+    assert "/api/compare" in paths
 
     # 2. Check /docs (Swagger UI)
     res_docs = client.get("/docs")

@@ -9,6 +9,7 @@ from backend.app.api.test_definitions import (
 )
 from backend.app.api.runs import router as runs_router
 from backend.app.api.results import router as results_router
+from backend.app.api.compare import router as compare_router
 
 __all__ = [
     "health_router",
@@ -18,4 +19,5 @@ __all__ = [
     "definitions_alias_router",
     "runs_router",
     "results_router",
+    "compare_router",
 ]

@@ -13,6 +13,7 @@ from backend.app.api import (
     definitions_alias_router,
     runs_router,
     results_router,
+    compare_router,
 )
 from backend.app.config import get_settings
 from backend.app.db.session import SessionLocal
@@ -52,6 +53,7 @@ OPENAPI_TAGS = [
     {"name": "test-definitions", "description": "Test definitions, suite selections, and manual run triggers."},
     {"name": "runs", "description": "Test execution queueing, status, cancellation, and live streaming."},
     {"name": "results", "description": "Execution results, per-case details, metrics, and artifact downloads."},
+    {"name": "compare", "description": "Side-by-side comparison of 2+ runs or results, aligned metrics, deltas, and per-case diffs."},
 ]
 
 
@@ -60,7 +62,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.VERSION,
-        description="Test Center REST API: targets, testers, test definitions, runs, and results.",
+        description="Test Center REST API: targets, testers, test definitions, runs, results, and compare.",
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
@@ -85,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(definitions_alias_router, prefix="/api", include_in_schema=False)
     app.include_router(runs_router, prefix="/api")
     app.include_router(results_router, prefix="/api")
+    app.include_router(compare_router, prefix="/api")
 
     # Static assets and SPA handling for frontend
     static_dir = Path(settings.STATIC_DIR)
