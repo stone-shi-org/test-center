@@ -56,6 +56,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r backend/requirements-dev.txt
 
+# Generate Python gRPC stubs from vendored proto/livestt/v1/asr.proto
+./scripts/gen_proto.sh
+
 # Run unit tests
 pytest backend
 

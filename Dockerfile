@@ -14,11 +14,16 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV GRPC_POLL_STRATEGY=poll
 
 COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r ./backend/requirements.txt
 
+COPY proto/ ./proto
+COPY scripts/ ./scripts
 COPY backend/ ./backend
+RUN bash ./scripts/gen_proto.sh
+
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 ENV HOST=0.0.0.0

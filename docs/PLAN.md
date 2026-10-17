@@ -11,6 +11,7 @@ and render/compare them later. Built from scratch; `../tests` is reference only.
 - Test data: `test-data/NOTSOFAR-1` (gitignored), mounted read-only into the container.
 - v1 testers: live-stt (all endpoints), embedding, LLM. Rerank/others later via the same plugin API.
 - Priority feature: **compare** runs side by side.
+- live-stt gRPC: vendor `proto/livestt/v1/asr.proto` (no dependency on `live-stt` code), generate Python stubs in the build (`scripts/gen_proto.sh`), and use the built-in streaming client/harness in `backend/app/testers/live_stt/grpc_client.py`.
 
 ## Layout
 ```
@@ -18,7 +19,9 @@ backend/
   app/api/        REST: targets, testers, jobs, runs, results, compare
   app/runner/     DB-backed queue + worker, subprocess per tester run, timeouts, cancel
   app/db/         models + migrations
-  app/testers/    plugins: live_stt/, embedding/, llm/
+  app/testers/    plugins: live_stt/ (HTTP + gRPC + pb/), embedding/, llm/
+proto/            vendored livestt/v1/asr.proto
+scripts/          gen_proto.sh (build-time Python gRPC stub codegen)
 frontend/         React/Vite app
 test-data/        NOTSOFAR-1 etc. (not committed)
 data/             sqlite db + artifacts (not committed)
@@ -83,4 +86,5 @@ side-by-side artifacts).
 
 ## Open items
 - NOTSOFAR-1 layout and which subset/split to use (decide once copied in).
-- Where the live-stt proto/client comes from (vendor the .proto vs. pip-install the client).
+- ~~Where the live-stt proto/client comes from (vendor the .proto vs. pip-install the client).~~ **Resolved (TES-30):** Vendored `proto/livestt/v1/asr.proto` (no dependency on `live-stt` code), generate Python protobuf/gRPC stubs in the build (`scripts/gen_proto.sh` into `backend/app/testers/live_stt/pb/`), and use the built-in streaming client & harness (`backend/app/testers/live_stt/grpc_client.py`).
+

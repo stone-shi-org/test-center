@@ -11,6 +11,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+backend/app/testers/live_stt/pb/livestt/
 
 # Node
 node_modules/

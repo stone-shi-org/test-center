@@ -9,3 +9,4 @@ data/
 test-data/
 .env
 *.env
+backend/app/testers/live_stt/pb/livestt
