@@ -31,6 +31,14 @@ class Settings(BaseModel):
     )
     RETENTION_ARTIFACTS_ONLY: bool = os.getenv("RETENTION_ARTIFACTS_ONLY", "false").lower() in ("1", "true", "yes")
     RETENTION_KEEP_FAILED: bool = os.getenv("RETENTION_KEEP_FAILED", "false").lower() in ("1", "true", "yes")
+    WEBHOOK_TIMEOUT_SECONDS: float = float(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "10.0"))
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD_ENV_VAR: str = os.getenv("SMTP_PASSWORD_ENV_VAR", "SMTP_PASSWORD")
+    SMTP_FROM: str = os.getenv("SMTP_FROM", "test-center@localhost")
+    SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes")
+    SMTP_USE_SSL: bool = os.getenv("SMTP_USE_SSL", "false").lower() in ("1", "true", "yes")
 
     def model_post_init(self, __context):
         if not self.DATABASE_URL:

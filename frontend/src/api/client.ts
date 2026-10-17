@@ -8,6 +8,7 @@ import type {
   HealthResponse,
   Job,
   JobCreate,
+  JobNotificationSettings,
   JobUpdate,
   RetentionCleanupRequest,
   RetentionCleanupResult,
@@ -23,6 +24,7 @@ import type {
   TestDefinitionCreate,
   TestDefinitionUpdate,
   TesterInfo,
+  TestJobNotificationResponse,
   TrendQueryParams,
   TrendResponse,
   TriggerDefinitionRunRequest,
@@ -204,6 +206,26 @@ export const api = {
       }),
     trigger: (id: number, data?: TriggerJobRunRequest) =>
       request<Run>(`/jobs/${id}/run`, {
+        method: 'POST',
+        body: data ? JSON.stringify(data) : undefined,
+      }),
+    getNotifications: (id: number) =>
+      request<JobNotificationSettings>(`/jobs/${id}/notifications`),
+    updateNotifications: (id: number, data: Partial<JobNotificationSettings>) =>
+      request<JobNotificationSettings>(`/jobs/${id}/notifications`, {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    testNotifications: (
+      id: number,
+      data?: {
+        run_id?: number
+        webhook_url?: string | null
+        email_to?: string[] | string
+        notifications?: Partial<JobNotificationSettings>
+      } & Partial<JobNotificationSettings>
+    ) =>
+      request<TestJobNotificationResponse>(`/jobs/${id}/notifications/test`, {
         method: 'POST',
         body: data ? JSON.stringify(data) : undefined,
       }),

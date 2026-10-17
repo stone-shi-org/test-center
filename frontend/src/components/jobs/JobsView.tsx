@@ -65,6 +65,16 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
   const [runningJobId, setRunningJobId] = useState<number | null>(null)
   const [togglingJobId, setTogglingJobId] = useState<number | null>(null)
 
+  // Notification settings state
+  const [notifyEnabled, setNotifyEnabled] = useState<boolean>(false)
+  const [notifyOnFailure, setNotifyOnFailure] = useState<boolean>(true)
+  const [notifyOnRegression, setNotifyOnRegression] = useState<boolean>(true)
+  const [regressionThreshold, setRegressionThreshold] = useState<string>('0')
+  const [webhookUrl, setWebhookUrl] = useState<string>('')
+  const [webhookSecretEnvVar, setWebhookSecretEnvVar] = useState<string>('')
+  const [emailTo, setEmailTo] = useState<string>('')
+  const [testingNotification, setTestingNotification] = useState<boolean>(false)
+
   // Inline Quick Definition Builder state (uses SchemaForm)
   const [showDefBuilder, setShowDefBuilder] = useState<boolean>(false)
   const [newDefName, setNewDefName] = useState<string>('')
@@ -123,6 +133,19 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
     setJobSchedule(job.schedule || '')
     setJobMissedRunPolicy(job.missed_run_policy || 'skip')
     setJobEnabled(job.enabled ?? true)
+
+    const notif = job.notifications
+    setNotifyEnabled(
+      notif?.enabled ?? Boolean(notif?.webhook_url || (notif?.email_to && notif.email_to.length > 0))
+    )
+    setNotifyOnFailure(notif?.on_failure ?? job.notify_on_failure ?? true)
+    setNotifyOnRegression(notif?.on_regression ?? job.notify_on_regression ?? true)
+    setRegressionThreshold(
+      String(notif?.regression_threshold ?? job.regression_threshold ?? 0)
+    )
+    setWebhookUrl(notif?.webhook_url || job.webhook_url || '')
+    setWebhookSecretEnvVar(notif?.webhook_secret_env_var || '')
+    setEmailTo((notif?.email_to || job.email_to || []).join(', '))
 
     const initialSteps: BundledStepState[] = (job.definition_ids || []).map((defId, idx) => {
       const defItem = job.definitions?.[idx]
@@ -210,6 +233,13 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
     setJobSchedule('')
     setJobMissedRunPolicy('skip')
     setJobEnabled(true)
+    setNotifyEnabled(false)
+    setNotifyOnFailure(true)
+    setNotifyOnRegression(true)
+    setRegressionThreshold('0')
+    setWebhookUrl('')
+    setWebhookSecretEnvVar('')
+    setEmailTo('')
     setSteps([])
     setExpandedStepIdx(null)
     setShowDefBuilder(definitions.length === 0)
@@ -370,6 +400,16 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
       }
     }
 
+    const cleanedWebhook = webhookUrl.trim() || null
+    const parsedEmails = emailTo
+      .split(/[,;]/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const parsedThreshold = Number.isNaN(parseFloat(regressionThreshold))
+      ? 0
+      : Math.max(0, parseFloat(regressionThreshold))
+    const hasChannel = Boolean(cleanedWebhook || parsedEmails.length > 0)
+
     return {
       name: jobName.trim(),
       description: jobDescription.trim() || null,
@@ -379,6 +419,52 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
       missed_run_policy: jobMissedRunPolicy,
       definition_ids,
       overrides,
+      notifications: {
+        enabled: notifyEnabled || hasChannel,
+        on_failure: notifyOnFailure,
+        on_regression: notifyOnRegression,
+        regression_threshold: parsedThreshold,
+        webhook_enabled: Boolean(cleanedWebhook),
+        webhook_url: cleanedWebhook,
+        webhook_secret_env_var: webhookSecretEnvVar.trim() || null,
+        email_enabled: parsedEmails.length > 0,
+        email_to: parsedEmails,
+      },
+    }
+  }
+
+  const handleTestNotification = async () => {
+    if (!editingJob) return
+    setError(null)
+    setSuccessMessage(null)
+    try {
+      setTestingNotification(true)
+      const cleanedWebhook = webhookUrl.trim() || null
+      const parsedEmails = emailTo
+        .split(/[,;]/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const res = await api.jobs.testNotifications(editingJob.id, {
+        webhook_url: cleanedWebhook,
+        email_to: parsedEmails,
+        notifications: {
+          enabled: true,
+          on_failure: notifyOnFailure,
+          on_regression: notifyOnRegression,
+          webhook_url: cleanedWebhook,
+          webhook_secret_env_var: webhookSecretEnvVar.trim() || null,
+          email_to: parsedEmails,
+        },
+      })
+      if (res.ok || res.sent) {
+        setSuccessMessage('Test notification delivered successfully.')
+      } else {
+        setError('Test notification delivery failed or no channel succeeded.')
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setTestingNotification(false)
     }
   }
 
@@ -651,6 +737,141 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                 />
                 <span className="field-label-text">Job Enabled</span>
               </label>
+            </div>
+          </div>
+
+          {/* Per-Job Notification Settings */}
+          <div className="job-notifications-section card" style={{ marginBottom: '16px', padding: '12px 16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <div>
+                <h4 style={{ margin: 0 }}>Notifications (Failure & Regression)</h4>
+                <p className="text-muted text-sm" style={{ margin: '2px 0 0 0' }}>
+                  Trigger webhook or email notifications on failed runs or regressions vs the previous job run.
+                </p>
+              </div>
+              {editingJob && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-secondary"
+                  onClick={handleTestNotification}
+                  disabled={testingNotification || savingJob || (!webhookUrl.trim() && !emailTo.trim())}
+                >
+                  {testingNotification ? 'Sending...' : '🔔 Send Test Notification'}
+                </button>
+              )}
+            </div>
+
+            <div className="form-row" style={{ alignItems: 'center' }}>
+              <div className="form-group flex-1">
+                <label className="checkbox-label" htmlFor="job-notify-enabled-checkbox">
+                  <input
+                    id="job-notify-enabled-checkbox"
+                    type="checkbox"
+                    checked={notifyEnabled}
+                    onChange={(e) => setNotifyEnabled(e.target.checked)}
+                    disabled={savingJob}
+                  />
+                  <span className="field-label-text">Enable Notifications</span>
+                </label>
+              </div>
+
+              <div className="form-group flex-1">
+                <label className="checkbox-label" htmlFor="job-notify-failure-checkbox">
+                  <input
+                    id="job-notify-failure-checkbox"
+                    type="checkbox"
+                    checked={notifyOnFailure}
+                    onChange={(e) => setNotifyOnFailure(e.target.checked)}
+                    disabled={savingJob}
+                  />
+                  <span className="field-label-text">Trigger on Failed Run</span>
+                </label>
+              </div>
+
+              <div className="form-group flex-1">
+                <label className="checkbox-label" htmlFor="job-notify-regression-checkbox">
+                  <input
+                    id="job-notify-regression-checkbox"
+                    type="checkbox"
+                    checked={notifyOnRegression}
+                    onChange={(e) => setNotifyOnRegression(e.target.checked)}
+                    disabled={savingJob}
+                  />
+                  <span className="field-label-text">Trigger on Regression vs Previous Run</span>
+                </label>
+              </div>
+
+              <div className="form-group flex-1">
+                <label htmlFor="job-regression-threshold-input">
+                  Regression Threshold (%)
+                </label>
+                <input
+                  id="job-regression-threshold-input"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.5"
+                  className="form-input font-mono"
+                  value={regressionThreshold}
+                  onChange={(e) => setRegressionThreshold(e.target.value)}
+                  disabled={savingJob}
+                />
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group flex-2">
+                <label htmlFor="job-webhook-url-input">Webhook URL</label>
+                <input
+                  id="job-webhook-url-input"
+                  type="url"
+                  className="form-input font-mono"
+                  value={webhookUrl}
+                  onChange={(e) => {
+                    setWebhookUrl(e.target.value)
+                    if (e.target.value.trim()) {
+                      setNotifyEnabled(true)
+                    }
+                  }}
+                  placeholder="https://hooks.example.com/test-center"
+                  disabled={savingJob}
+                />
+              </div>
+
+              <div className="form-group flex-1">
+                <label htmlFor="job-webhook-secret-env-input">
+                  Webhook Secret Env Var (Optional)
+                </label>
+                <input
+                  id="job-webhook-secret-env-input"
+                  type="text"
+                  className="form-input font-mono"
+                  value={webhookSecretEnvVar}
+                  onChange={(e) => setWebhookSecretEnvVar(e.target.value)}
+                  placeholder="e.g. WEBHOOK_SIGNING_SECRET"
+                  disabled={savingJob}
+                />
+              </div>
+
+              <div className="form-group flex-1">
+                <label htmlFor="job-email-to-input">
+                  Email Recipients (Optional)
+                </label>
+                <input
+                  id="job-email-to-input"
+                  type="text"
+                  className="form-input"
+                  value={emailTo}
+                  onChange={(e) => {
+                    setEmailTo(e.target.value)
+                    if (e.target.value.trim()) {
+                      setNotifyEnabled(true)
+                    }
+                  }}
+                  placeholder="alerts@example.com, team@example.com"
+                  disabled={savingJob}
+                />
+              </div>
             </div>
           </div>
 
@@ -1123,6 +1344,28 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
                         )}
                       </div>
                       {job.description && <div className="text-muted text-sm">{job.description}</div>}
+                      {job.notifications?.enabled &&
+                        (job.notifications.webhook_url ||
+                          (job.notifications.email_to && job.notifications.email_to.length > 0)) && (
+                          <div className="schedule-meta-row" style={{ marginTop: '4px' }}>
+                            {job.notifications.webhook_url && (
+                              <span
+                                className="missed-policy-badge"
+                                title={`Webhook: ${job.notifications.webhook_url}`}
+                              >
+                                🔔 Webhook
+                              </span>
+                            )}
+                            {job.notifications.email_to && job.notifications.email_to.length > 0 && (
+                              <span
+                                className="missed-policy-badge"
+                                title={`Email: ${job.notifications.email_to.join(', ')}`}
+                              >
+                                ✉ Email ({job.notifications.email_to.length})
+                              </span>
+                            )}
+                          </div>
+                        )}
                     </td>
                     <td>
                       <span className={`run-mode-badge mode-${job.run_mode}`}>

@@ -414,6 +414,17 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
             "artifacts": artifacts_list,
         })
 
+    notif_report = (
+        run.config_snapshot.get("notification_report")
+        if isinstance(run.config_snapshot, dict)
+        else None
+    )
+    notifs_sent = (
+        run.config_snapshot.get("notifications_sent")
+        if isinstance(run.config_snapshot, dict)
+        else None
+    )
+
     return {
         "id": run.id,
         "job_id": run.job_id,
@@ -425,6 +436,8 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
         "config_snapshot": run.config_snapshot,
         "target_snapshot": run.target_snapshot,
         "git_info": run.git_info,
+        "notification_report": notif_report,
+        "notifications_sent": notifs_sent,
         "results": results_list,
     }
 

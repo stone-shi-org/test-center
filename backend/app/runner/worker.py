@@ -743,18 +743,44 @@ class RunWorker:
             overall_summary = " | ".join(summaries) if summaries else f"Completed {len(step_outcomes)} steps"
             self._append_main_log(main_log_file, run.status.upper(), overall_summary)
             db.commit()
-
-            get_broadcaster().publish(
-                run_id,
-                {
-                    "type": "completed",
-                    "run_id": run_id,
-                    "status": run.status,
-                    "summary": overall_summary,
-                },
-            )
+            final_status = run.status
         finally:
             db.close()
+
+        if final_status != "cancelled":
+            await self._maybe_notify_completed_run(run_id)
+
+        get_broadcaster().publish(
+            run_id,
+            {
+                "type": "completed",
+                "run_id": run_id,
+                "status": final_status,
+                "summary": overall_summary,
+            },
+        )
+
+    async def _maybe_notify_completed_run(self, run_id: int) -> None:
+        """Evaluate and dispatch per-job failure/regression notifications after a run finishes."""
+        try:
+            from backend.app.runner.notifications import process_run_notifications
+
+            db: Session = self.session_factory()
+            try:
+                report = await process_run_notifications(db, run_id)
+                if report.get("triggered"):
+                    log_file = self.artifacts_dir / str(run_id) / "run.log"
+                    reasons_str = ", ".join(report.get("reasons") or [])
+                    channels_str = ", ".join(
+                        f"{d.get('channel')} ({d.get('status')})"
+                        for d in (report.get("deliveries") or [])
+                    )
+                    msg = f"Notifications triggered ({reasons_str}): {channels_str}"
+                    self._append_main_log(log_file, "INFO", msg)
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning(f"Failed to process notifications for run #{run_id}: {exc}")
 
     async def _kill_process_group(self, process: asyncio.subprocess.Process) -> None:
         """Send SIGTERM, then SIGKILL if process doesn't exit promptly."""
@@ -844,6 +870,9 @@ class RunWorker:
         finally:
             db.close()
 
+        if status != "cancelled":
+            await self._maybe_notify_completed_run(run_id)
+
         get_broadcaster().publish(
             run_id,
             {"type": "completed", "run_id": run_id, "status": status, "summary": summary},
@@ -853,6 +882,8 @@ class RunWorker:
         """Process successful or non-zero exit from subprocess executor."""
         db: Session = self.session_factory()
         now = utc_now()
+        final_status = "error"
+        final_summary = None
         try:
             run = db.get(Run, run_id)
             if not run:
@@ -960,19 +991,23 @@ class RunWorker:
                 )
 
             db.commit()
-
-            get_broadcaster().publish(
-                run_id,
-                {
-                    "type": "completed",
-                    "run_id": run_id,
-                    "status": run.status,
-                    "summary": result.summary,
-                },
-            )
-
+            final_status = run.status
+            final_summary = result.summary
         finally:
             db.close()
+
+        if final_status != "cancelled":
+            await self._maybe_notify_completed_run(run_id)
+
+        get_broadcaster().publish(
+            run_id,
+            {
+                "type": "completed",
+                "run_id": run_id,
+                "status": final_status,
+                "summary": final_summary,
+            },
+        )
 
 
 # Global worker instance

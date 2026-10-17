@@ -129,8 +129,11 @@ class DummyTester(TesterPlugin):
         )
 
         # Set standard metrics
-        result.set_metric("duration_ms", round(elapsed * 1000, 2), unit="ms", better="lower")
-        result.set_metric("throughput", 100.0, unit="req/s", better="higher")
+        duration_val = float(config.get("duration_ms", round(duration * 1000, 2)))
+        throughput_val = float(config.get("throughput", 100.0))
+        latency_val = float(config.get("latency_ms", 25.0))
+        result.set_metric("duration_ms", duration_val, unit="ms", better="lower")
+        result.set_metric("throughput", throughput_val, unit="req/s", better="higher")
         result.set_metric("success_rate", 50.0 if fail_case else 100.0, unit="%", better="higher")
 
         # Add cases
@@ -140,7 +143,7 @@ class DummyTester(TesterPlugin):
                 case_id=f"case_{s}_001",
                 suite=s,
                 status=case_status,
-                metrics={"latency_ms": {"value": 25.0, "unit": "ms", "better": "lower"}},
+                metrics={"latency_ms": {"value": latency_val, "unit": "ms", "better": "lower"}},
                 detail={"suite": s, "evaluated": True},
             )
 

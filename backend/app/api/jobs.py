@@ -34,6 +34,13 @@ from backend.app.runner.scheduler import (
     normalize_missed_run_policy,
     sync_job_schedule_fields,
 )
+from backend.app.runner.notifications import (
+    build_notification_payload,
+    dispatch_notifications,
+    evaluate_run_for_notifications,
+    normalize_notification_settings,
+    process_run_notifications,
+)
 from backend.app.runner.worker import get_worker
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -415,6 +422,10 @@ def _format_job(job: Job, db: Session) -> dict[str, Any]:
             upcoming_runs = []
 
     active_run = get_active_job_run(db, job.id)
+    try:
+        norm_notifications = normalize_notification_settings(job.notifications)
+    except ValueError:
+        norm_notifications = dict(job.notifications or {})
 
     return {
         "id": job.id,
@@ -435,6 +446,8 @@ def _format_job(job: Job, db: Session) -> dict[str, Any]:
         "active_run_id": active_run.id if active_run else None,
         "definition_ids": def_ids,
         "overrides": overrides,
+        "notifications": norm_notifications,
+        "notification_settings": norm_notifications,
         "definitions": definitions_list,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
@@ -452,6 +465,13 @@ class JobCreate(BaseModel):
     overrides: dict[str, Any] | None = Field(default=None, description="Optional per-definition or global overrides")
     definitions: list[Any] | None = Field(default=None, description="Optional ordered list of definition items with inline overrides")
     steps: list[Any] | None = Field(default=None, description="Optional alias for definitions")
+    notifications: dict[str, Any] | None = Field(default=None, description="Per-job notification settings (webhook/email on failure/regression)")
+    notification_settings: dict[str, Any] | None = Field(default=None, description="Optional alias for notifications")
+    webhook_url: str | None = Field(default=None, description="Optional webhook URL shortcut")
+    notify_on_failure: bool | None = Field(default=None, description="Optional trigger on failed run shortcut")
+    notify_on_regression: bool | None = Field(default=None, description="Optional trigger on regression shortcut")
+    regression_threshold: float | None = Field(default=None, description="Optional regression percentage threshold shortcut")
+    email_to: list[str] | str | None = Field(default=None, description="Optional email recipients shortcut")
 
     @field_validator("schedule")
     @classmethod
@@ -480,6 +500,13 @@ class JobUpdate(BaseModel):
     overrides: dict[str, Any] | None = Field(default=None)
     definitions: list[Any] | None = Field(default=None)
     steps: list[Any] | None = Field(default=None)
+    notifications: dict[str, Any] | None = Field(default=None)
+    notification_settings: dict[str, Any] | None = Field(default=None)
+    webhook_url: str | None = Field(default=None)
+    notify_on_failure: bool | None = Field(default=None)
+    notify_on_regression: bool | None = Field(default=None)
+    regression_threshold: float | None = Field(default=None)
+    email_to: list[str] | str | None = Field(default=None)
 
     @field_validator("schedule")
     @classmethod
@@ -531,6 +558,13 @@ class TriggerJobRunRequest(BaseModel):
         return v
 
 
+class TestJobNotificationRequest(BaseModel):
+    run_id: int | None = Field(default=None, description="Optional Run ID to evaluate and send notifications for")
+    webhook_url: str | None = Field(default=None, description="Optional webhook URL override for testing")
+    email_to: list[str] | str | None = Field(default=None, description="Optional email recipients override for testing")
+    notifications: dict[str, Any] | None = Field(default=None, description="Optional notification settings override")
+
+
 @router.post("/validate-cron")
 def validate_cron_post(req: CronValidateRequest) -> dict[str, Any]:
     """Validate a cron expression or schedule string and preview upcoming run timestamps."""
@@ -566,7 +600,7 @@ def create_job(
     req: JobCreate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Create a new job bundling test definitions with ordering, run mode, schedule, and optional overrides."""
+    """Create a new job bundling test definitions with ordering, run mode, schedule, notifications, and optional overrides."""
     existing = db.execute(select(Job).where(Job.name == req.name)).scalars().first()
     if existing:
         raise HTTPException(
@@ -585,6 +619,26 @@ def create_job(
 
     _validate_job_definitions_and_overrides(db, final_def_ids, final_overrides)
 
+    raw_notif = (
+        req.notifications
+        if req.notifications is not None
+        else req.notification_settings
+    )
+    try:
+        final_notifications = normalize_notification_settings(
+            raw_notif,
+            webhook_url=req.webhook_url,
+            notify_on_failure=req.notify_on_failure,
+            notify_on_regression=req.notify_on_regression,
+            regression_threshold=req.regression_threshold,
+            email_to=req.email_to,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
     job = Job(
         name=req.name,
         description=req.description,
@@ -594,6 +648,7 @@ def create_job(
         missed_run_policy=req.missed_run_policy,
         definition_ids=final_def_ids,
         overrides=final_overrides,
+        notifications=final_notifications,
     )
     sync_job_schedule_fields(job)
     db.add(job)
@@ -646,7 +701,7 @@ def update_job(
     req: JobUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Update job fields, definition ordering, run mode, schedule, missed-run policy, or overrides."""
+    """Update job fields, definition ordering, run mode, schedule, missed-run policy, notifications, or overrides."""
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
@@ -668,6 +723,44 @@ def update_job(
     overrides_in = update_data.pop("overrides", None)
     definitions_in = update_data.pop("definitions", None)
     steps_in = update_data.pop("steps", None)
+
+    has_notif_update = any(
+        k in update_data
+        for k in (
+            "notifications",
+            "notification_settings",
+            "webhook_url",
+            "notify_on_failure",
+            "notify_on_regression",
+            "regression_threshold",
+            "email_to",
+        )
+    )
+    notif_in = update_data.pop("notifications", None)
+    notif_alias_in = update_data.pop("notification_settings", None)
+    webhook_url_in = update_data.pop("webhook_url", None)
+    notify_fail_in = update_data.pop("notify_on_failure", None)
+    notify_reg_in = update_data.pop("notify_on_regression", None)
+    reg_thr_in = update_data.pop("regression_threshold", None)
+    email_to_in = update_data.pop("email_to", None)
+
+    if has_notif_update:
+        raw_notif_update = notif_in if notif_in is not None else notif_alias_in
+        try:
+            job.notifications = normalize_notification_settings(
+                raw_notif_update,
+                base=dict(job.notifications or {}),
+                webhook_url=webhook_url_in,
+                notify_on_failure=notify_fail_in,
+                notify_on_regression=notify_reg_in,
+                regression_threshold=reg_thr_in,
+                email_to=email_to_in,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
 
     extracted_def_ids, extracted_overrides = _extract_definitions_and_overrides_from_payload(
         definition_ids=def_ids_in,
@@ -939,6 +1032,7 @@ def trigger_job_run(
         "definition_ids": def_ids,
         "definitions": step_snapshots,
         "overrides": combined_overrides,
+        "notifications": normalize_notification_settings(job.notifications),
     }
     if req_data.timeout is not None:
         config_snapshot["timeout"] = float(req_data.timeout)
@@ -967,6 +1061,140 @@ def trigger_job_run(
 
     from backend.app.api.runs import _format_run_detail
     return _format_run_detail(run)
+
+
+@router.get("/{job_id}/notifications")
+def get_job_notifications(
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Get per-job notification settings."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+    norm = normalize_notification_settings(job.notifications)
+    return {**norm, "job_id": job.id, "notifications": norm}
+
+
+@router.put("/{job_id}/notifications")
+@router.patch("/{job_id}/notifications")
+def update_job_notifications(
+    job_id: int,
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Update per-job notification settings."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    raw_input = (
+        payload.get("notifications")
+        if isinstance(payload.get("notifications"), dict)
+        else (
+            payload.get("notification_settings")
+            if isinstance(payload.get("notification_settings"), dict)
+            else payload
+        )
+    )
+    try:
+        norm = normalize_notification_settings(
+            raw_input,
+            base=dict(job.notifications or {}),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    job.notifications = norm
+    db.commit()
+    db.refresh(job)
+    return {**norm, "job_id": job.id, "notifications": norm}
+
+
+@router.post("/{job_id}/notifications/test")
+async def test_job_notifications(
+    job_id: int,
+    req: TestJobNotificationRequest | None = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Send a test notification (or evaluate and notify for a specific run) for a job."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
+
+    req_data = req or TestJobNotificationRequest()
+    try:
+        eff_settings = normalize_notification_settings(
+            req_data.notifications,
+            base=dict(job.notifications or {}),
+            webhook_url=req_data.webhook_url,
+            email_to=req_data.email_to,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    if req_data.run_id is not None:
+        run_obj = db.get(Run, req_data.run_id)
+        if not run_obj:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run {req_data.run_id} not found",
+            )
+        report = await process_run_notifications(
+            db,
+            req_data.run_id,
+            force=True,
+            settings_override=eff_settings,
+        )
+        return {
+            "job_id": job.id,
+            "run_id": req_data.run_id,
+            **report,
+        }
+
+    # Otherwise dispatch a synthetic test notification payload
+    evaluation = {
+        "should_notify": True,
+        "reasons": ["test"],
+        "failed": False,
+        "regressed": False,
+        "settings": eff_settings,
+        "failure": {
+            "failed": False,
+            "run_status": "completed",
+            "failed_results": [],
+            "failed_cases": [],
+            "summary": None,
+        },
+        "regression": {
+            "has_regression": False,
+            "compared": False,
+            "baseline_run_id": None,
+            "current_run_id": None,
+            "threshold": eff_settings.get("regression_threshold", 0.0),
+            "metrics_regressed": 0,
+            "cases_regressed": 0,
+            "regressions": [],
+            "compare_url": None,
+            "comparisons": [],
+        },
+        "baseline_run_id": None,
+    }
+    payload = build_notification_payload(run=None, job=job, evaluation=evaluation, is_test=True)
+    deliveries = await dispatch_notifications(settings=eff_settings, payload=payload)
+    return {
+        "job_id": job.id,
+        "triggered": len(deliveries) > 0,
+        "ok": any(d.get("ok") for d in deliveries),
+        "deliveries": deliveries,
+        "payload": payload,
+    }
 
 
 @router.get("/{job_id}/runs")

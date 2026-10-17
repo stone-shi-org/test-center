@@ -33,6 +33,9 @@ class Job(Base, TimestampMixin):
     overrides: Mapped[dict[str, Any]] = mapped_column(
         JSON, default=dict, server_default="{}", nullable=False
     )
+    notifications: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, server_default="{}", nullable=False
+    )
 
     runs: Mapped[list["Run"]] = relationship(
         "Run",
@@ -55,6 +58,7 @@ class Job(Base, TimestampMixin):
             ),
             "definition_ids": list(self.definition_ids or []),
             "overrides": dict(self.overrides or {}),
+            "notifications": dict(self.notifications or {}),
         }
 
 

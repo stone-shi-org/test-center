@@ -132,6 +132,42 @@ export interface JobDefinitionItem {
   timeout?: number | null
 }
 
+export interface JobNotificationSettings {
+  enabled: boolean
+  on_failure: boolean
+  on_regression: boolean
+  regression_threshold: number
+  metric_thresholds?: Record<string, number>
+  webhook_enabled: boolean
+  webhook_url: string | null
+  webhook_secret_env_var?: string | null
+  webhook_headers?: Record<string, string>
+  email_enabled: boolean
+  email_to: string[]
+  email_subject_prefix?: string | null
+}
+
+export interface JobNotificationDelivery {
+  channel: 'webhook' | 'email' | string
+  target: string | string[]
+  status: 'sent' | 'failed' | 'skipped' | string
+  ok: boolean
+  status_code?: number | null
+  subject?: string
+  error?: string | null
+  sent_at: string
+}
+
+export interface TestJobNotificationResponse {
+  job_id: number
+  run_id?: number
+  triggered?: boolean
+  sent?: boolean
+  ok?: boolean
+  deliveries: JobNotificationDelivery[]
+  payload?: Record<string, unknown>
+}
+
 export interface Job {
   id: number
   name: string
@@ -149,6 +185,12 @@ export interface Job {
   active_run_id?: number | null
   definition_ids: number[]
   overrides: Record<string, JobStepOverride | unknown>
+  notifications?: Partial<JobNotificationSettings>
+  webhook_url?: string | null
+  notify_on_failure?: boolean
+  notify_on_regression?: boolean
+  regression_threshold?: number
+  email_to?: string[]
   definitions: JobDefinitionItem[]
   created_at: string
   updated_at: string
@@ -163,6 +205,7 @@ export interface JobCreate {
   missed_run_policy?: MissedRunPolicy
   definition_ids?: number[]
   overrides?: Record<string, unknown>
+  notifications?: Partial<JobNotificationSettings>
   definitions?: Array<{
     test_definition_id: number
     suites?: string[]
@@ -182,6 +225,7 @@ export interface JobUpdate {
   missed_run_policy?: MissedRunPolicy
   definition_ids?: number[]
   overrides?: Record<string, unknown>
+  notifications?: Partial<JobNotificationSettings>
   definitions?: Array<{
     test_definition_id: number
     suites?: string[]
@@ -267,6 +311,7 @@ export interface Run {
     definition_ids?: number[]
     definitions?: Array<Record<string, unknown>>
     overrides?: Record<string, unknown>
+    notifications?: JobNotificationSettings
     timeout?: number
     [key: string]: unknown
   }
@@ -281,6 +326,8 @@ export interface Run {
     [key: string]: unknown
   }
   git_info: Record<string, unknown> | null
+  notification_report?: Record<string, unknown> | null
+  notifications_sent?: JobNotificationDelivery[] | null
   results: RunResult[]
 }
 

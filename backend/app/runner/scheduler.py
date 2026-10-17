@@ -165,6 +165,8 @@ def build_and_enqueue_job_run(
     first_step = step_snapshots[0]
     testers_list = [s["tester"] for s in step_snapshots]
 
+    from backend.app.runner.notifications import normalize_notification_settings
+
     config_snapshot: dict[str, Any] = {
         "job_id": job.id,
         "job_name": job.name,
@@ -179,6 +181,7 @@ def build_and_enqueue_job_run(
         "definition_ids": def_ids,
         "definitions": step_snapshots,
         "overrides": saved_overrides,
+        "notifications": normalize_notification_settings(job.notifications),
     }
     if scheduled_for is not None:
         config_snapshot["scheduled_for"] = _ensure_utc(scheduled_for).isoformat()

@@ -359,5 +359,106 @@ describe('JobsView & Grouped Run Results', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByText('Every 15 minutes')).toBeDefined()
   })
+
+  it('configures per-job failure/regression notifications and triggers a test notification', async () => {
+    const jobWithNotif = {
+      ...mockJobs[0],
+      notifications: {
+        enabled: true,
+        on_failure: true,
+        on_regression: true,
+        regression_threshold: 5,
+        webhook_enabled: true,
+        webhook_url: 'https://hooks.example.com/alert',
+        webhook_secret_env_var: 'WEBHOOK_SECRET',
+        email_enabled: true,
+        email_to: ['team@example.com'],
+      },
+    }
+    vi.spyOn(api.jobs, 'list').mockResolvedValue([jobWithNotif])
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(mockDefinitions)
+    vi.spyOn(api.testers, 'list').mockResolvedValue(mockTesters)
+    vi.spyOn(api.targets, 'list').mockResolvedValue([])
+    vi.spyOn(api.runs, 'list').mockResolvedValue([])
+
+    const updateSpy = vi.spyOn(api.jobs, 'update').mockImplementation(async (_id, payload) => ({
+      ...jobWithNotif,
+      notifications: payload.notifications,
+    }))
+    const testNotifSpy = vi.spyOn(api.jobs, 'testNotifications').mockResolvedValue({
+      job_id: 1,
+      triggered: true,
+      ok: true,
+      deliveries: [
+        {
+          channel: 'webhook',
+          target: 'https://hooks.example.com/alert',
+          status: 'sent',
+          ok: true,
+          status_code: 200,
+          sent_at: '2026-10-16T00:00:00Z',
+        },
+      ],
+      payload: {},
+    })
+
+    render(
+      <RouterProvider>
+        <JobsView />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('nightly-suite')).toBeDefined()
+    })
+
+    // Displays webhook and email badges in the jobs table
+    expect(screen.getByText(/🔔 Webhook/i)).toBeDefined()
+    expect(screen.getByText(/✉ Email \(1\)/i)).toBeDefined()
+
+    // Edit job and verify notification fields are populated
+    fireEvent.click(screen.getByRole('button', { name: /^Edit$/i }))
+
+    const webhookInput = screen.getByLabelText(/Webhook URL/i) as HTMLInputElement
+    expect(webhookInput.value).toBe('https://hooks.example.com/alert')
+
+    // Send Test Notification
+    const testBtn = screen.getByRole('button', { name: /Send Test Notification/i })
+    fireEvent.click(testBtn)
+
+    await waitFor(() => {
+      expect(testNotifSpy).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          webhook_url: 'https://hooks.example.com/alert',
+          email_to: ['team@example.com'],
+        })
+      )
+    })
+
+    // Update webhook URL and threshold and save
+    fireEvent.change(webhookInput, { target: { value: 'https://hooks.example.com/v2' } })
+    fireEvent.change(screen.getByLabelText(/Regression Threshold \(%\)/i), {
+      target: { value: '10' },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Save Job$/i }))
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({
+          notifications: expect.objectContaining({
+            enabled: true,
+            on_failure: true,
+            on_regression: true,
+            regression_threshold: 10,
+            webhook_url: 'https://hooks.example.com/v2',
+            email_to: ['team@example.com'],
+          }),
+        })
+      )
+    })
+  })
 })
 
