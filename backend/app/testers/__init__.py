@@ -20,6 +20,8 @@ from backend.app.testers.registry import (
 )
 from backend.app.testers.dummy import DummyTester
 from backend.app.testers.embedding import EmbeddingTester
+from backend.app.testers.llm import LLMTester
+from backend.app.testers.live_stt import LiveSTTTester
 
 __all__ = [
     "TesterPlugin",
@@ -40,4 +42,6 @@ __all__ = [
     "TesterNotFoundError",
     "DummyTester",
     "EmbeddingTester",
+    "LLMTester",
+    "LiveSTTTester",
 ]

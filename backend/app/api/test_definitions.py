@@ -75,7 +75,8 @@ def _validate_definition_config(tester_name: str, config: dict[str, Any], suites
         return config
 
     if suites:
-        unknown_suites = [s for s in suites if s not in plugin.suites]
+        allowed_suites = set(plugin.suites) | set(getattr(plugin, "suite_aliases", set()))
+        unknown_suites = [s for s in suites if s not in allowed_suites]
         if unknown_suites and plugin.suites:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
