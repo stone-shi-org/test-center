@@ -21,6 +21,7 @@ from backend.app.api import (
     ci_alias_router,
 )
 from backend.app.config import get_settings
+from backend.app.db import apply_migrations
 from backend.app.db.session import SessionLocal
 from backend.app.runner.recovery import recover_stale_runs
 from backend.app.runner.scheduler import get_scheduler
@@ -33,6 +34,10 @@ async def lifespan(app: FastAPI):
     # Ensure data and artifact directories exist
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
     settings.ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Bring the database schema up to date (creates tables on a fresh volume).
+    # Failing here is fatal: running against a missing/stale schema only yields 500s.
+    apply_migrations()
 
     # Recover any runs left in 'running' state from previous process crash/restart
     try:
