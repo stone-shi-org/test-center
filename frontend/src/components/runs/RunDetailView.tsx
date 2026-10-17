@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type Run } from '../../api/index.ts'
+import { api, type Artifact, type Run } from '../../api/index.ts'
 import { useRouter } from '../../router/index.ts'
 import { Badge } from '../common/Badge.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { Spinner } from '../common/Spinner.tsx'
+import { RunArtifactsSection } from './ArtifactViewer.tsx'
 import { CasesTable } from './CasesTable.tsx'
 import { LiveLogViewer } from './LiveLogViewer.tsx'
 import { MetricsTable } from './MetricsTable.tsx'
@@ -14,7 +15,7 @@ export function RunDetailView({ runId }: { runId: number }) {
   const [run, setRun] = useState<Run | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<'logs' | 'results' | 'config'>('logs')
+  const [activeTab, setActiveTab] = useState<'logs' | 'results' | 'artifacts' | 'config'>('logs')
   const [selectedResultId, setSelectedResultId] = useState<number | 'all'>('all')
 
   // Modals
@@ -150,6 +151,7 @@ export function RunDetailView({ runId }: { runId: number }) {
     selectedResultId === 'all'
       ? allResults
       : allResults.filter((res) => res.id === selectedResultId)
+  const allArtifacts: Artifact[] = allResults.flatMap((res) => res.artifacts || [])
 
   return (
     <div className="view-container run-detail-view">
@@ -269,6 +271,13 @@ export function RunDetailView({ runId }: { runId: number }) {
               : ''}
         </button>
         <button
+          className={`tab-btn ${activeTab === 'artifacts' ? 'active' : ''}`}
+          onClick={() => setActiveTab('artifacts')}
+          data-testid="run-detail-artifacts-tab"
+        >
+          Artifacts ({allArtifacts.length})
+        </button>
+        <button
           className={`tab-btn ${activeTab === 'config' ? 'active' : ''}`}
           onClick={() => setActiveTab('config')}
         >
@@ -378,53 +387,35 @@ export function RunDetailView({ runId }: { runId: number }) {
 
                     {/* Artifacts */}
                     {resultItem.artifacts && resultItem.artifacts.length > 0 && (
-                      <div className="card section-card">
-                        <h3 className="section-title">
-                          Run Artifacts ({resultItem.artifacts.length})
-                        </h3>
-                        <div className="table-responsive">
-                          <table className="data-table">
-                            <thead>
-                              <tr>
-                                <th>Artifact Name</th>
-                                <th>MIME Type</th>
-                                <th>Size</th>
-                                <th>Action</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {resultItem.artifacts.map((art) => (
-                                <tr key={art.id}>
-                                  <td>
-                                    <strong>{art.name}</strong>
-                                  </td>
-                                  <td className="font-mono text-muted">{art.mime}</td>
-                                  <td className="font-mono">
-                                    {art.size_bytes !== null && art.size_bytes !== undefined
-                                      ? `${(art.size_bytes / 1024).toFixed(1)} KB`
-                                      : '—'}
-                                  </td>
-                                  <td>
-                                    <a
-                                      href={api.runs.getArtifactDownloadUrl(run.id, art.id)}
-                                      className="btn btn-sm btn-secondary"
-                                      download={art.name}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                    >
-                                      ⬇ Download
-                                    </a>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
+                      <RunArtifactsSection
+                        runId={run.id}
+                        artifacts={resultItem.artifacts}
+                      />
                     )}
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        )}
+
+        {/* ARTIFACTS TAB */}
+        {activeTab === 'artifacts' && (
+          <div className="artifacts-tab-wrapper">
+            {allArtifacts.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">📂</div>
+                <h3>No artifacts recorded for Run #{run.id}</h3>
+                <p>
+                  Artifacts stored under <code>data/artifacts/{run.id}/</code> will appear here once generated.
+                </p>
+              </div>
+            ) : (
+              <RunArtifactsSection
+                runId={run.id}
+                artifacts={allArtifacts}
+                title={`All Run #${run.id} Artifacts`}
+              />
             )}
           </div>
         )}

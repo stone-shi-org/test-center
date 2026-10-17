@@ -179,16 +179,49 @@ def download_result_artifact(
     db: Session = Depends(get_db),
 ):
     """Download a specific artifact from a result."""
-    artifact = db.get(Artifact, artifact_id)
-    if not artifact or artifact.result_id != result_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    from backend.app.api.artifacts import build_artifact_download_response, resolve_result_artifact
 
-    file_path = Path(artifact.path)
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact file does not exist on disk")
+    meta, file_path = resolve_result_artifact(db, result_id, artifact_id)
+    return build_artifact_download_response(meta, file_path)
 
-    return FileResponse(
-        path=str(file_path),
-        filename=artifact.name,
-        media_type=artifact.mime,
+
+@router.get("/{result_id}/artifacts/{artifact_id}/preview")
+def preview_result_artifact(
+    result_id: int,
+    artifact_id: int,
+    db: Session = Depends(get_db),
+):
+    """Safely preview a specific artifact from a result inline."""
+    from backend.app.api.artifacts import build_artifact_preview_response, resolve_result_artifact
+
+    meta, file_path = resolve_result_artifact(db, result_id, artifact_id)
+    return build_artifact_preview_response(meta, file_path)
+
+
+@router.get("/{result_id}/artifacts/{artifact_id}/content")
+def get_result_artifact_content(
+    result_id: int,
+    artifact_id: int,
+    max_bytes: int = Query(5_000_000, ge=1024, le=50_000_000),
+    search: str | None = Query(None),
+    level: str | None = Query(None),
+    tail: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Retrieve structured content for a specific artifact from a result."""
+    from backend.app.api.artifacts import build_artifact_content_payload, resolve_result_artifact
+
+    meta, file_path = resolve_result_artifact(db, result_id, artifact_id)
+    return build_artifact_content_payload(
+        meta,
+        file_path,
+        max_bytes=max_bytes,
+        search=search,
+        level=level,
+        tail=tail,
+        offset=offset,
+        limit=limit,
     )
+

@@ -831,18 +831,10 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
     if not isinstance(suites, list):
         suites = inner_config.get("suites") if isinstance(inner_config.get("suites"), list) else []
 
+    from backend.app.api.artifacts import format_artifact_metadata
+
     artifacts_list = [
-        {
-            "id": a.id,
-            "result_id": result.id,
-            "run_id": run.id,
-            "name": a.name,
-            "path": a.path,
-            "mime": a.mime,
-            "size_bytes": a.size_bytes,
-            "created_at": a.created_at.isoformat() if a.created_at else None,
-            "download_url": f"/api/runs/{run.id}/artifacts/{a.id}/download",
-        }
+        format_artifact_metadata(a, run_id=run.id, result_id=result.id)
         for a in result.artifacts
     ]
 

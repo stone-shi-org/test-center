@@ -14,6 +14,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from backend.app.api.artifacts import (
+    build_artifact_content_payload,
+    build_artifact_download_response,
+    build_artifact_preview_response,
+    format_artifact_metadata,
+    resolve_run_artifact,
+    sync_run_disk_artifacts,
+)
 from backend.app.api.compare import ComparedItem, _extract_item_metadata, _parse_metric_entry
 from backend.app.config import get_settings
 from backend.app.db.base import utc_now
@@ -384,14 +392,7 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
             for c in r.cases
         ]
         artifacts_list = [
-            {
-                "id": a.id,
-                "name": a.name,
-                "path": a.path,
-                "mime": a.mime,
-                "size_bytes": a.size_bytes,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
-            }
+            format_artifact_metadata(a, run_id=run.id, result_id=r.id)
             for a in r.artifacts
         ]
         def_name = (
@@ -891,6 +892,7 @@ def get_run(
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    sync_run_disk_artifacts(db, run)
     return _format_run_detail(run)
 
 
@@ -927,6 +929,7 @@ def get_run_results(
     run = db.get(Run, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    sync_run_disk_artifacts(db, run)
     detail = _format_run_detail(run)
     return detail["results"]
 
@@ -1080,23 +1083,100 @@ async def websocket_run_logs(websocket: WebSocket, run_id: int):
             pass
 
 
-@router.get("/{run_id}/artifacts/{artifact_id}/download")
+@router.get("/{run_id}/artifacts")
+def list_run_artifacts(
+    run_id: int,
+    kind: str | None = Query(None, description="Optional filter by artifact kind (html, json, audio, log, image, binary)"),
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """List all artifacts stored under data/artifacts/<run_id>/ and associated with the run."""
+    stmt = (
+        select(Run)
+        .options(selectinload(Run.results).selectinload(Result.artifacts))
+        .where(Run.id == run_id)
+    )
+    run = db.execute(stmt).scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    artifacts = sync_run_disk_artifacts(db, run)
+    if kind:
+        k_lower = kind.strip().lower()
+        artifacts = [a for a in artifacts if a.get("kind") == k_lower]
+    return artifacts
+
+
+@router.get("/{run_id}/artifacts/{artifact_ref:path}/download")
 def download_artifact(
     run_id: int,
-    artifact_id: int,
+    artifact_ref: str,
     db: Session = Depends(get_db),
 ):
     """Download an artifact file associated with a run."""
-    artifact = db.get(Artifact, artifact_id)
-    if not artifact:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+    meta, file_path = resolve_run_artifact(db, run_id, artifact_ref)
+    return build_artifact_download_response(meta, file_path)
 
-    file_path = Path(artifact.path)
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="Artifact file does not exist on disk")
 
-    return FileResponse(
-        path=str(file_path),
-        filename=artifact.name,
-        media_type=artifact.mime,
+@router.get("/{run_id}/artifacts/{artifact_ref:path}/preview")
+@router.get("/{run_id}/artifacts/{artifact_ref:path}/view")
+def preview_artifact(
+    run_id: int,
+    artifact_ref: str,
+    db: Session = Depends(get_db),
+):
+    """Safely preview an artifact inline (sandboxed CSP for HTML, inline streaming for audio/log/JSON)."""
+    meta, file_path = resolve_run_artifact(db, run_id, artifact_ref)
+    return build_artifact_preview_response(meta, file_path)
+
+
+@router.get("/{run_id}/artifacts/{artifact_ref:path}/content")
+def get_artifact_content(
+    run_id: int,
+    artifact_ref: str,
+    max_bytes: int = Query(5_000_000, ge=1024, le=50_000_000, description="Maximum text bytes to read"),
+    search: str | None = Query(None, description="Optional substring filter for log lines"),
+    level: str | None = Query(None, description="Optional log level filter (INFO, WARNING, ERROR)"),
+    tail: int | None = Query(None, ge=1, description="Optional tail N lines for log artifacts"),
+    offset: int = Query(0, ge=0, description="Line offset for log artifacts"),
+    limit: int | None = Query(None, ge=1, description="Line limit for log artifacts"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Retrieve structured artifact content for in-page viewers (HTML, JSON tree, audio player, log viewer)."""
+    meta, file_path = resolve_run_artifact(db, run_id, artifact_ref)
+    return build_artifact_content_payload(
+        meta,
+        file_path,
+        max_bytes=max_bytes,
+        search=search,
+        level=level,
+        tail=tail,
+        offset=offset,
+        limit=limit,
     )
+
+
+@router.get("/{run_id}/artifacts/{artifact_ref:path}")
+def get_run_artifact_detail(
+    run_id: int,
+    artifact_ref: str,
+    max_bytes: int = Query(5_000_000, ge=1024, le=50_000_000),
+    search: str | None = Query(None),
+    level: str | None = Query(None),
+    tail: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Get artifact metadata and parsed content by artifact ID or relative path under data/artifacts/<run_id>/."""
+    meta, file_path = resolve_run_artifact(db, run_id, artifact_ref)
+    return build_artifact_content_payload(
+        meta,
+        file_path,
+        max_bytes=max_bytes,
+        search=search,
+        level=level,
+        tail=tail,
+        offset=offset,
+        limit=limit,
+    )
+

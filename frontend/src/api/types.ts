@@ -267,13 +267,34 @@ export interface CaseResult {
   detail: Record<string, unknown>
 }
 
+export type ArtifactKind = 'html' | 'json' | 'audio' | 'log' | 'image' | 'binary'
+
 export interface Artifact {
   id: number
+  result_id?: number | null
+  run_id?: number
   name: string
   path: string
   mime: string
+  kind?: ArtifactKind | string
+  viewer_type?: ArtifactKind | string
   size_bytes: number | null
   created_at: string | null
+  preview_url?: string
+  content_url?: string
+  download_url?: string
+}
+
+export interface ArtifactContentResponse extends Artifact {
+  truncated: boolean
+  content: string | null
+  json_data: unknown | null
+  json_valid: boolean | null
+  json_error: string | null
+  lines: string[] | null
+  total_lines: number | null
+  filtered_lines: number | null
+  sandbox_csp?: string
 }
 
 export interface RunResult {
@@ -467,8 +488,12 @@ export interface CompareArtifactItem {
   name: string
   path: string
   mime: string
+  kind?: ArtifactKind | string
+  viewer_type?: ArtifactKind | string
   size_bytes: number | null
   created_at: string | null
+  preview_url?: string
+  content_url?: string
   download_url: string
 }
 

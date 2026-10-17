@@ -1,5 +1,6 @@
 import type {
   Artifact,
+  ArtifactContentResponse,
   CaseResult,
   CompareParams,
   CompareResponse,
@@ -300,14 +301,34 @@ export const api = {
       }),
     getLogs: (id: number) => request<RunLogsResponse>(`/runs/${id}/logs`),
     getLogStreamUrl: (id: number) => `/api/runs/${id}/logs/stream`,
-    getArtifactDownloadUrl: (runId: number, artifactId: number) =>
+    listArtifacts: (runId: number, kind?: string) => {
+      const qs = kind ? `?kind=${encodeURIComponent(kind)}` : ''
+      return request<Artifact[]>(`/runs/${runId}/artifacts${qs}`)
+    },
+    getArtifactPreviewUrl: (runId: number, artifactId: number | string) =>
+      `/api/runs/${runId}/artifacts/${artifactId}/preview`,
+    getArtifactDownloadUrl: (runId: number, artifactId: number | string) =>
       `/api/runs/${runId}/artifacts/${artifactId}/download`,
-    getArtifactContent: async (runId: number, artifactId: number): Promise<string> => {
+    getArtifactContent: async (runId: number, artifactId: number | string): Promise<string> => {
       const response = await fetch(`/api/runs/${runId}/artifacts/${artifactId}/download`)
       if (!response.ok) {
         throw new ApiError(response.status, `Failed to load artifact #${artifactId}`)
       }
       return response.text()
+    },
+    getArtifactStructuredContent: (
+      runId: number,
+      artifactId: number | string,
+      params?: { search?: string; level?: string; tail?: number }
+    ) => {
+      const query = new URLSearchParams()
+      if (params?.search) query.set('search', params.search)
+      if (params?.level) query.set('level', params.level)
+      if (params?.tail !== undefined) query.set('tail', String(params.tail))
+      const qs = query.toString()
+      return request<ArtifactContentResponse>(
+        `/runs/${runId}/artifacts/${artifactId}/content${qs ? `?${qs}` : ''}`
+      )
     },
   },
 
