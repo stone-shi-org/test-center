@@ -245,6 +245,60 @@ def test_synthetic_notsofar_loader_and_duration_slicing(tmp_path: Path):
     assert wav_bytes[:4] == b"RIFF"
 
 
+def test_notsofar_split_aliases_selection_limits_and_wav_normalization(tmp_path: Path):
+    """Verify split resolution aliases, meeting count/filter limits, mid-segment word clipping, and WAV resampling."""
+    from backend.app.testers.live_stt.dataset import load_and_normalize_wav_bytes
+
+    ds_root = _create_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+
+    # Split aliases ("eval", "default") and direct split/MTG directory paths
+    mtg_dir_eval, split_eval = resolve_notsofar_split_dir(dataset_dir=ds_root, split="eval")
+    mtg_dir_def, split_def = resolve_notsofar_split_dir(dataset_dir=ds_root, split="default")
+    assert mtg_dir_eval == mtg_dir_def
+    assert split_eval == "eval_set/240629.1_eval_small_with_GT"
+
+    direct_split_dir = ds_root / "eval_set" / "240629.1_eval_small_with_GT"
+    mtg_from_split, _ = resolve_notsofar_split_dir(dataset_dir=direct_split_dir)
+    mtg_from_mtg, _ = resolve_notsofar_split_dir(dataset_dir=mtg_dir_eval)
+    assert mtg_from_split == mtg_dir_eval
+    assert mtg_from_mtg == mtg_dir_eval
+
+    with pytest.raises(FileNotFoundError):
+        resolve_notsofar_split_dir(dataset_dir=ds_root, split="nonexistent_split")
+
+    # Meeting selection: comma-separated string, deduplication, max_meetings limit, and unknown ID error
+    avail = ["MTG_90001", "MTG_90002"]
+    assert parse_meeting_selection("MTG_90002, MTG_90001, MTG_90002", avail) == ["MTG_90002", "MTG_90001"]
+    assert parse_meeting_selection(["MTG_90001", "MTG_90002"], avail, max_meetings=1) == ["MTG_90001"]
+    with pytest.raises(ValueError, match="Unknown NOTSOFAR-1 meeting ID"):
+        parse_meeting_selection("MTG_99999", avail)
+
+    # Mid-segment word-timing clipping and load_notsofar_meetings with max_meetings
+    loaded = load_notsofar_meetings(
+        dataset_dir=ds_root,
+        split="eval_small",
+        max_meetings=1,
+        max_duration_sec=0.95,
+    )
+    assert len(loaded) == 1
+    assert loaded[0].meeting_id == "MTG_90001"
+    assert loaded[0].normalized_reference_text == "hello bob let's start"
+    assert loaded[0].reference_speakers == ["Alice"]
+    assert len(loaded[0].gt_segments_dicts) == 1
+    assert loaded[0].to_dict()["reference_word_count"] == 4
+
+    # Non-16kHz / stereo WAV resampling and downmixing to 16kHz mono 16-bit PCM
+    import io
+
+    raw_8k = make_pcm_wav_bytes(duration_sec=1.0, sample_rate=8000, channels=2)
+    norm_wav, norm_dur = load_and_normalize_wav_bytes(raw_8k, max_duration_sec=0.5)
+    assert norm_dur == pytest.approx(0.5, abs=0.02)
+    with wave.open(io.BytesIO(norm_wav), "rb") as wf:
+        assert wf.getframerate() == 16000
+        assert wf.getnchannels() == 1
+        assert wf.getsampwidth() == 2
+
+
 def test_real_notsofar_dataset_on_disk_discovery_and_loading():
     """Verify real NOTSOFAR-1 dataset under test-data/NOTSOFAR-1 if present on disk."""
     try:
