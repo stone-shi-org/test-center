@@ -95,7 +95,26 @@ class RunWorker:
             return False
 
         await self.execute_run(run_id)
+        self._maybe_run_auto_retention()
         return True
+
+    def _maybe_run_auto_retention(self) -> None:
+        """Apply retention policy automatically after a run finishes if enabled."""
+        try:
+            from backend.app.runner.retention import apply_retention_policy, load_retention_settings
+
+            cfg = load_retention_settings()
+            if not cfg.get("enabled"):
+                return
+            if not cfg.get("max_age_days") and not cfg.get("max_runs"):
+                return
+            db: Session = self.session_factory()
+            try:
+                apply_retention_policy(db, self.artifacts_dir)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Auto-retention cleanup failed: {e}")
 
     def _pick_next_queued_run(self) -> int | None:
         """Find the oldest queued/pending run and atomically mark it as running."""

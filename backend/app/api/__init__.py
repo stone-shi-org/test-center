@@ -7,7 +7,11 @@ from backend.app.api.test_definitions import (
     router as test_definitions_router,
     definitions_alias_router,
 )
-from backend.app.api.runs import router as runs_router
+from backend.app.api.runs import (
+    router as runs_router,
+    trends_alias_router,
+    retention_alias_router,
+)
 from backend.app.api.results import router as results_router
 from backend.app.api.compare import router as compare_router
 from backend.app.api.jobs import router as jobs_router
@@ -20,6 +24,8 @@ __all__ = [
     "definitions_alias_router",
     "jobs_router",
     "runs_router",
+    "trends_alias_router",
+    "retention_alias_router",
     "results_router",
     "compare_router",
 ]

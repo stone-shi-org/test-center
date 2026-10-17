@@ -13,6 +13,8 @@ from backend.app.api import (
     definitions_alias_router,
     jobs_router,
     runs_router,
+    trends_alias_router,
+    retention_alias_router,
     results_router,
     compare_router,
 )
@@ -94,6 +96,8 @@ def create_app() -> FastAPI:
     app.include_router(definitions_alias_router, prefix="/api", include_in_schema=False)
     app.include_router(jobs_router, prefix="/api")
     app.include_router(runs_router, prefix="/api")
+    app.include_router(trends_alias_router, prefix="/api", include_in_schema=False)
+    app.include_router(retention_alias_router, prefix="/api", include_in_schema=False)
     app.include_router(results_router, prefix="/api")
     app.include_router(compare_router, prefix="/api")
 

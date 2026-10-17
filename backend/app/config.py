@@ -18,6 +18,19 @@ class Settings(BaseModel):
     TEST_DATA_DIR: Path = Path(os.getenv("TEST_DATA_DIR", str(BASE_DIR / "test-data")))
     STATIC_DIR: Path = Path(os.getenv("STATIC_DIR", str(BASE_DIR / "frontend" / "dist")))
     DATABASE_URL: str = ""
+    RETENTION_ENABLED: bool = os.getenv("RETENTION_ENABLED", "false").lower() in ("1", "true", "yes")
+    RETENTION_MAX_AGE_DAYS: int | None = (
+        int(os.getenv("RETENTION_MAX_AGE_DAYS", "0"))
+        if os.getenv("RETENTION_MAX_AGE_DAYS", "0").isdigit() and int(os.getenv("RETENTION_MAX_AGE_DAYS", "0")) > 0
+        else None
+    )
+    RETENTION_MAX_RUNS: int | None = (
+        int(os.getenv("RETENTION_MAX_RUNS", "0"))
+        if os.getenv("RETENTION_MAX_RUNS", "0").isdigit() and int(os.getenv("RETENTION_MAX_RUNS", "0")) > 0
+        else None
+    )
+    RETENTION_ARTIFACTS_ONLY: bool = os.getenv("RETENTION_ARTIFACTS_ONLY", "false").lower() in ("1", "true", "yes")
+    RETENTION_KEEP_FAILED: bool = os.getenv("RETENTION_KEEP_FAILED", "false").lower() in ("1", "true", "yes")
 
     def model_post_init(self, __context):
         if not self.DATABASE_URL:

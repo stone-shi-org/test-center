@@ -71,8 +71,8 @@ export function matchRoute(path: string): RouteMatch {
   if (cleanPath === '/trigger') {
     return { name: 'trigger', params: queryParams, path: cleanPath }
   }
-  if (cleanPath === '/runs') {
-    return { name: 'runs', params: queryParams, path: cleanPath }
+  if (cleanPath === '/runs' || cleanPath === '/history') {
+    return { name: 'runs', params: queryParams, path: '/runs' }
   }
   if (cleanPath === '/compare' || cleanPath === '/runs/compare') {
     return { name: 'compare', params: queryParams, path: '/compare' }

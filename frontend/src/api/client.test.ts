@@ -191,6 +191,131 @@ describe('API client', () => {
     expect(cronPreview.valid).toBe(true)
     expect(cronPreview.description).toBe('Daily at 02:00 UTC')
   })
+
+  it('fetches filtered run history, metric trends, and manages retention settings', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => [{ id: 10, status: 'completed', results: [] }],
+    } as Response)
+
+    const runs = await api.runs.list({
+      tester: 'llm',
+      target: 'vllm-prod',
+      job: 'manual',
+      status: 'completed',
+      date_from: '2026-10-01',
+      date_to: '2026-10-16',
+    })
+    expect(runs).toHaveLength(1)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/runs?status=completed&tester=llm&target=vllm-prod&job=manual&date_from=2026-10-01&date_to=2026-10-16',
+      expect.any(Object)
+    )
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        metric: 'ttft_p50_ms',
+        unit: 'ms',
+        better: 'lower',
+        available_metrics: [],
+        series: [],
+        points: [],
+      }),
+    } as Response)
+
+    const trends = await api.runs.getTrends({ metric: 'ttft_p50_ms', tester: 'llm' })
+    expect(trends.metric).toBe('ttft_p50_ms')
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/runs/trends?metric=ttft_p50_ms&tester=llm',
+      expect.any(Object)
+    )
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        enabled: true,
+        max_age_days: 30,
+        retention_days: 30,
+        max_runs: 50,
+        artifacts_only: false,
+        keep_failed: true,
+        last_cleanup_at: null,
+        stats: {
+          total_runs: 10,
+          terminal_runs: 10,
+          active_runs: 0,
+          total_artifacts: 20,
+          artifacts_size_bytes: 4096,
+          eligible_runs_count: 2,
+          eligible_run_ids: [1, 2],
+        },
+      }),
+    } as Response)
+
+    const ret = await api.runs.getRetention()
+    expect(ret.max_age_days).toBe(30)
+    expect(fetch).toHaveBeenCalledWith('/api/runs/retention', expect.any(Object))
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        enabled: true,
+        max_age_days: 14,
+        retention_days: 14,
+        max_runs: 25,
+        artifacts_only: true,
+        keep_failed: false,
+        last_cleanup_at: null,
+        stats: ret.stats,
+      }),
+    } as Response)
+
+    const updatedRet = await api.runs.updateRetention({
+      enabled: true,
+      max_age_days: 14,
+      max_runs: 25,
+      artifacts_only: true,
+    })
+    expect(updatedRet.max_age_days).toBe(14)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/runs/retention',
+      expect.objectContaining({
+        method: 'PUT',
+      })
+    )
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        dry_run: false,
+        artifacts_only: true,
+        keep_failed: false,
+        max_age_days: 14,
+        max_runs: 25,
+        matched_run_ids: [1, 2],
+        cleaned_runs: 2,
+        deleted_runs: 0,
+        deleted_artifacts: 4,
+        freed_bytes: 2048,
+      }),
+    } as Response)
+
+    const cleanupRes = await api.runs.cleanupRetention({ max_runs: 25, artifacts_only: true })
+    expect(cleanupRes.cleaned_runs).toBe(2)
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/runs/retention/cleanup',
+      expect.objectContaining({
+        method: 'POST',
+      })
+    )
+  })
 })
+
 
 

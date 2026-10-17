@@ -67,6 +67,8 @@ def test_secrets_never_returned_by_api(app_and_client, monkeypatch):
         f"/api/definitions",
         f"/api/definitions/{def_id}",
         f"/api/runs",
+        f"/api/runs/trends",
+        f"/api/runs/retention",
         f"/api/runs/{run_id}",
         f"/api/runs/{run_id}/results",
         f"/api/runs/{run_id}/logs",
@@ -126,6 +128,9 @@ def test_openapi_documentation_enabled(app_and_client):
     assert "/api/testers" in paths
     assert "/api/testers/{name}" in paths
     assert "/api/runs" in paths
+    assert "/api/runs/trends" in paths
+    assert "/api/runs/retention" in paths
+    assert "/api/runs/retention/cleanup" in paths
     assert "/api/runs/{run_id}" in paths
     assert "/api/runs/{run_id}/results" in paths
     assert "/api/runs/{run_id}/logs" in paths

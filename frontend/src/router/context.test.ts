@@ -25,8 +25,14 @@ describe('Router context and matching', () => {
     expect(jobDetail.params.id).toBe('7')
   })
 
-  it('matches runs list route', () => {
+  it('matches runs list and history routes with query filter params', () => {
     expect(matchRoute('/runs').name).toBe('runs')
+    expect(matchRoute('/history').name).toBe('runs')
+    const filtered = matchRoute('/runs?tester=llm&target=vllm&status=pass')
+    expect(filtered.name).toBe('runs')
+    expect(filtered.params.tester).toBe('llm')
+    expect(filtered.params.target).toBe('vllm')
+    expect(filtered.params.status).toBe('pass')
   })
 
   it('matches run-detail route with id param', () => {

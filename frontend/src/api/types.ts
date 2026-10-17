@@ -238,6 +238,9 @@ export interface RunResult {
   definition_name?: string | null
   tester: string
   status: ResultStatus | string
+  target_id?: number | null
+  target_name?: string | null
+  model?: string | null
   metrics: Record<string, unknown>
   summary: string | null
   cases: CaseResult[]
@@ -545,4 +548,131 @@ export interface CompareParams {
   regressed_only?: boolean
   allow_different_testers?: boolean
 }
+
+export interface RunsFilterParams {
+  status?: string
+  tester?: string
+  target_id?: number
+  target?: string
+  model?: string
+  job_id?: number
+  job?: string
+  date_from?: string
+  date_to?: string
+  date?: string
+  limit?: number
+  offset?: number
+}
+
+export interface TrendMetricOption {
+  name: string
+  unit: string | null
+  better: 'higher' | 'lower' | null
+  testers: string[]
+  count: number
+}
+
+export interface TrendPoint {
+  run_id: number
+  result_id: number
+  job_id: number | null
+  job_name: string | null
+  tester: string
+  status: ResultStatus | string
+  run_status: RunStatus | string
+  timestamp: string | null
+  metric: string
+  value: number
+  unit: string | null
+  better: 'higher' | 'lower' | null
+  target_id: number | null
+  target_name: string | null
+  model: string | null
+  series_key: string
+  label: string
+}
+
+export interface TrendSeries {
+  series_key: string
+  label: string
+  target_id: number | null
+  target_name: string | null
+  model: string | null
+  tester: string
+  points: TrendPoint[]
+}
+
+export interface TrendResponse {
+  metric: string | null
+  unit: string | null
+  better: 'higher' | 'lower' | null
+  available_metrics: TrendMetricOption[]
+  series: TrendSeries[]
+  points: TrendPoint[]
+}
+
+export interface TrendQueryParams extends RunsFilterParams {
+  metric?: string
+}
+
+export interface RetentionCleanupResult {
+  status: string
+  dry_run: boolean
+  artifacts_only: boolean
+  keep_failed: boolean
+  max_age_days: number | null
+  retention_days: number | null
+  max_runs: number | null
+  cutoff_date: string | null
+  deleted_runs: number
+  deleted_run_ids: number[]
+  cleaned_runs: number
+  cleaned_run_ids: number[]
+  deleted_artifacts: number
+  freed_bytes: number
+}
+
+export interface RetentionStats {
+  total_runs: number
+  terminal_runs: number
+  active_runs: number
+  total_artifacts: number
+  artifacts_size_bytes: number
+  eligible_runs_count: number
+  eligible_run_ids: number[]
+}
+
+export interface RetentionSettings {
+  enabled: boolean
+  max_age_days: number | null
+  retention_days: number | null
+  max_runs: number | null
+  artifacts_only: boolean
+  keep_failed: boolean
+  last_cleanup_at: string | null
+  last_cleanup_summary: RetentionCleanupResult | null
+  cutoff_date: string | null
+  stats: RetentionStats
+  cleanup_result?: RetentionCleanupResult
+}
+
+export interface RetentionUpdateRequest {
+  enabled?: boolean
+  max_age_days?: number | null
+  retention_days?: number | null
+  max_runs?: number | null
+  artifacts_only?: boolean
+  keep_failed?: boolean
+  apply_now?: boolean
+}
+
+export interface RetentionCleanupRequest {
+  max_age_days?: number | null
+  retention_days?: number | null
+  max_runs?: number | null
+  artifacts_only?: boolean
+  keep_failed?: boolean
+  dry_run?: boolean
+}
+
 

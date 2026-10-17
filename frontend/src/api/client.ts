@@ -9,8 +9,13 @@ import type {
   Job,
   JobCreate,
   JobUpdate,
+  RetentionCleanupRequest,
+  RetentionCleanupResult,
+  RetentionSettings,
+  RetentionUpdateRequest,
   Run,
   RunLogsResponse,
+  RunsFilterParams,
   Target,
   TargetCreate,
   TargetUpdate,
@@ -18,6 +23,8 @@ import type {
   TestDefinitionCreate,
   TestDefinitionUpdate,
   TesterInfo,
+  TrendQueryParams,
+  TrendResponse,
   TriggerDefinitionRunRequest,
   TriggerJobRunRequest,
 } from './types.ts'
@@ -210,10 +217,18 @@ export const api = {
   },
 
   runs: {
-    list: (params?: { status?: string; job_id?: number; limit?: number; offset?: number }) => {
+    list: (params?: RunsFilterParams) => {
       const query = new URLSearchParams()
       if (params?.status) query.set('status', params.status)
+      if (params?.tester) query.set('tester', params.tester)
+      if (params?.target_id !== undefined) query.set('target_id', String(params.target_id))
+      if (params?.target) query.set('target', params.target)
+      if (params?.model) query.set('model', params.model)
       if (params?.job_id !== undefined) query.set('job_id', String(params.job_id))
+      if (params?.job) query.set('job', params.job)
+      if (params?.date_from) query.set('date_from', params.date_from)
+      if (params?.date_to) query.set('date_to', params.date_to)
+      if (params?.date) query.set('date', params.date)
       if (params?.limit) query.set('limit', String(params.limit))
       if (params?.offset) query.set('offset', String(params.offset))
       const qs = query.toString()
@@ -225,9 +240,41 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
+    delete: (id: number) =>
+      request<void>(`/runs/${id}`, {
+        method: 'DELETE',
+      }),
     cancel: (id: number) =>
       request<{ status: string; message: string }>(`/runs/${id}/cancel`, {
         method: 'POST',
+      }),
+    getTrends: (params?: TrendQueryParams) => {
+      const query = new URLSearchParams()
+      if (params?.metric) query.set('metric', params.metric)
+      if (params?.tester) query.set('tester', params.tester)
+      if (params?.target_id !== undefined) query.set('target_id', String(params.target_id))
+      if (params?.target) query.set('target', params.target)
+      if (params?.model) query.set('model', params.model)
+      if (params?.job_id !== undefined) query.set('job_id', String(params.job_id))
+      if (params?.job) query.set('job', params.job)
+      if (params?.status) query.set('status', params.status)
+      if (params?.date_from) query.set('date_from', params.date_from)
+      if (params?.date_to) query.set('date_to', params.date_to)
+      if (params?.date) query.set('date', params.date)
+      if (params?.limit) query.set('limit', String(params.limit))
+      const qs = query.toString()
+      return request<TrendResponse>(`/runs/trends${qs ? `?${qs}` : ''}`)
+    },
+    getRetention: () => request<RetentionSettings>('/runs/retention'),
+    updateRetention: (data: RetentionUpdateRequest) =>
+      request<RetentionSettings>('/runs/retention', {
+        method: 'PUT',
+        body: JSON.stringify(data),
+      }),
+    cleanupRetention: (data?: RetentionCleanupRequest) =>
+      request<RetentionCleanupResult>('/runs/retention/cleanup', {
+        method: 'POST',
+        body: data ? JSON.stringify(data) : undefined,
       }),
     getLogs: (id: number) => request<RunLogsResponse>(`/runs/${id}/logs`),
     getLogStreamUrl: (id: number) => `/api/runs/${id}/logs/stream`,
