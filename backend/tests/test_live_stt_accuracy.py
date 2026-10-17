@@ -251,6 +251,9 @@ def test_real_notsofar_dataset_on_disk_discovery_and_loading():
         root = resolve_notsofar_root()
     except FileNotFoundError:
         pytest.skip("Real NOTSOFAR-1 dataset not mounted on this machine")
+    if not root.is_dir():
+        # resolve_notsofar_root() returns the expected path even when absent.
+        pytest.skip("Real NOTSOFAR-1 dataset not mounted on this machine")
 
     assert root.is_dir()
     mtg_dir, split_key = resolve_notsofar_split_dir(dataset_dir=root, split="eval_small")
@@ -666,6 +669,9 @@ def test_real_notsofar_meetings_accuracy_suites(tmp_path: Path):
     try:
         root = resolve_notsofar_root()
     except FileNotFoundError:
+        pytest.skip("Real NOTSOFAR-1 dataset not mounted on this machine")
+    if not root.is_dir():
+        # resolve_notsofar_root() returns the expected path even when absent.
         pytest.skip("Real NOTSOFAR-1 dataset not mounted on this machine")
 
     meetings = load_notsofar_meetings(

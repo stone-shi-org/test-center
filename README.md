@@ -2,7 +2,7 @@
 
 Internal web platform for configuring and running test suites (live-stt, embedding, LLM) as jobs, storing results in a persistent database, and analyzing or comparing test runs side by side.
 
-See [docs/PLAN.md](file:///data/homes/stoneshi/src/test-center/.worktrees/feature-infra/docs/PLAN.md) for architecture and product roadmap.
+See [docs/PLAN.md](docs/PLAN.md) for architecture and product roadmap.
 
 ---
 

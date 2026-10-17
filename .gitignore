@@ -27,3 +27,8 @@ data/
 .DS_Store
 .idea/
 .vscode/
+
+# Local worktrees / CI output
+.worktrees/
+test-reports/
+version.txt

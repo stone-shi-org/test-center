@@ -1,0 +1,75 @@
+---
+# Bamboo YAML Specs for test-center. Same shape as the live-stt-docker plan:
+# checkout -> ./test.sh --docker -> JUnit parser -> ./build.sh (-p when a
+# registry is configured).
+#
+# One-time manual setup in the Bamboo UI (the REST API has no endpoint for
+# linking repositories or creating plans):
+#   1. Administration -> Linked Repositories -> add
+#      https://github.com/stone-shi-org/test-center.git (branch main; the repo
+#      is public, no credentials needed).
+#   2. On that linked repository enable "Scan for Bamboo Specs" (YAML). The
+#      first scan creates project TC / plan TC-TC ("test-center-docker"); every
+#      push after that re-applies this file.
+#   3. (Optional) To push the image, define a Bamboo global or plan variable
+#      TC_REGISTRY (e.g. registry.example.com/homestack). Without it the plan
+#      still builds the image but does not push it. Kept out of this file
+#      because the repo is public.
+#   4. At least one agent must advertise the system.docker.executable capability.
+version: 2
+plan:
+  project-key: TC
+  key: TC
+  name: test-center-docker
+stages:
+  - Default Stage:
+      manual: false
+      final: false
+      jobs:
+        - Default Job
+Default Job:
+  key: JOB1
+  tasks:
+    - checkout:
+        force-clean-build: 'false'
+    - script:
+        interpreter: SHELL
+        scripts:
+          - |
+            # Deliberately not `set -e`: test.sh keeps going so a failing run
+            # still leaves test-reports/*.xml for the JUnit parser below.
+            ./test.sh --docker
+    - test-parser:
+        type: junit
+        test-results: '**/test-reports/*.xml'
+    - script:
+        interpreter: SHELL
+        scripts:
+          - |
+            set -euo pipefail
+            # Bamboo exposes plan/global variables as bamboo_<name> env vars.
+            if [ -n "${bamboo_TC_REGISTRY:-}" ]; then
+              ./build.sh -p -r "${bamboo_TC_REGISTRY}"
+            else
+              echo "TC_REGISTRY not set: building image without pushing"
+              ./build.sh
+            fi
+            docker image prune -f || true
+  requirements:
+    - system.docker.executable
+triggers:
+  - polling:
+      period: '180'
+repositories:
+  - test-center:
+      type: github
+      url: https://github.com/stone-shi-org/test-center.git
+      branch: main
+branches:
+  create: manually
+  delete: never
+  link-to-jira: false
+notifications: []
+labels: []
+other:
+  concurrent-build-plugin: system-default
