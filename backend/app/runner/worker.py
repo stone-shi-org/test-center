@@ -191,7 +191,21 @@ class RunWorker:
                     config_data = first.get("config", {})
                     suites = first.get("suites")
 
-            target_data = run.target_snapshot if isinstance(run.target_snapshot, dict) else {}
+            target_data = dict(run.target_snapshot) if isinstance(run.target_snapshot, dict) else {}
+
+            judge_target_id = config_data.get("judge_target_id") if isinstance(config_data, dict) else None
+            if (
+                judge_target_id is not None
+                and not isinstance(target_data.get("judge_target"), dict)
+                and not isinstance(config_data.get("judge_target"), dict)
+            ):
+                from backend.app.db.models.target import Target
+                try:
+                    judge_t = db.get(Target, int(judge_target_id))
+                    if judge_t is not None:
+                        target_data["judge_target"] = judge_t.to_snapshot()
+                except Exception:
+                    pass
 
             payload = {
                 "run_id": run_id,

@@ -129,6 +129,14 @@ def create_run(
     if req.config:
         merged_config.update(req.config)
 
+    judge_target_id = merged_config.get("judge_target_id")
+    if judge_target_id is not None and not isinstance(target_snapshot.get("judge_target"), dict):
+        judge_target = db.get(Target, int(judge_target_id))
+        if not judge_target:
+            raise HTTPException(status_code=404, detail=f"Judge target id {judge_target_id} not found")
+        target_snapshot = dict(target_snapshot)
+        target_snapshot["judge_target"] = judge_target.to_snapshot()
+
     config_snapshot: dict[str, Any] = {
         "tester": tester_name,
         "suites": suites,

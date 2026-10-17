@@ -104,6 +104,13 @@ def create_test_definition(
         if not target:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Target {req.target_id} not found")
 
+    if isinstance(req.config, dict) and req.config.get("judge_target_id") is not None:
+        judge_tid = req.config["judge_target_id"]
+        if isinstance(judge_tid, int) and not isinstance(judge_tid, bool):
+            judge_target = db.get(Target, judge_tid)
+            if not judge_target:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Judge target {judge_tid} not found")
+
     validated_config = _validate_definition_config(req.tester, req.config, req.suites)
 
     definition = TestDefinition(
@@ -184,6 +191,13 @@ def update_test_definition(
     config = update_data.get("config", definition.config)
     suites = update_data.get("suites", definition.suites)
 
+    if isinstance(config, dict) and config.get("judge_target_id") is not None:
+        judge_tid = config["judge_target_id"]
+        if isinstance(judge_tid, int) and not isinstance(judge_tid, bool):
+            judge_target = db.get(Target, judge_tid)
+            if not judge_target:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Judge target {judge_tid} not found")
+
     if "config" in update_data or "tester" in update_data or "suites" in update_data:
         validated_config = _validate_definition_config(tester, config, suites)
         update_data["config"] = validated_config
@@ -240,6 +254,14 @@ def trigger_definition_run(
     config = dict(definition.config)
     if req_data.config:
         config.update(req_data.config)
+
+    judge_target_id = config.get("judge_target_id")
+    if judge_target_id is not None and not isinstance(target_snapshot.get("judge_target"), dict):
+        judge_target = db.get(Target, int(judge_target_id))
+        if not judge_target:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Judge target {judge_target_id} not found")
+        target_snapshot = dict(target_snapshot)
+        target_snapshot["judge_target"] = judge_target.to_snapshot()
 
     config_snapshot: dict[str, Any] = {
         "tester": definition.tester,
