@@ -5,6 +5,7 @@ import { TargetsView } from './components/targets/TargetsView.tsx'
 import { TriggerView } from './components/trigger/TriggerView.tsx'
 import { RunsListView } from './components/runs/RunsListView.tsx'
 import { RunDetailView } from './components/runs/RunDetailView.tsx'
+import { CompareView } from './components/compare/CompareView.tsx'
 import { RouterProvider, useRouter } from './router/index.ts'
 import './App.css'
 
@@ -24,6 +25,7 @@ function AppContent() {
         {route.name === 'run-detail' && (
           <RunDetailView runId={parseInt(route.params.id, 10)} />
         )}
+        {route.name === 'compare' && <CompareView />}
       </main>
 
       <footer className="app-footer">

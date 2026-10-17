@@ -12,6 +12,7 @@ const TABS: NavTab[] = [
   { name: 'targets', path: '/targets', label: 'Targets', icon: '🎯' },
   { name: 'trigger', path: '/trigger', label: 'Run Trigger', icon: '🚀' },
   { name: 'runs', path: '/runs', label: 'Runs History', icon: '⏱️' },
+  { name: 'compare', path: '/compare', label: 'Compare Runs', icon: '⚖️' },
 ]
 
 export function Navigation() {

@@ -9,13 +9,13 @@ import {
 export function RouterProvider({ children }: { children: ReactNode }) {
   const [path, setPath] = useState<string>(() =>
     typeof window !== 'undefined'
-      ? parsePath(window.location.pathname, window.location.hash)
+      ? parsePath(window.location.pathname, window.location.hash, window.location.search)
       : '/'
   )
 
   useEffect(() => {
     const handleLocationChange = () => {
-      setPath(parsePath(window.location.pathname, window.location.hash))
+      setPath(parsePath(window.location.pathname, window.location.hash, window.location.search))
     }
 
     window.addEventListener('popstate', handleLocationChange)
@@ -26,14 +26,18 @@ export function RouterProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const navigate = (newPath: string) => {
+  const navigate = (newPath: string, options?: { replace?: boolean }) => {
     if (window.location.hash.startsWith('#/')) {
       window.location.hash = `#${newPath}`
+    } else if (options?.replace) {
+      window.history.replaceState(null, '', newPath)
     } else {
       window.history.pushState(null, '', newPath)
     }
     setPath(newPath)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    if (!options?.replace) {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
   }
 
   const route = matchRoute(path)

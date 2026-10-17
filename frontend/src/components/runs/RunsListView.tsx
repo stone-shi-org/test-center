@@ -12,6 +12,21 @@ export function RunsListView() {
   const [error, setError] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState('all')
   const [testerFilter, setTesterFilter] = useState('all')
+  const [selectedRunIds, setSelectedRunIds] = useState<number[]>([])
+
+  const toggleRunSelection = (runId: number) => {
+    setSelectedRunIds((prev) =>
+      prev.includes(runId) ? prev.filter((id) => id !== runId) : [...prev, runId]
+    )
+  }
+
+  const handleCompareSelected = () => {
+    if (selectedRunIds.length > 0) {
+      navigate(`/compare?run_ids=${selectedRunIds.join(',')}`)
+    } else {
+      navigate('/compare')
+    }
+  }
 
   const fetchRuns = async (showLoadingSpinner: boolean) => {
     try {
@@ -95,6 +110,9 @@ export function RunsListView() {
           </p>
         </div>
         <div className="header-actions">
+          <button className="btn btn-secondary" onClick={handleCompareSelected}>
+            ⚖️ {selectedRunIds.length >= 2 ? `Compare Selected (${selectedRunIds.length})` : 'Compare Runs'}
+          </button>
           <button className="btn btn-secondary" onClick={() => fetchRuns(true)}>
             ↻ Refresh
           </button>
@@ -105,6 +123,46 @@ export function RunsListView() {
       </div>
 
       {error && <div className="banner error-banner">{error}</div>}
+
+      {selectedRunIds.length > 0 && (
+        <div className="compare-selection-bar card">
+          <div className="compare-selection-info">
+            <span className="font-semibold">Selected for comparison ({selectedRunIds.length}):</span>
+            <div className="selected-run-pills">
+              {selectedRunIds.map((id, idx) => (
+                <span key={id} className="selected-run-pill font-mono">
+                  #{id}
+                  {idx === 0 && <span className="baseline-mini-tag">Baseline</span>}
+                  <button
+                    type="button"
+                    className="pill-remove-btn"
+                    aria-label={`Remove run #${id}`}
+                    onClick={() => toggleRunSelection(id)}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="compare-selection-actions">
+            <button
+              type="button"
+              className="btn btn-sm btn-secondary"
+              onClick={() => setSelectedRunIds([])}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={handleCompareSelected}
+            >
+              ⚖️ {selectedRunIds.length >= 2 ? `Compare ${selectedRunIds.length} Runs →` : 'Open in Compare →'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="filter-bar">
         <div className="filter-group">
@@ -162,6 +220,7 @@ export function RunsListView() {
           <table className="data-table">
             <thead>
               <tr>
+                <th style={{ width: '40px' }}>Compare</th>
                 <th>Run ID</th>
                 <th>Status</th>
                 <th>Tester</th>
@@ -177,9 +236,18 @@ export function RunsListView() {
                 const tester = (r.config_snapshot?.tester as string) || 'unknown'
                 const target = (r.target_snapshot?.name as string) || 'None'
                 const primaryRes = r.results && r.results.length > 0 ? r.results[0] : null
+                const isSelected = selectedRunIds.includes(r.id)
 
                 return (
-                  <tr key={r.id}>
+                  <tr key={r.id} className={isSelected ? 'row-selected' : ''}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select run #${r.id} for comparison`}
+                        checked={isSelected}
+                        onChange={() => toggleRunSelection(r.id)}
+                      />
+                    </td>
                     <td>
                       <Link href={`/runs/${r.id}`} className="font-mono font-bold table-link">
                         #{r.id}
@@ -216,9 +284,24 @@ export function RunsListView() {
                       )}
                     </td>
                     <td>
-                      <Link href={`/runs/${r.id}`} className="btn btn-sm btn-secondary">
-                        View Detail →
-                      </Link>
+                      <div className="row-actions">
+                        <Link href={`/runs/${r.id}`} className="btn btn-sm btn-secondary">
+                          View Detail →
+                        </Link>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-secondary"
+                          title={`Compare Run #${r.id}`}
+                          onClick={() => {
+                            const ids = selectedRunIds.includes(r.id)
+                              ? selectedRunIds
+                              : [...selectedRunIds, r.id]
+                            navigate(`/compare?run_ids=${ids.join(',')}`)
+                          }}
+                        >
+                          ⚖️ Compare
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 )

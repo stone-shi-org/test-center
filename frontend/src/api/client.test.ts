@@ -72,4 +72,36 @@ describe('API client', () => {
     expect(api.runs.getLogStreamUrl(5)).toBe('/api/runs/5/logs/stream')
     expect(api.runs.getArtifactDownloadUrl(5, 12)).toBe('/api/runs/5/artifacts/12/download')
   })
+
+  it('fetches compare results with run_ids, baseline, and threshold', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ tester: 'llm', run_ids: [1, 2], baseline_run_id: 1 }),
+    } as Response)
+
+    const res = await api.compare.get({
+      run_ids: [1, 2],
+      baseline_run_id: 1,
+      threshold: 5,
+      regressed_only: true,
+    })
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/compare?run_ids=1%2C2&baseline_run_id=1&threshold=5&regressed_only=true',
+      expect.any(Object)
+    )
+    expect(res.tester).toBe('llm')
+  })
+
+  it('fetches artifact text content', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      text: async () => 'report line 1\nreport line 2',
+    } as Response)
+
+    const text = await api.runs.getArtifactContent(1, 10)
+    expect(fetch).toHaveBeenCalledWith('/api/runs/1/artifacts/10/download')
+    expect(text).toBe('report line 1\nreport line 2')
+  })
 })

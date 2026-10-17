@@ -122,7 +122,13 @@ export function CasesTable({
                     {hasMetrics ? (
                       <span className="metrics-summary-tag font-mono">
                         {Object.entries(c.metrics)
-                          .map(([k, v]) => `${k}=${v}`)
+                          .map(([k, v]) => {
+                            if (v !== null && typeof v === 'object' && 'value' in v) {
+                              const obj = v as { value?: unknown; unit?: unknown }
+                              return `${k}=${obj.value}${obj.unit ? ` ${obj.unit}` : ''}`
+                            }
+                            return `${k}=${v}`
+                          })
                           .join(', ')}
                       </span>
                     ) : (

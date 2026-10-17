@@ -226,11 +226,17 @@ export function DashboardView() {
                         <div className="metrics-compact">
                           {Object.entries(primaryResult.metrics)
                             .slice(0, 3)
-                            .map(([k, v]) => (
-                              <span key={k} className="metric-tag font-mono">
-                                {k}: {typeof v === 'number' ? v.toFixed(2) : String(v)}
-                              </span>
-                            ))}
+                            .map(([k, v]) => {
+                              const rawVal =
+                                v !== null && typeof v === 'object' && 'value' in v
+                                  ? (v as { value?: unknown }).value
+                                  : v
+                              return (
+                                <span key={k} className="metric-tag font-mono">
+                                  {k}: {typeof rawVal === 'number' ? rawVal.toFixed(2) : String(rawVal)}
+                                </span>
+                              )
+                            })}
                         </div>
                       )}
                     </div>

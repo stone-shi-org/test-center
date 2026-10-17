@@ -8,6 +8,11 @@ export function MetricsTable({
   }
 
   const formatMetricValue = (val: unknown): string => {
+    if (val !== null && typeof val === 'object' && 'value' in val) {
+      const obj = val as { value?: unknown; unit?: unknown }
+      const inner = formatMetricValue(obj.value)
+      return obj.unit ? `${inner} ${String(obj.unit)}` : inner
+    }
     if (typeof val === 'number') {
       if (Number.isInteger(val)) return val.toLocaleString()
       return val.toFixed(3)

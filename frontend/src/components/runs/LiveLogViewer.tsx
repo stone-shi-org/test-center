@@ -98,7 +98,11 @@ export function LiveLogViewer({
 
   // Handle auto-scroll
   useEffect(() => {
-    if (autoScroll && consoleEndRef.current) {
+    if (
+      autoScroll &&
+      consoleEndRef.current &&
+      typeof consoleEndRef.current.scrollIntoView === 'function'
+    ) {
       consoleEndRef.current.scrollIntoView({ behavior: 'smooth' })
     }
   }, [logs, autoScroll])

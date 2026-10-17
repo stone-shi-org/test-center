@@ -1,6 +1,8 @@
 import type {
   Artifact,
   CaseResult,
+  CompareParams,
+  CompareResponse,
   CreateRunRequest,
   HealthResponse,
   Run,
@@ -158,6 +160,13 @@ export const api = {
     getLogStreamUrl: (id: number) => `/api/runs/${id}/logs/stream`,
     getArtifactDownloadUrl: (runId: number, artifactId: number) =>
       `/api/runs/${runId}/artifacts/${artifactId}/download`,
+    getArtifactContent: async (runId: number, artifactId: number): Promise<string> => {
+      const response = await fetch(`/api/runs/${runId}/artifacts/${artifactId}/download`)
+      if (!response.ok) {
+        throw new ApiError(response.status, `Failed to load artifact #${artifactId}`)
+      }
+      return response.text()
+    },
   },
 
   results: {
@@ -169,5 +178,38 @@ export const api = {
       return request<CaseResult[]>(`/results/${resultId}/cases${qs ? `?${qs}` : ''}`)
     },
     getArtifacts: (resultId: number) => request<Artifact[]>(`/results/${resultId}/artifacts`),
+  },
+
+  compare: {
+    get: (params: CompareParams) => {
+      const query = new URLSearchParams()
+      if (params.run_ids && params.run_ids.length > 0) {
+        query.set('run_ids', params.run_ids.join(','))
+      }
+      if (params.result_ids && params.result_ids.length > 0) {
+        query.set('result_ids', params.result_ids.join(','))
+      }
+      if (params.baseline_run_id !== undefined && params.baseline_run_id !== null) {
+        query.set('baseline_run_id', String(params.baseline_run_id))
+      }
+      if (params.baseline_result_id !== undefined && params.baseline_result_id !== null) {
+        query.set('baseline_result_id', String(params.baseline_result_id))
+      }
+      if (params.threshold !== undefined && params.threshold > 0) {
+        query.set('threshold', String(params.threshold))
+      }
+      if (params.tester) query.set('tester', params.tester)
+      if (params.suite) query.set('suite', params.suite)
+      if (params.changed_only) query.set('changed_only', 'true')
+      if (params.regressed_only) query.set('regressed_only', 'true')
+      if (params.allow_different_testers) query.set('allow_different_testers', 'true')
+      const qs = query.toString()
+      return request<CompareResponse>(`/compare${qs ? `?${qs}` : ''}`)
+    },
+    post: (data: CompareParams) =>
+      request<CompareResponse>('/compare', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
   },
 }

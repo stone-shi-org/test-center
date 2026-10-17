@@ -32,6 +32,28 @@ describe('Router context and matching', () => {
     expect(match.params.id).toBe('42')
   })
 
+  it('matches compare route and parses query params for shareable URLs', () => {
+    const path = parsePath('/compare', '', '?run_ids=10,12&baseline_run_id=10&threshold=5')
+    expect(path).toBe('/compare?run_ids=10,12&baseline_run_id=10&threshold=5')
+
+    const match = matchRoute(path)
+    expect(match.name).toBe('compare')
+    expect(match.params.run_ids).toBe('10,12')
+    expect(match.params.baseline_run_id).toBe('10')
+    expect(match.params.threshold).toBe('5')
+  })
+
+  it('matches compare route with repeated run_ids and path-based ids', () => {
+    const repeated = matchRoute('/compare?run_ids=1&run_ids=2&regressed_only=true')
+    expect(repeated.name).toBe('compare')
+    expect(repeated.params.run_ids).toBe('1,2')
+    expect(repeated.params.regressed_only).toBe('true')
+
+    const pathBased = matchRoute('/compare/3,4')
+    expect(pathBased.name).toBe('compare')
+    expect(pathBased.params.run_ids).toBe('3,4')
+  })
+
   it('falls back to dashboard on unrecognized path', () => {
     expect(matchRoute('/some-random-route').name).toBe('dashboard')
   })

@@ -160,6 +160,14 @@ export function RunDetailView({ runId }: { runId: number }) {
             )}
             <button
               className="btn btn-secondary"
+              onClick={() => navigate(`/compare?run_ids=${run.id}&baseline_run_id=${run.id}`)}
+              disabled={actionInProgress}
+              title="Compare this run against other runs"
+            >
+              ⚖️ Compare
+            </button>
+            <button
+              className="btn btn-secondary"
               onClick={handleRerun}
               disabled={actionInProgress}
               title="Trigger a new run with the exact same configuration"
