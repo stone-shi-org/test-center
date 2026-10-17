@@ -346,10 +346,19 @@ class RunWorker:
                 result.summary = summary
             else:
                 tester_name = "unknown"
+                test_def_id = None
                 if isinstance(run.config_snapshot, dict):
                     tester_name = run.config_snapshot.get("tester", "unknown")
+                    test_def_id = run.config_snapshot.get("test_definition_id")
+                elif isinstance(run.config_snapshot, list) and run.config_snapshot:
+                    first = run.config_snapshot[0]
+                    if isinstance(first, dict):
+                        tester_name = first.get("tester", "unknown")
+                        test_def_id = first.get("id") or first.get("test_definition_id")
+
                 result = Result(
                     run_id=run_id,
+                    test_definition_id=test_def_id,
                     tester=tester_name,
                     status="cancelled" if status == "cancelled" else "error",
                     summary=summary,
@@ -421,11 +430,19 @@ class RunWorker:
             run.finished_at = now
 
             tester_name = "unknown"
+            test_def_id = None
             if isinstance(run.config_snapshot, dict):
                 tester_name = run.config_snapshot.get("tester", "unknown")
+                test_def_id = run.config_snapshot.get("test_definition_id")
+            elif isinstance(run.config_snapshot, list) and run.config_snapshot:
+                first = run.config_snapshot[0]
+                if isinstance(first, dict):
+                    tester_name = first.get("tester", "unknown")
+                    test_def_id = first.get("id") or first.get("test_definition_id")
 
             result = Result(
                 run_id=run_id,
+                test_definition_id=test_def_id,
                 tester=tester_name,
                 status=res_data.get("status", "pass"),
                 metrics=res_data.get("metrics", {}),

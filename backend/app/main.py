@@ -5,9 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api.health import router as health_router
-from backend.app.api.testers import router as testers_router
-from backend.app.api.runs import router as runs_router
+from backend.app.api import (
+    health_router,
+    testers_router,
+    targets_router,
+    test_definitions_router,
+    definitions_alias_router,
+    runs_router,
+    results_router,
+)
 from backend.app.config import get_settings
 from backend.app.db.session import SessionLocal
 from backend.app.runner.recovery import recover_stale_runs
@@ -39,11 +45,26 @@ async def lifespan(app: FastAPI):
     await worker.stop()
 
 
+OPENAPI_TAGS = [
+    {"name": "health", "description": "System health and status endpoints."},
+    {"name": "testers", "description": "Tester plugins discovery and configuration schemas."},
+    {"name": "targets", "description": "Target service endpoints and authentication environment variable references."},
+    {"name": "test-definitions", "description": "Test definitions, suite selections, and manual run triggers."},
+    {"name": "runs", "description": "Test execution queueing, status, cancellation, and live streaming."},
+    {"name": "results", "description": "Execution results, per-case details, metrics, and artifact downloads."},
+]
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.VERSION,
+        description="Test Center REST API: targets, testers, test definitions, runs, and results.",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
     )
 
@@ -58,7 +79,12 @@ def create_app() -> FastAPI:
     # API routes
     app.include_router(health_router, prefix="/api")
     app.include_router(testers_router, prefix="/api")
+    app.include_router(targets_router, prefix="/api")
+    app.include_router(test_definitions_router, prefix="/api")
+    # Also support /api/definitions as an alias for test definitions
+    app.include_router(definitions_alias_router, prefix="/api", include_in_schema=False)
     app.include_router(runs_router, prefix="/api")
+    app.include_router(results_router, prefix="/api")
 
     # Static assets and SPA handling for frontend
     static_dir = Path(settings.STATIC_DIR)

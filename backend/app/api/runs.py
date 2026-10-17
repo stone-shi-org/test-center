@@ -29,13 +29,14 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 
 
 class CreateRunRequest(BaseModel):
-    tester: str = "dummy"
-    suites: list[str] | None = None
-    config: dict[str, Any] = Field(default_factory=dict)
-    target_id: int | None = None
-    target: dict[str, Any] | None = None
-    job_id: int | None = None
-    timeout: float | None = None
+    test_definition_id: int | None = Field(default=None, description="Optional TestDefinition ID to run")
+    tester: str | None = Field(default=None, description="Tester plugin name (defaults to 'dummy' or definition's tester)")
+    suites: list[str] | None = Field(default=None, description="Sub-suites to run")
+    config: dict[str, Any] = Field(default_factory=dict, description="Tester configuration dictionary")
+    target_id: int | None = Field(default=None, description="Target ID")
+    target: dict[str, Any] | None = Field(default=None, description="Inline target configuration dictionary")
+    job_id: int | None = Field(default=None, description="Job ID if triggered by job")
+    timeout: float | None = Field(default=None, description="Execution timeout in seconds")
 
 
 def _format_run_detail(run: Run) -> dict[str, Any]:
@@ -93,21 +94,48 @@ def create_run(
     req: CreateRunRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Queue a new test run."""
+    """Queue a new test run manually or from a test definition."""
+    test_def = None
+    if req.test_definition_id is not None:
+        from backend.app.db.models.test_definition import TestDefinition
+        test_def = db.get(TestDefinition, req.test_definition_id)
+        if not test_def:
+            raise HTTPException(status_code=404, detail=f"TestDefinition {req.test_definition_id} not found")
+
+    target_id = req.target_id
+    if target_id is None and req.target is None and test_def and test_def.target_id:
+        target_id = test_def.target_id
+
     target_snapshot: dict[str, Any] = {}
-    if req.target_id:
-        target = db.get(Target, req.target_id)
+    if target_id:
+        target = db.get(Target, target_id)
         if not target:
-            raise HTTPException(status_code=404, detail=f"Target id {req.target_id} not found")
+            raise HTTPException(status_code=404, detail=f"Target id {target_id} not found")
         target_snapshot = target.to_snapshot()
     elif req.target:
         target_snapshot = req.target
 
-    config_snapshot = {
-        "tester": req.tester,
-        "suites": req.suites,
-        "config": req.config,
+    tester_name = req.tester
+    if tester_name is None:
+        tester_name = test_def.tester if test_def else "dummy"
+
+    suites = req.suites
+    if suites is None and test_def:
+        suites = test_def.suites
+
+    merged_config: dict[str, Any] = {}
+    if test_def:
+        merged_config.update(test_def.config)
+    if req.config:
+        merged_config.update(req.config)
+
+    config_snapshot: dict[str, Any] = {
+        "tester": tester_name,
+        "suites": suites,
+        "config": merged_config,
     }
+    if test_def:
+        config_snapshot["test_definition_id"] = test_def.id
     if req.timeout:
         config_snapshot["timeout"] = req.timeout
 
@@ -157,6 +185,19 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _format_run_detail(run)
+
+
+@router.get("/{run_id}/results")
+def get_run_results(
+    run_id: int,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    """Get all results associated with a specific run."""
+    run = db.get(Run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    detail = _format_run_detail(run)
+    return detail["results"]
 
 
 @router.post("/{run_id}/cancel")

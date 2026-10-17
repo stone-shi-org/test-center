@@ -17,38 +17,6 @@ from backend.app.runner.worker import RunWorker, get_worker
 from backend.app.runner.events import get_broadcaster
 
 
-@pytest.fixture
-def app_and_client(tmp_path: Path):
-    db_path = tmp_path / "test_api.db"
-    db_url = f"sqlite:///{db_path}"
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    configure_engine_pragmas(engine)
-    Base.metadata.create_all(bind=engine)
-    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-    app = create_app()
-
-    def override_get_db():
-        db = TestingSessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_get_db
-
-    # Configure worker to use the test session factory and artifacts dir
-    worker = get_worker()
-    worker.session_factory = TestingSessionLocal
-    worker.artifacts_dir = tmp_path / "artifacts"
-
-    # Also update settings
-    settings = get_settings()
-    settings.DATA_DIR = tmp_path
-    settings.DATABASE_URL = db_url
-
-    client = TestClient(app)
-    return client, TestingSessionLocal, tmp_path / "artifacts"
 
 
 def test_api_testers_list_and_detail(app_and_client):
