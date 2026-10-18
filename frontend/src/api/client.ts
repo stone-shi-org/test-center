@@ -1,4 +1,5 @@
 import type {
+  AdHocTargetTestRequest,
   Artifact,
   ArtifactContentResponse,
   BambooIntegrationInfo,
@@ -22,6 +23,8 @@ import type {
   RunsFilterParams,
   Target,
   TargetCreate,
+  TargetTestRequest,
+  TargetTestResponse,
   TargetUpdate,
   TestDefinition,
   TestDefinitionCreate,
@@ -113,6 +116,16 @@ export const api = {
     delete: (id: number) =>
       request<void>(`/targets/${id}`, {
         method: 'DELETE',
+      }),
+    test: (id: number, data?: TargetTestRequest) =>
+      request<TargetTestResponse>(`/targets/${id}/test`, {
+        method: 'POST',
+        body: JSON.stringify(data || {}),
+      }),
+    testAdHoc: (data: AdHocTargetTestRequest) =>
+      request<TargetTestResponse>('/targets/test', {
+        method: 'POST',
+        body: JSON.stringify(data),
       }),
   },
 

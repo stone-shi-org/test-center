@@ -68,6 +68,41 @@ describe('API client', () => {
     }
   })
 
+  it('tests target capabilities by ID and ad-hoc', async () => {
+    const mockTestResponse = {
+      target_id: 1,
+      target_name: 'tgt-1',
+      kind: 'openai-compatible',
+      base_url: 'http://localhost:8000/v1',
+      auth_env_var: null,
+      auth_configured: true,
+      ok: true,
+      capabilities_tested: ['chat', 'embedding'],
+      results: [
+        { capability: 'chat', ok: true, status_code: 200, latency_ms: 12.5, message: 'Chat OK' },
+        { capability: 'embedding', ok: true, status_code: 200, latency_ms: 8.2, message: 'Embed OK' },
+      ],
+      tested_at: '2026-10-18T00:00:00Z',
+    }
+
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => mockTestResponse,
+    } as Response)
+
+    const res = await api.targets.test(1, { capabilities: ['chat', 'embedding'] })
+    expect(res.ok).toBe(true)
+    expect(res.capabilities_tested).toEqual(['chat', 'embedding'])
+    expect(fetch).toHaveBeenCalledWith(
+      '/api/targets/1/test',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ capabilities: ['chat', 'embedding'] }),
+      })
+    )
+  })
+
   it('generates stream and download URLs', () => {
     expect(api.runs.getLogStreamUrl(5)).toBe('/api/runs/5/logs/stream')
     expect(api.runs.getArtifactDownloadUrl(5, 12)).toBe('/api/runs/5/artifacts/12/download')

@@ -2,6 +2,8 @@ export type RunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancell
 export type ResultStatus = 'pass' | 'fail' | 'error' | 'cancelled'
 export type CaseStatus = 'pass' | 'fail' | 'error' | 'skip'
 
+export type TargetCapability = 'chat' | 'embedding' | 'asr' | 'tts' | 'diarization' | string
+
 export interface Target {
   id: number
   name: string
@@ -9,6 +11,7 @@ export interface Target {
   base_url: string
   auth_env_var: string | null
   extra: Record<string, unknown>
+  capabilities?: string[]
   created_at: string
   updated_at: string
 }
@@ -19,6 +22,7 @@ export interface TargetCreate {
   base_url: string
   auth_env_var?: string | null
   extra?: Record<string, unknown>
+  capabilities?: string[]
 }
 
 export interface TargetUpdate {
@@ -27,6 +31,43 @@ export interface TargetUpdate {
   base_url?: string
   auth_env_var?: string | null
   extra?: Record<string, unknown>
+  capabilities?: string[]
+}
+
+export interface CapabilityTestResult {
+  capability: string
+  ok: boolean
+  status_code?: number | null
+  latency_ms: number
+  model?: string | null
+  message: string
+  error?: string | null
+  detail?: Record<string, unknown>
+}
+
+export interface TargetTestRequest {
+  capabilities?: string[]
+  model?: string | null
+  timeout_seconds?: number
+}
+
+export interface AdHocTargetTestRequest extends TargetCreate {
+  capabilities?: string[]
+  model?: string | null
+  timeout_seconds?: number
+}
+
+export interface TargetTestResponse {
+  target_id: number | null
+  target_name: string
+  kind: string
+  base_url: string
+  auth_env_var: string | null
+  auth_configured: boolean
+  ok: boolean
+  capabilities_tested: string[]
+  results: CapabilityTestResult[]
+  tested_at: string
 }
 
 export interface JSONSchemaProperty {

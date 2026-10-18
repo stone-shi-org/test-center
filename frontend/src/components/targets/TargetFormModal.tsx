@@ -1,5 +1,10 @@
 import { useState } from 'react'
-import type { Target, TargetCreate } from '../../api/types.ts'
+import {
+  api,
+  type Target,
+  type TargetCreate,
+  type TargetTestResponse,
+} from '../../api/index.ts'
 import { Modal } from '../common/Modal.tsx'
 
 const COMMON_KINDS = [
@@ -10,6 +15,56 @@ const COMMON_KINDS = [
   'rerank',
   'custom',
 ]
+
+export const TARGET_CAPABILITY_OPTIONS = [
+  {
+    id: 'chat',
+    label: 'chat',
+    title: 'Chat / LLM completions (/chat/completions)',
+  },
+  {
+    id: 'embedding',
+    label: 'embedding',
+    title: 'Text embeddings (/embeddings)',
+  },
+  {
+    id: 'asr',
+    label: 'asr',
+    title: 'Speech-to-Text transcription (/v1/audio/transcriptions)',
+  },
+  {
+    id: 'tts',
+    label: 'tts',
+    title: 'Text-to-Speech synthesis (/v1/audio/speech)',
+  },
+  {
+    id: 'diarization',
+    label: 'diarization',
+    title: 'Speaker diarization (/v1/audio/diarization)',
+  },
+] as const
+
+export function inferDefaultCapabilities(kind: string): string[] {
+  const k = (kind || '').trim().toLowerCase()
+  if (k === 'embedding' || k === 'embeddings') return ['embedding']
+  if (k === 'live-stt' || k === 'live_stt' || k === 'stt' || k === 'asr') {
+    return ['asr', 'tts', 'diarization']
+  }
+  return ['chat']
+}
+
+export function getTargetCapabilities(
+  target: Pick<Target, 'kind' | 'extra' | 'capabilities'>
+): string[] {
+  if (Array.isArray(target.capabilities) && target.capabilities.length > 0) {
+    return target.capabilities
+  }
+  const extraCaps = target.extra?.capabilities
+  if (Array.isArray(extraCaps) && extraCaps.length > 0) {
+    return extraCaps.map((c) => String(c))
+  }
+  return inferDefaultCapabilities(target.kind)
+}
 
 const ENV_VAR_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/
 const DISALLOWED_SECRET_KEYS = [
@@ -45,28 +100,56 @@ function TargetForm({
   })
   const [baseUrl, setBaseUrl] = useState(target?.base_url || '')
   const [authEnvVar, setAuthEnvVar] = useState(target?.auth_env_var || '')
-  const [extraJson, setExtraJson] = useState(() =>
-    target?.extra ? JSON.stringify(target.extra, null, 2) : '{}'
+  const [capabilities, setCapabilities] = useState<string[]>(() =>
+    target ? getTargetCapabilities(target) : inferDefaultCapabilities('openai-compatible')
   )
+  const [capabilitiesCustomized, setCapabilitiesCustomized] = useState<boolean>(() =>
+    Boolean(target)
+  )
+  const [extraJson, setExtraJson] = useState(() => {
+    if (!target?.extra) return '{}'
+    const copy = { ...target.extra }
+    delete copy.capabilities
+    return JSON.stringify(copy, null, 2)
+  })
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<TargetTestResponse | null>(null)
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleKindChange = (newKind: string) => {
+    setKind(newKind)
+    if (!capabilitiesCustomized) {
+      const effectiveKind = newKind === 'custom' ? customKind || 'custom' : newKind
+      setCapabilities(inferDefaultCapabilities(effectiveKind))
+    }
+  }
+
+  const toggleCapability = (capId: string) => {
+    setCapabilitiesCustomized(true)
+    setCapabilities((prev) =>
+      prev.includes(capId) ? prev.filter((c) => c !== capId) : [...prev, capId]
+    )
+  }
+
+  const validateAndBuildPayload = (): TargetCreate | null => {
     setError(null)
-
     const finalKind = kind === 'custom' ? customKind.trim() : kind
     if (!name.trim()) {
       setError('Target name is required')
-      return
+      return null
     }
     if (!finalKind) {
       setError('Target kind is required')
-      return
+      return null
     }
     if (!baseUrl.trim()) {
       setError('Base URL is required')
-      return
+      return null
+    }
+    if (capabilities.length === 0) {
+      setError('Select at least one target capability (e.g. chat, embedding)')
+      return null
     }
 
     const trimmedAuth = authEnvVar.trim()
@@ -80,13 +163,13 @@ function TargetForm({
         setError(
           'API key must be provided by environment variable reference only (e.g. "OPENAI_API_KEY"), never a raw secret or token.'
         )
-        return
+        return null
       }
       if (!ENV_VAR_REGEX.test(trimmedAuth)) {
         setError(
           'auth_env_var must be a valid environment variable name (letters, numbers, underscores).'
         )
-        return
+        return null
       }
     }
 
@@ -96,11 +179,11 @@ function TargetForm({
         parsedExtra = JSON.parse(extraJson)
         if (typeof parsedExtra !== 'object' || Array.isArray(parsedExtra) || parsedExtra === null) {
           setError('Extra parameters must be a valid JSON object')
-          return
+          return null
         }
       } catch {
         setError('Extra parameters is not valid JSON')
-        return
+        return null
       }
     }
 
@@ -109,19 +192,46 @@ function TargetForm({
         setError(
           `Direct secrets forbidden in extra ('${key}'). Use Auth Env Var to reference secrets via environment variables.`
         )
-        return
+        return null
       }
     }
 
+    return {
+      name: name.trim(),
+      kind: finalKind,
+      base_url: baseUrl.trim(),
+      auth_env_var: trimmedAuth || null,
+      extra: parsedExtra,
+      capabilities,
+    }
+  }
+
+  const handleTestInForm = async () => {
+    const payload = validateAndBuildPayload()
+    if (!payload) return
+    try {
+      setTesting(true)
+      setTestResult(null)
+      const res = await api.targets.testAdHoc({
+        ...payload,
+        capabilities: payload.capabilities,
+      })
+      setTestResult(res)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const payload = validateAndBuildPayload()
+    if (!payload) return
+
     try {
       setSaving(true)
-      await onSave({
-        name: name.trim(),
-        kind: finalKind,
-        base_url: baseUrl.trim(),
-        auth_env_var: trimmedAuth || null,
-        extra: parsedExtra,
-      })
+      await onSave(payload)
       onClose()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
@@ -159,7 +269,7 @@ function TargetForm({
             id="target-kind"
             className="form-select"
             value={kind}
-            onChange={(e) => setKind(e.target.value)}
+            onChange={(e) => handleKindChange(e.target.value)}
           >
             {COMMON_KINDS.map((k) => (
               <option key={k} value={k}>
@@ -185,6 +295,32 @@ function TargetForm({
             />
           </div>
         )}
+      </div>
+
+      <div className="form-group">
+        <div className="field-header">
+          <label>
+            Target Capabilities <span className="required-star">*</span>
+          </label>
+          <span className="field-default-hint">Pick capabilities supported by this target</span>
+        </div>
+        <div className="enum-pills" role="group" aria-label="Target Capabilities">
+          {TARGET_CAPABILITY_OPTIONS.map((opt) => {
+            const isSelected = capabilities.includes(opt.id)
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`pill-btn ${isSelected ? 'selected' : ''}`}
+                title={opt.title}
+                onClick={() => toggleCapability(opt.id)}
+              >
+                <span>{isSelected ? '✓' : '+'}</span>
+                <span>{opt.label}</span>
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       <div className="form-group">
@@ -238,7 +374,38 @@ function TargetForm({
         />
       </div>
 
+      {testResult && (
+        <div
+          className={`banner ${testResult.ok ? 'success-banner' : 'error-banner'} target-test-inline-banner`}
+        >
+          <div className="target-test-inline-header">
+            <strong>
+              {testResult.ok
+                ? '✓ Target capability check passed'
+                : '✕ Target capability check failed'}
+            </strong>
+          </div>
+          <div className="target-test-inline-list">
+            {testResult.results.map((r) => (
+              <div key={r.capability} className="target-test-inline-item">
+                <span className="kind-badge">{r.capability}</span>{' '}
+                <span>{r.ok ? 'PASS' : 'FAIL'}</span> — <span>{r.message}</span>
+                {r.error && <div className="font-mono text-break">{r.error}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="modal-actions">
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={handleTestInForm}
+          disabled={saving || testing}
+        >
+          {testing ? 'Testing...' : 'Test Target'}
+        </button>
         <button type="button" className="btn btn-secondary" onClick={onClose} disabled={saving}>
           Cancel
         </button>
@@ -279,3 +446,4 @@ export function TargetFormModal({
     </Modal>
   )
 }
+

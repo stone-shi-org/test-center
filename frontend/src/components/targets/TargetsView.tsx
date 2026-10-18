@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react'
-import { api, type Target, type TargetCreate } from '../../api/index.ts'
+import {
+  api,
+  type Target,
+  type TargetCreate,
+  type TargetTestResponse,
+} from '../../api/index.ts'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-import { TargetFormModal } from './TargetFormModal.tsx'
+import { getTargetCapabilities, TargetFormModal } from './TargetFormModal.tsx'
+import { TargetTestModal } from './TargetTestModal.tsx'
 
 export function TargetsView() {
   const [targets, setTargets] = useState<Target[]>([])
@@ -11,10 +17,14 @@ export function TargetsView() {
   const [search, setSearch] = useState('')
   const [kindFilter, setKindFilter] = useState('all')
 
-  // Modals state
+  // Modals & test state
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [editingTarget, setEditingTarget] = useState<Target | null>(null)
   const [deletingTarget, setDeletingTarget] = useState<Target | null>(null)
+  const [testingTarget, setTestingTarget] = useState<Target | null>(null)
+  const [testResultsById, setTestResultsById] = useState<
+    Record<number, TargetTestResponse>
+  >({})
 
   const loadTargets = async (showSpinner = false) => {
     try {
@@ -60,6 +70,14 @@ export function TargetsView() {
     await loadTargets(false)
   }
 
+  const handleUpdateCapabilities = async (targetId: number, capabilities: string[]) => {
+    const updated = await api.targets.update(targetId, { capabilities })
+    setTargets((prev) => prev.map((t) => (t.id === targetId ? updated : t)))
+    if (testingTarget?.id === targetId) {
+      setTestingTarget(updated)
+    }
+  }
+
   const handleDelete = async () => {
     if (!deletingTarget) return
     try {
@@ -75,10 +93,12 @@ export function TargetsView() {
 
   const filteredTargets = targets.filter((t) => {
     const matchesKind = kindFilter === 'all' || t.kind === kindFilter
+    const caps = getTargetCapabilities(t)
     const matchesSearch =
       t.name.toLowerCase().includes(search.toLowerCase()) ||
       t.base_url.toLowerCase().includes(search.toLowerCase()) ||
-      (t.auth_env_var && t.auth_env_var.toLowerCase().includes(search.toLowerCase()))
+      (t.auth_env_var && t.auth_env_var.toLowerCase().includes(search.toLowerCase())) ||
+      caps.some((c) => c.toLowerCase().includes(search.toLowerCase()))
     return matchesKind && matchesSearch
   })
 
@@ -88,7 +108,7 @@ export function TargetsView() {
         <div>
           <h2>Target Endpoints</h2>
           <p className="view-subtitle">
-            Configure external test targets, models, and endpoints for benchmark suites.
+            Configure external test targets, capabilities, models, and endpoints for benchmark suites.
           </p>
         </div>
         <button
@@ -110,7 +130,7 @@ export function TargetsView() {
           <input
             type="text"
             className="search-input"
-            placeholder="Search targets by name or URL..."
+            placeholder="Search targets by name, capability, or URL..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -165,6 +185,7 @@ export function TargetsView() {
                 <th>ID</th>
                 <th>Target Name</th>
                 <th>Kind</th>
+                <th>Capabilities</th>
                 <th>Base URL</th>
                 <th>Auth Env Var</th>
                 <th>Extra Config</th>
@@ -172,62 +193,97 @@ export function TargetsView() {
               </tr>
             </thead>
             <tbody>
-              {filteredTargets.map((target) => (
-                <tr key={target.id}>
-                  <td className="font-mono text-muted">#{target.id}</td>
-                  <td>
-                    <strong>{target.name}</strong>
-                  </td>
-                  <td>
-                    <span className="kind-badge">{target.kind}</span>
-                  </td>
-                  <td className="font-mono text-break">{target.base_url}</td>
-                  <td>
-                    {target.auth_env_var ? (
-                      <span className="auth-env-badge" title="Environment variable reference">
-                        🔒 <code>{target.auth_env_var}</code>
-                      </span>
-                    ) : (
-                      <span className="text-muted">None</span>
-                    )}
-                  </td>
-                  <td>
-                    {target.extra && Object.keys(target.extra).length > 0 ? (
-                      <span
-                        className="extra-summary-tag font-mono"
-                        title={JSON.stringify(target.extra, null, 2)}
-                      >
-                        {Object.entries(target.extra)
-                          .map(([k, v]) => `${k}=${v}`)
-                          .join(', ')}
-                      </span>
-                    ) : (
-                      <span className="text-muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    <div className="row-actions">
-                      <button
-                        className="action-btn"
-                        title="Edit Target"
-                        onClick={() => {
-                          setEditingTarget(target)
-                          setIsModalOpen(true)
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="action-btn danger"
-                        title="Delete Target"
-                        onClick={() => setDeletingTarget(target)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {filteredTargets.map((target) => {
+                const caps = getTargetCapabilities(target)
+                const lastTest = testResultsById[target.id]
+                const extraEntries = Object.entries(target.extra || {}).filter(
+                  ([k]) => k !== 'capabilities'
+                )
+                return (
+                  <tr key={target.id}>
+                    <td className="font-mono text-muted">#{target.id}</td>
+                    <td>
+                      <div className="target-name-cell">
+                        <strong>{target.name}</strong>
+                        {lastTest && (
+                          <span
+                            className={`status-badge badge-sm ${
+                              lastTest.ok ? 'badge-success' : 'badge-error'
+                            }`}
+                            title={lastTest.results
+                              .map((r) => `${r.capability}: ${r.message}`)
+                              .join('\n')}
+                          >
+                            {lastTest.ok ? 'PASS' : 'FAIL'}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <span className="kind-badge">{target.kind}</span>
+                    </td>
+                    <td>
+                      <div className="target-capabilities-badges">
+                        {caps.map((cap) => (
+                          <span key={cap} className="suite-pill">
+                            {cap}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="font-mono text-break">{target.base_url}</td>
+                    <td>
+                      {target.auth_env_var ? (
+                        <span className="auth-env-badge" title="Environment variable reference">
+                          🔒 <code>{target.auth_env_var}</code>
+                        </span>
+                      ) : (
+                        <span className="text-muted">None</span>
+                      )}
+                    </td>
+                    <td>
+                      {extraEntries.length > 0 ? (
+                        <span
+                          className="extra-summary-tag font-mono"
+                          title={JSON.stringify(Object.fromEntries(extraEntries), null, 2)}
+                        >
+                          {extraEntries.map(([k, v]) => `${k}=${v}`).join(', ')}
+                        </span>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
+                    </td>
+                    <td>
+                      <div className="row-actions">
+                        <button
+                          className="action-btn test-btn"
+                          title={`Test ${target.name} capabilities`}
+                          onClick={() => setTestingTarget(target)}
+                        >
+                          Test
+                        </button>
+                        <button
+                          className="action-btn"
+                          title="Edit Target"
+                          onClick={() => {
+                            setEditingTarget(target)
+                            setIsModalOpen(true)
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="action-btn danger"
+                          title="Delete Target"
+                          onClick={() => setDeletingTarget(target)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -239,6 +295,17 @@ export function TargetsView() {
         target={editingTarget}
         onClose={() => setIsModalOpen(false)}
         onSave={handleSave}
+      />
+
+      {/* Test Target Capabilities Modal */}
+      <TargetTestModal
+        isOpen={Boolean(testingTarget)}
+        target={testingTarget}
+        onClose={() => setTestingTarget(null)}
+        onTestComplete={(targetId, res) =>
+          setTestResultsById((prev) => ({ ...prev, [targetId]: res }))
+        }
+        onUpdateCapabilities={handleUpdateCapabilities}
       />
 
       {/* Delete Confirmation */}
@@ -254,3 +321,4 @@ export function TargetsView() {
     </div>
   )
 }
+
