@@ -11,6 +11,7 @@ def format_llm_report(
     metrics: dict[str, Any],
     cases: list[dict[str, Any]],
     judge_info: dict[str, Any] | None = None,
+    effort: str | None = None,
 ) -> str:
     """Format a human-readable ASCII summary report for an LLM test run."""
     lines: list[str] = [
@@ -19,6 +20,7 @@ def format_llm_report(
         "=" * 78,
         f"Model                 : {model}",
         f"Endpoint URL          : {base_url}",
+        f"Reasoning Effort      : {effort if effort else 'unset'}",
     ]
 
     if judge_info and judge_info.get("enabled"):

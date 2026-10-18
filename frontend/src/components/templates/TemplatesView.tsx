@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   api,
   type Job,
+  type StarterTemplate,
   type Target,
   type TestDefinition,
   type TesterInfo,
@@ -32,6 +33,7 @@ function buildCopyName(baseName: string, existingNames: Set<string>): string {
 
 export function TemplatesView() {
   const [templates, setTemplates] = useState<TestDefinition[]>([])
+  const [starters, setStarters] = useState<StarterTemplate[]>([])
   const [testers, setTesters] = useState<TesterInfo[]>([])
   const [targets, setTargets] = useState<Target[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
@@ -53,6 +55,7 @@ export function TemplatesView() {
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState<boolean>(false)
   const [duplicatingId, setDuplicatingId] = useState<number | null>(null)
+  const [creatingStarterName, setCreatingStarterName] = useState<string | null>(null)
 
   // Delete confirmation state
   const [deletingTemplate, setDeletingTemplate] = useState<TestDefinition | null>(null)
@@ -61,16 +64,18 @@ export function TemplatesView() {
     try {
       if (showSpinner) setLoading(true)
       setError(null)
-      const [defsData, testersData, targetsData, jobsData] = await Promise.all([
+      const [defsData, testersData, targetsData, jobsData, startersData] = await Promise.all([
         api.definitions.list(),
         api.testers.list(),
         api.targets.list(),
         api.jobs.list().catch(() => [] as Job[]),
+        api.definitions.listStarters().catch(() => [] as StarterTemplate[]),
       ])
       setTemplates(defsData)
       setTesters(testersData)
       setTargets(targetsData)
       setJobs(jobsData)
+      setStarters(startersData)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -85,13 +90,15 @@ export function TemplatesView() {
       api.testers.list(),
       api.targets.list(),
       api.jobs.list().catch(() => [] as Job[]),
+      api.definitions.listStarters().catch(() => [] as StarterTemplate[]),
     ])
-      .then(([defsData, testersData, targetsData, jobsData]) => {
+      .then(([defsData, testersData, targetsData, jobsData, startersData]) => {
         if (ignore) return
         setTemplates(defsData)
         setTesters(testersData)
         setTargets(targetsData)
         setJobs(jobsData)
+        setStarters(startersData)
         setLoading(false)
       })
       .catch((err: unknown) => {
@@ -105,6 +112,31 @@ export function TemplatesView() {
       ignore = true
     }
   }, [])
+
+  const handleUseStarter = async (starter: StarterTemplate) => {
+    setError(null)
+    setSuccessMessage(null)
+    try {
+      setCreatingStarterName(starter.name)
+      const existingNames = new Set(templates.map((t) => t.name))
+      const name = existingNames.has(starter.name)
+        ? buildCopyName(starter.name, existingNames)
+        : starter.name
+      const created = await api.definitions.create({
+        name,
+        tester: starter.tester,
+        suites: starter.suites ? [...starter.suites] : [],
+        config: starter.config ? { ...starter.config } : {},
+        target_id: null,
+      })
+      setSuccessMessage(`Created template "${created.name}" from starter.`)
+      await loadAll(false)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setCreatingStarterName(null)
+    }
+  }
 
   const openCreateModal = () => {
     setEditingTemplate(null)
@@ -259,6 +291,18 @@ export function TemplatesView() {
       tpl.tester.toLowerCase().includes(q) ||
       targetLabel.includes(q) ||
       (tpl.suites || []).some((s) => s.toLowerCase().includes(q))
+    return matchesTester && matchesSearch
+  })
+
+  const filteredStarters = starters.filter((s) => {
+    const matchesTester = testerFilter === 'all' || s.tester === testerFilter
+    const q = search.toLowerCase()
+    const matchesSearch =
+      !q ||
+      s.name.toLowerCase().includes(q) ||
+      s.tester.toLowerCase().includes(q) ||
+      s.description.toLowerCase().includes(q) ||
+      s.suites.some((suite) => suite.toLowerCase().includes(q))
     return matchesTester && matchesSearch
   })
 
@@ -434,6 +478,54 @@ export function TemplatesView() {
           </table>
         </div>
       )}
+
+      {/* Built-in Starter Templates Section */}
+      <div className="starters-section card">
+        <div className="starters-section-header">
+          <div>
+            <h3>Starter Templates</h3>
+            <p className="view-subtitle">
+              Built-in starter configurations for each tester plugin. Click &quot;Use as template&quot; to copy any starter into your templates to customize targets, suites, or parameters.
+            </p>
+          </div>
+        </div>
+
+        {filteredStarters.length === 0 ? (
+          <p className="text-muted starters-empty-notice">No starter templates match the selected filter.</p>
+        ) : (
+          <div className="starters-grid">
+            {filteredStarters.map((starter) => (
+              <div key={`${starter.tester}-${starter.name}`} className="starter-card">
+                <div className="starter-card-top">
+                  <div className="starter-title-area">
+                    <h4 className="starter-title">{starter.name}</h4>
+                    <span className="kind-badge">{starter.tester}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={creatingStarterName === starter.name}
+                    onClick={() => handleUseStarter(starter)}
+                  >
+                    {creatingStarterName === starter.name ? 'Copying...' : 'Use as template'}
+                  </button>
+                </div>
+                <p className="starter-desc">{starter.description}</p>
+                <div className="starter-suites">
+                  <span className="starter-suites-label">Suites:</span>
+                  <div className="target-capabilities-badges">
+                    {starter.suites.map((s) => (
+                      <span key={s} className="suite-pill">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Create / Edit Template Modal */}
       <Modal

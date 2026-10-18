@@ -22,6 +22,7 @@ from backend.app.testers.dummy import DummyTester
 from backend.app.testers.embedding import EmbeddingTester
 from backend.app.testers.llm import LLMTester
 from backend.app.testers.live_stt import LiveSTTTester
+from backend.app.testers.starters import STARTER_TEMPLATES, get_starter_templates
 
 __all__ = [
     "TesterPlugin",
@@ -44,4 +45,6 @@ __all__ = [
     "EmbeddingTester",
     "LLMTester",
     "LiveSTTTester",
+    "STARTER_TEMPLATES",
+    "get_starter_templates",
 ]

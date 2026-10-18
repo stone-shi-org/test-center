@@ -116,6 +116,8 @@ class OpenAIChatClient:
         model: str,
         max_tokens: int = 2048,
         stop: list[str] | None = None,
+        reasoning_effort: str | None = None,
+        effort: str | None = None,
     ) -> ChatStreamResult:
         """Execute a streaming chat completion request and collect speed telemetry."""
         payload: dict[str, Any] = {
@@ -127,6 +129,9 @@ class OpenAIChatClient:
         }
         if stop:
             payload["stop"] = stop
+        eff = reasoning_effort if reasoning_effort is not None else effort
+        if eff is not None and str(eff).strip():
+            payload["reasoning_effort"] = str(eff).strip()
 
         headers = self._build_headers()
         prompt_text = " ".join(m.get("content", "") for m in messages if isinstance(m, dict))
@@ -290,6 +295,8 @@ class OpenAIChatClient:
         model: str,
         max_tokens: int = 1024,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        effort: str | None = None,
     ) -> tuple[str, dict[str, int], float]:
         """Execute a non-streaming chat completion request (used e.g. for LLM Judge calls).
 
@@ -304,6 +311,9 @@ class OpenAIChatClient:
         }
         if response_format:
             payload["response_format"] = response_format
+        eff = reasoning_effort if reasoning_effort is not None else effort
+        if eff is not None and str(eff).strip():
+            payload["reasoning_effort"] = str(eff).strip()
 
         headers = self._build_headers()
         t0 = time.perf_counter()

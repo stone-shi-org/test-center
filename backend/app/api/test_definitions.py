@@ -20,9 +20,19 @@ from backend.app.db.session import get_db
 from backend.app.runner.worker import get_worker
 from backend.app.testers.registry import tester_registry, TesterNotFoundError
 from backend.app.testers.base import TesterConfigError
+from backend.app.testers.starters import get_starter_templates
 
 router = APIRouter(prefix="/test-definitions", tags=["test-definitions"])
 definitions_alias_router = APIRouter(prefix="/definitions", tags=["test-definitions"])
+
+
+class StarterTemplateResponse(BaseModel):
+    __test__ = False
+    tester: str
+    name: str
+    description: str
+    suites: list[str]
+    config: dict[str, Any]
 
 
 class TestDefinitionCreate(BaseModel):
@@ -91,6 +101,15 @@ def _validate_definition_config(tester_name: str, config: dict[str, Any], suites
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(e),
         )
+
+
+@router.get("/starters", response_model=list[StarterTemplateResponse])
+@definitions_alias_router.get("/starters", response_model=list[StarterTemplateResponse], include_in_schema=False)
+def list_starter_templates(
+    tester: str | None = Query(None, description="Optional filter by tester plugin name"),
+) -> list[dict[str, Any]]:
+    """Return built-in starter templates per tester."""
+    return get_starter_templates(tester=tester)
 
 
 @router.post("", response_model=TestDefinitionResponse, status_code=status.HTTP_201_CREATED)

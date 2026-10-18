@@ -246,3 +246,68 @@ def test_delete_definition_blocked_when_used_by_job(app_and_client):
     res_del_ok = client.delete(f"/api/test-definitions/{def1_id}")
     assert res_del_ok.status_code == 204
 
+
+def test_starter_templates_endpoint(app_and_client):
+    """Verify GET /api/test-definitions/starters and /api/definitions/starters."""
+    client, _, _ = app_and_client
+
+    # 1. Main endpoint
+    res = client.get("/api/test-definitions/starters")
+    assert res.status_code == 200
+    starters = res.json()
+    assert len(starters) >= 13
+
+    # Check structure
+    for s in starters:
+        assert "tester" in s
+        assert "name" in s
+        assert "description" in s
+        assert "suites" in s
+        assert "config" in s
+        assert isinstance(s["suites"], list)
+        assert isinstance(s["config"], dict)
+
+    # 2. Filter by tester
+    res_stt = client.get("/api/test-definitions/starters?tester=live-stt")
+    assert res_stt.status_code == 200
+    stt_starters = res_stt.json()
+    assert len(stt_starters) == 6
+    assert all(s["tester"] == "live-stt" for s in stt_starters)
+    stt_names = [s["name"] for s in stt_starters]
+    assert "HTTP smoke" in stt_names
+    assert "HTTP full contract" in stt_names
+    assert "Quick accuracy (WER)" in stt_names
+
+    res_llm = client.get("/api/test-definitions/starters?tester=llm")
+    assert res_llm.status_code == 200
+    llm_starters = res_llm.json()
+    assert len(llm_starters) == 3
+    assert any(s["name"] == "Reasoning, high effort" for s in llm_starters)
+
+    # 3. Alias endpoint /api/definitions/starters
+    res_alias = client.get("/api/definitions/starters")
+    assert res_alias.status_code == 200
+    assert len(res_alias.json()) == len(starters)
+
+
+def test_all_starter_templates_valid():
+    """Validate every starter template against its plugin schema and suites."""
+    from backend.app.testers.starters import STARTER_TEMPLATES
+    from backend.app.testers.registry import tester_registry
+
+    assert len(STARTER_TEMPLATES) >= 13
+
+    for starter in STARTER_TEMPLATES:
+        tester_name = starter["tester"]
+        plugin = tester_registry.get(tester_name)
+        assert plugin is not None
+
+        # Verify suites belong to the tester
+        allowed_suites = set(plugin.suites) | set(getattr(plugin, "suite_aliases", set()))
+        for suite in starter["suites"]:
+            assert suite in allowed_suites, f"Suite '{suite}' in starter '{starter['name']}' not allowed in tester '{tester_name}'"
+
+        # Verify config validates and applies defaults cleanly
+        validated_cfg = plugin.validate_and_apply_config(dict(starter["config"]))
+        assert isinstance(validated_cfg, dict)
+

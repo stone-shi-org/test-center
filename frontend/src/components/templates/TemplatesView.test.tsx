@@ -320,4 +320,70 @@ describe('TemplatesView', () => {
       expect(deleteSpy).toHaveBeenCalledWith(20)
     })
   })
+
+  it('renders built-in starter templates and copies one via Use as template', async () => {
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(mockTemplates)
+    vi.spyOn(api.testers, 'list').mockResolvedValue(mockTesters)
+    vi.spyOn(api.targets, 'list').mockResolvedValue(mockTargets)
+    vi.spyOn(api.jobs, 'list').mockResolvedValue([])
+
+    const mockStarters = [
+      {
+        tester: 'dummy',
+        name: 'Smoke',
+        description: 'Fast built-in dummy smoke suite',
+        suites: ['smoke'],
+        config: {},
+      },
+      {
+        tester: 'llm',
+        name: 'Reasoning, high effort',
+        description: 'Reasoning benchmark with high effort',
+        suites: ['reasoning'],
+        config: { effort: 'high', max_tokens: 8192 },
+      },
+    ]
+    vi.spyOn(api.definitions, 'listStarters').mockResolvedValue(mockStarters)
+
+    const createSpy = vi.spyOn(api.definitions, 'create').mockResolvedValue({
+      id: 50,
+      name: 'Reasoning, high effort',
+      tester: 'llm',
+      suites: ['reasoning'],
+      config: { effort: 'high', max_tokens: 8192 },
+      target_id: null,
+      created_at: '2026-10-18T00:00:00Z',
+      updated_at: '2026-10-18T00:00:00Z',
+    })
+
+    render(<TemplatesView />)
+
+    // Starters section and starter cards are visible
+    await waitFor(() => {
+      expect(screen.getByText('Starter Templates')).toBeTruthy()
+      expect(screen.getByText('Reasoning, high effort')).toBeTruthy()
+      expect(screen.getByText('Fast built-in dummy smoke suite')).toBeTruthy()
+    })
+
+    // Click 'Use as template' on the reasoning starter
+    const useBtns = screen.getAllByRole('button', { name: /Use as template/i })
+    expect(useBtns.length).toBe(2)
+
+    fireEvent.click(useBtns[1])
+
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith({
+        name: 'Reasoning, high effort',
+        tester: 'llm',
+        suites: ['reasoning'],
+        config: { effort: 'high', max_tokens: 8192 },
+        target_id: null,
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Created template "Reasoning, high effort" from starter/i)).toBeTruthy()
+    })
+  })
 })
+

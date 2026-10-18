@@ -799,10 +799,12 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
         config_snap = {}
 
     inner_config = (
-        config_snap.get("config", {})
+        dict(config_snap.get("config"))
         if isinstance(config_snap.get("config"), dict)
         else {}
     )
+    if "effort" not in inner_config and config_snap.get("effort") is not None:
+        inner_config["effort"] = config_snap["effort"]
     target_extra = (
         target_snap.get("extra", {})
         if isinstance(target_snap.get("extra"), dict)
@@ -816,6 +818,8 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
             cm = c.detail.get("model")
             if isinstance(cm, str) and cm.strip() and cm not in case_models:
                 case_models.append(cm.strip())
+            if "effort" not in inner_config and c.detail.get("effort") is not None:
+                inner_config["effort"] = c.detail["effort"]
 
     model = (
         inner_config.get("model")

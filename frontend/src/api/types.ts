@@ -83,6 +83,7 @@ export interface JSONSchemaProperty {
   }
   properties?: Record<string, JSONSchemaProperty>
   required?: string[]
+  'x-advanced'?: boolean
 }
 
 export interface JSONSchemaObject {
@@ -97,6 +98,14 @@ export interface TesterInfo {
   description: string
   suites: string[]
   config_schema: JSONSchemaObject
+}
+
+export interface StarterTemplate {
+  tester: string
+  name: string
+  description: string
+  suites: string[]
+  config: Record<string, unknown>
 }
 
 export interface TestDefinition {

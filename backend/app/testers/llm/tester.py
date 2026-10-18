@@ -88,6 +88,11 @@ class LLMTester(TesterPlugin):
                 "default": ["coding", "tool_call", "constraints", "reasoning", "summarization"],
                 "description": "Capability sub-suites to execute",
             },
+            "effort": {
+                "type": "string",
+                "enum": ["none", "low", "medium", "high", "xhigh", "max"],
+                "description": "Reasoning effort level sent as reasoning_effort in chat completion requests (unset omits the parameter)",
+            },
             "max_tokens": {
                 "type": "integer",
                 "default": 2048,
@@ -114,20 +119,24 @@ class LLMTester(TesterPlugin):
                 "minimum": 1.0,
                 "maximum": 30.0,
                 "description": "Subprocess timeout in seconds for sandboxed coding checks",
+                "x-advanced": True,
             },
             "judge_enabled": {
                 "type": "boolean",
                 "default": False,
                 "description": "Enable optional LLM-as-a-Judge evaluation using a second target",
+                "x-advanced": True,
             },
             "judge_target_id": {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Optional Target ID for the second target acting as LLM Judge",
+                "x-advanced": True,
             },
             "judge_model": {
                 "type": "string",
                 "description": "Optional model identifier override for the LLM Judge",
+                "x-advanced": True,
             },
             "judge_min_score": {
                 "type": "integer",
@@ -135,11 +144,13 @@ class LLMTester(TesterPlugin):
                 "minimum": 1,
                 "maximum": 5,
                 "description": "Minimum judge score (1-5) required to pass judge evaluation",
+                "x-advanced": True,
             },
             "judge_require_pass": {
                 "type": "boolean",
                 "default": True,
                 "description": "When true, cases evaluated by the judge must also pass judge threshold",
+                "x-advanced": True,
             },
         },
     }
@@ -150,6 +161,8 @@ class LLMTester(TesterPlugin):
         if isinstance(raw_config, dict):
             for k, v in raw_config.items():
                 if v is None:
+                    continue
+                if k == "effort" and isinstance(v, str) and v.strip() == "":
                     continue
                 if k == "suites" and isinstance(v, list):
                     normalized_suites = []
@@ -322,10 +335,12 @@ class LLMTester(TesterPlugin):
         coding_timeout = float(cfg.get("coding_timeout_seconds", 5.0))
         judge_min_score = int(cfg.get("judge_min_score", 3))
         judge_require_pass = bool(cfg.get("judge_require_pass", True))
+        effort = cfg.get("effort")
 
         ctx.log(
             f"Starting LLM benchmark for target='{target.get('name', 'default')}', "
             f"model='{model}', suites={suites_to_run}, repetitions={repetitions}"
+            + (f", effort='{effort}'" if effort else "")
         )
         ctx.log(f"Endpoint: {client.endpoint_url} ({len(cases_to_run)} capability cases)")
         if judge_client and judge_model:
@@ -370,6 +385,7 @@ class LLMTester(TesterPlugin):
                         messages=messages,
                         model=model,
                         max_tokens=max_tokens,
+                        reasoning_effort=effort,
                     )
                 except ChatClientError as e:
                     ctx.log(f"Error calling LLM endpoint on case '{case.id}': {e}", level="error")
@@ -495,8 +511,11 @@ class LLMTester(TesterPlugin):
                 "eval_message": outcome.message,
                 "checks": outcome.checks,
                 "judge": judge_detail,
+                "effort": effort,
                 **outcome.extra,
             }
+            if effort is not None:
+                case_detail["reasoning_effort"] = effort
 
             result.add_case(
                 case_id=case.id,
@@ -591,12 +610,14 @@ class LLMTester(TesterPlugin):
             judge_summary_part = (
                 f", judge={result.metrics['judge_score_mean']['value']}/5.0"
             )
+        effort_summary_part = f", effort={effort}" if effort else ""
 
         result.summary = (
             f"LLM benchmark ({model}): {passed_cases}/{total_cases} cases passed ({pass_rate}%), "
             f"TTFT={speed_stats['ttft_mean_ms']}ms, "
             f"TPS={speed_stats['decode_tps_mean']} tok/s, "
             f"p95={speed_stats['latency_p95_ms']}ms"
+            f"{effort_summary_part}"
             f"{judge_summary_part}"
         )
 
@@ -607,6 +628,7 @@ class LLMTester(TesterPlugin):
             metrics=result.metrics,
             cases=[c.to_dict() for c in result.cases],
             judge_info=judge_info,
+            effort=effort,
         )
         report_file = ctx.artifacts_dir / "llm_report.txt"
         report_file.write_text(report_text, encoding="utf-8")
@@ -616,6 +638,7 @@ class LLMTester(TesterPlugin):
             "tester": self.name,
             "model": model,
             "endpoint_url": client.endpoint_url,
+            "effort": effort,
             "judge": judge_info,
             "status": result.status,
             "summary": result.summary,

@@ -245,11 +245,13 @@ class LiveSTTTester(TesterPlugin):
                     "How to parametrize models discovered from /v1/models: "
                     "'per_engine' (one model per distinct engine), 'all' (every model), or 'default' (default model only)"
                 ),
+                "x-advanced": True,
             },
             "discover_models": {
                 "type": "boolean",
                 "default": True,
                 "description": "Query GET /v1/models to discover and parametrize engines and models",
+                "x-advanced": True,
             },
             "include_extended_admin": {
                 "type": "boolean",
@@ -259,11 +261,13 @@ class LiveSTTTester(TesterPlugin):
                     "/api/backends, /api/diarization-engines, /api/tts-engines, /metrics, /dashboard) "
                     "in addition to /v1/models, /api/health, and /api/stats"
                 ),
+                "x-advanced": True,
             },
             "allow_mutating_admin": {
                 "type": "boolean",
                 "default": False,
                 "description": "Mutating admin calls are strictly disabled by default",
+                "x-advanced": True,
             },
             "concurrency_burst_size": {
                 "type": "integer",
@@ -273,11 +277,13 @@ class LiveSTTTester(TesterPlugin):
                     "Optional explicit number of concurrent transcription requests for the concurrency suite; "
                     "defaults to max_concurrent_calls + 2 discovered from /api/stats or /api/health"
                 ),
+                "x-advanced": True,
             },
             "engines": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional filter of engine names or model IDs to test (e.g. ['parakeet', 'whisper', 'pyannote', 'kokoro'])",
+                "x-advanced": True,
             },
             "transcription_model": {
                 "type": "string",
@@ -287,40 +293,48 @@ class LiveSTTTester(TesterPlugin):
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional explicit list of ASR models to parametrize over",
+                "x-advanced": True,
             },
             "diarization_model": {
                 "type": "string",
                 "description": "Optional single model override for /v1/audio/diarization",
+                "x-advanced": True,
             },
             "diarization_models": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional explicit list of diarization models to parametrize over",
+                "x-advanced": True,
             },
             "tts_model": {
                 "type": "string",
                 "description": "Optional single model override for /v1/audio/speech",
+                "x-advanced": True,
             },
             "tts_models": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional explicit list of TTS models to parametrize over",
+                "x-advanced": True,
             },
             "tts_voice": {
                 "type": "string",
                 "description": "Optional explicit voice override for TTS synthesis",
+                "x-advanced": True,
             },
             "tts_response_format": {
                 "type": "string",
                 "enum": ["wav", "mp3", "pcm", "opus", "aac", "flac"],
                 "default": "wav",
                 "description": "Audio format for non-streaming TTS tests",
+                "x-advanced": True,
             },
             "tts_stream_format": {
                 "type": "string",
                 "enum": ["pcm", "wav", "mp3"],
                 "default": "pcm",
                 "description": "Audio format for streaming TTS tests",
+                "x-advanced": True,
             },
             "language": {
                 "type": "string",
@@ -343,6 +357,7 @@ class LiveSTTTester(TesterPlugin):
             "dataset_dir": {
                 "type": "string",
                 "description": "Optional path override to NOTSOFAR-1 dataset root or split directory",
+                "x-advanced": True,
             },
             "dataset_split": {
                 "type": "string",
@@ -353,6 +368,7 @@ class LiveSTTTester(TesterPlugin):
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional list or comma-separated string of NOTSOFAR-1 meeting IDs (e.g. ['MTG_32000', 'MTG_32003'])",
+                "x-advanced": True,
             },
             "max_meetings": {
                 "type": "integer",
@@ -362,11 +378,13 @@ class LiveSTTTester(TesterPlugin):
             "audio_device": {
                 "type": "string",
                 "description": "Optional NOTSOFAR-1 single-channel device alias (e.g. 'sc_meetup_0', 'sc_rockfall_0')",
+                "x-advanced": True,
             },
             "prefer_close_talk": {
                 "type": "boolean",
                 "default": False,
                 "description": "Prefer close-talk microphone over single-channel far-field device when loading NOTSOFAR-1 audio",
+                "x-advanced": True,
             },
             "max_audio_duration_sec": {
                 "type": "number",
@@ -377,6 +395,7 @@ class LiveSTTTester(TesterPlugin):
                 "type": "number",
                 "minimum": 0.5,
                 "description": "Alias for max_audio_duration_sec",
+                "x-advanced": True,
             },
             "streaming_protocol": {
                 "type": "string",
@@ -386,10 +405,12 @@ class LiveSTTTester(TesterPlugin):
                     "Streaming protocol for accuracy_streaming suite: 'grpc' (StreamingASR.Transcribe), "
                     "'sse' (POST /v1/audio/transcriptions stream=true), 'both', or 'auto'"
                 ),
+                "x-advanced": True,
             },
             "grpc_target": {
                 "type": "string",
                 "description": "Optional host:port override for gRPC StreamingASR server",
+                "x-advanced": True,
             },
             "grpc_port": {
                 "type": "integer",
@@ -397,6 +418,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 1,
                 "maximum": 65535,
                 "description": "gRPC port used when deriving gRPC target from HTTP base_url",
+                "x-advanced": True,
             },
             "chunk_ms": {
                 "type": "number",
@@ -404,12 +426,14 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 10.0,
                 "maximum": 5000.0,
                 "description": "PCM frame chunk size in milliseconds for gRPC streaming evaluation",
+                "x-advanced": True,
             },
             "grpc_chunk_ms": {
                 "type": "number",
                 "minimum": 10.0,
                 "maximum": 5000.0,
                 "description": "Optional PCM chunk size in milliseconds override for grpc_streaming and grpc_long_call suites",
+                "x-advanced": True,
             },
             "grpc_speed": {
                 "type": "number",
@@ -417,6 +441,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 0.1,
                 "maximum": 100.0,
                 "description": "Chunk pacing speed multiplier for paced gRPC streaming cases",
+                "x-advanced": True,
             },
             "grpc_burst_speed": {
                 "type": "number",
@@ -424,31 +449,37 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 1.0,
                 "maximum": 1000.0,
                 "description": "Chunk pacing speed multiplier for fast-burst gRPC streaming cases",
+                "x-advanced": True,
             },
             "grpc_realtime": {
                 "type": "boolean",
                 "default": False,
                 "description": "Whether to use real-time pacing by default in grpc_streaming suite",
+                "x-advanced": True,
             },
             "grpc_concurrency_burst_size": {
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 64,
                 "description": "Optional explicit number of concurrent streams for gRPC over-budget admission test",
+                "x-advanced": True,
             },
             "grpc_model": {
                 "type": "string",
                 "description": "Optional single ASR model override for gRPC Transcribe suite",
+                "x-advanced": True,
             },
             "grpc_models": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Optional explicit list of ASR models for gRPC Transcribe suite",
+                "x-advanced": True,
             },
             "include_long_call": {
                 "type": "boolean",
                 "default": False,
                 "description": "Opt-in flag to include the slow grpc_long_call stability suite",
+                "x-advanced": True,
             },
             "long_call_duration_sec": {
                 "type": "number",
@@ -456,6 +487,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 2.0,
                 "maximum": 7200.0,
                 "description": "Duration in seconds of synthesized audio for the opt-in grpc_long_call stability suite",
+                "x-advanced": True,
             },
             "long_call_speed": {
                 "type": "number",
@@ -463,6 +495,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 0.5,
                 "maximum": 200.0,
                 "description": "Pacing speed multiplier for the opt-in grpc_long_call stability suite",
+                "x-advanced": True,
             },
             "long_call_max_rtf": {
                 "type": "number",
@@ -470,6 +503,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 0.05,
                 "maximum": 20.0,
                 "description": "Maximum allowed processing RTF for the grpc_long_call stability suite",
+                "x-advanced": True,
             },
             "long_call_max_drift_ratio": {
                 "type": "number",
@@ -477,26 +511,31 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 1.0,
                 "maximum": 50.0,
                 "description": "Maximum allowed late-vs-early inter-partial latency drift ratio in grpc_long_call",
+                "x-advanced": True,
             },
             "realtime_pacing": {
                 "type": "boolean",
                 "default": False,
                 "description": "Whether to pace gRPC streaming chunks in real time (default False for fast evaluation)",
+                "x-advanced": True,
             },
             "compute_cpwer": {
                 "type": "boolean",
                 "default": True,
                 "description": "Compute speaker-attributed cpWER when speaker segments/words are available",
+                "x-advanced": True,
             },
             "diarize_for_cpwer": {
                 "type": "boolean",
                 "default": False,
                 "description": "Run diarization to attribute ASR words to speakers for cpWER even when accuracy_diarization suite is not explicitly selected",
+                "x-advanced": True,
             },
             "use_num_speakers_hint": {
                 "type": "boolean",
                 "default": False,
                 "description": "Pass ground-truth speaker count as min_speakers/max_speakers hint to /v1/audio/diarization",
+                "x-advanced": True,
             },
             "der_collar_sec": {
                 "type": "number",
@@ -504,6 +543,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 0.0,
                 "maximum": 5.0,
                 "description": "Forgiveness collar in seconds around reference segment boundaries for DER scoring",
+                "x-advanced": True,
             },
             "der_frame_sec": {
                 "type": "number",
@@ -511,6 +551,7 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 0.01,
                 "maximum": 1.0,
                 "description": "Frame discretization step in seconds for DER scoring",
+                "x-advanced": True,
             },
             "wer_threshold": {
                 "type": "number",
@@ -525,20 +566,24 @@ class LiveSTTTester(TesterPlugin):
                 "minimum": 0.0,
                 "maximum": 5.0,
                 "description": "Maximum DER ratio allowed per meeting before marking case as fail",
+                "x-advanced": True,
             },
             "use_cache": {
                 "type": "boolean",
                 "default": True,
                 "description": "Enable SQLite result cache so repeated runs of unchanged config are cheap",
+                "x-advanced": True,
             },
             "skip_cache": {
                 "type": "boolean",
                 "default": False,
                 "description": "Bypass reading from the SQLite result cache while still writing fresh results",
+                "x-advanced": True,
             },
             "cache_path": {
                 "type": "string",
                 "description": "Optional explicit path to the SQLite accuracy result cache file",
+                "x-advanced": True,
             },
         },
     }

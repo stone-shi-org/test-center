@@ -1,5 +1,27 @@
-import type { ChangeEvent } from 'react'
+import { useState, useEffect, useRef, useMemo, type ChangeEvent } from 'react'
 import type { JSONSchemaObject, JSONSchemaProperty } from '../../api/types.ts'
+
+function isFieldNonDefault(val: unknown, prop: JSONSchemaProperty): boolean {
+  if (val === undefined || val === null) {
+    return false
+  }
+  if (prop.default !== undefined) {
+    if (typeof prop.default === 'object' && prop.default !== null) {
+      return JSON.stringify(val) !== JSON.stringify(prop.default)
+    }
+    return val !== prop.default
+  }
+  if (typeof val === 'string') {
+    return val.trim().length > 0
+  }
+  if (Array.isArray(val)) {
+    return val.length > 0
+  }
+  if (typeof val === 'object' && val !== null) {
+    return Object.keys(val as Record<string, unknown>).length > 0
+  }
+  return true
+}
 
 export function SchemaForm({
   schema,
@@ -12,11 +34,19 @@ export function SchemaForm({
   onChange: (newValues: Record<string, unknown>) => void
   disabled?: boolean
 }) {
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const prevSchemaRef = useRef(schema)
+  const lastEmittedValuesRef = useRef<Record<string, unknown> | null>(null)
+
   const handleFieldChange = (key: string, value: unknown) => {
-    onChange({
-      ...values,
-      [key]: value,
-    })
+    const next: Record<string, unknown> = { ...values }
+    if (value === undefined) {
+      delete next[key]
+    } else {
+      next[key] = value
+    }
+    lastEmittedValuesRef.current = next
+    onChange(next)
   }
 
   const handleResetDefaults = () => {
@@ -27,8 +57,53 @@ export function SchemaForm({
         defaults[key] = prop.default
       }
     }
+    lastEmittedValuesRef.current = defaults
     onChange(defaults)
   }
+
+  // Split properties into essential vs advanced
+  const { essentialEntries, advancedEntries } = useMemo(() => {
+    if (!schema?.properties) {
+      return { essentialEntries: [], advancedEntries: [] }
+    }
+    const essential: [string, JSONSchemaProperty][] = []
+    const advanced: [string, JSONSchemaProperty][] = []
+    for (const [key, prop] of Object.entries(schema.properties)) {
+      if (prop['x-advanced'] === true) {
+        advanced.push([key, prop])
+      } else {
+        essential.push([key, prop])
+      }
+    }
+    return { essentialEntries: essential, advancedEntries: advanced }
+  }, [schema])
+
+  // Count changed non-default advanced options
+  const changedAdvancedCount = useMemo(() => {
+    if (advancedEntries.length === 0) return 0
+    let count = 0
+    for (const [key, prop] of advancedEntries) {
+      if (isFieldNonDefault(values[key], prop)) {
+        count++
+      }
+    }
+    return count
+  }, [advancedEntries, values])
+
+  // Auto-expand if external values contain non-default advanced options
+  useEffect(() => {
+    if (schema !== prevSchemaRef.current) {
+      prevSchemaRef.current = schema
+      setShowAdvanced(changedAdvancedCount > 0)
+      return
+    }
+
+    if (values !== lastEmittedValuesRef.current) {
+      if (changedAdvancedCount > 0) {
+        setShowAdvanced(true)
+      }
+    }
+  }, [schema, values, changedAdvancedCount])
 
   if (!schema?.properties || Object.keys(schema.properties).length === 0) {
     return (
@@ -110,6 +185,9 @@ export function SchemaForm({
 
     // 3. String with Enum dropdown
     if (prop.type === 'string' && prop.enum && prop.enum.length > 0) {
+      const showUnsetOption = !isRequired && prop.default === undefined
+      const currentStringVal = typeof val === 'string' ? val : ''
+
       return (
         <div key={key} className="schema-field-group">
           <label className="field-title" htmlFor={`schema-field-${key}`}>
@@ -119,10 +197,20 @@ export function SchemaForm({
           <select
             id={`schema-field-${key}`}
             className="form-select"
-            value={typeof val === 'string' ? val : ''}
+            value={currentStringVal}
             disabled={disabled}
-            onChange={(e: ChangeEvent<HTMLSelectElement>) => handleFieldChange(key, e.target.value)}
+            onChange={(e: ChangeEvent<HTMLSelectElement>) => {
+              const selected = e.target.value
+              if (selected === '' && showUnsetOption) {
+                handleFieldChange(key, undefined)
+              } else {
+                handleFieldChange(key, selected)
+              }
+            }}
           >
+            {showUnsetOption && (
+              <option value="">— Unset —</option>
+            )}
             {prop.enum.map((opt) => (
               <option key={opt} value={opt}>
                 {opt}
@@ -236,9 +324,37 @@ export function SchemaForm({
           Reset to Defaults
         </button>
       </div>
-      <div className="schema-fields-grid">
-        {Object.entries(schema.properties).map(([key, prop]) => renderField(key, prop))}
+
+      <div className="schema-fields-grid essential-fields">
+        {essentialEntries.map(([key, prop]) => renderField(key, prop))}
       </div>
+
+      {advancedEntries.length > 0 && (
+        <div className="schema-advanced-section">
+          <div className="schema-advanced-controls">
+            <button
+              type="button"
+              className="btn btn-secondary schema-advanced-toggle-btn"
+              onClick={() => setShowAdvanced((prev) => !prev)}
+              disabled={disabled}
+            >
+              {showAdvanced
+                ? `Hide advanced options (${advancedEntries.length})`
+                : `Show advanced options (${advancedEntries.length})`}
+            </button>
+            {changedAdvancedCount > 0 && (
+              <span className="badge badge-warning schema-advanced-badge">
+                {changedAdvancedCount} advanced option{changedAdvancedCount === 1 ? '' : 's'} changed
+              </span>
+            )}
+          </div>
+          {showAdvanced && (
+            <div className="schema-fields-grid advanced-fields">
+              {advancedEntries.map(([key, prop]) => renderField(key, prop))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

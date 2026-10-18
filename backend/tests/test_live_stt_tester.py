@@ -1810,3 +1810,54 @@ def test_live_stt_contract_suite_alias_and_full_7_suites(tmp_path: Path):
     assert "Error Handling" in report_text
     assert "Concurrency Limits" in report_text
 
+
+def test_live_stt_schema_x_advanced_annotations(app_and_client):
+    """Verify x-advanced annotations on LiveSTTTester schema and API pass-through."""
+    tester = LiveSTTTester()
+    props = tester.config_schema.get("properties", {})
+
+    # Essential properties that MUST NOT have x-advanced: true
+    essential = {
+        "suites",
+        "transcription_model",
+        "language",
+        "repetitions",
+        "timeout_seconds",
+        "dataset_split",
+        "max_meetings",
+        "max_audio_duration_sec",
+        "wer_threshold",
+    }
+    for prop_name in essential:
+        assert prop_name in props, f"Essential prop {prop_name} missing"
+        assert not props[prop_name].get("x-advanced", False), f"{prop_name} should not be x-advanced"
+
+    # Verify advanced properties are flagged with x-advanced: True
+    advanced_samples = [
+        "concurrency_burst_size",
+        "dataset_dir",
+        "meetings",
+        "audio_device",
+        "include_long_call",
+        "model_parametrization",
+        "diarization_model",
+        "tts_model",
+        "streaming_protocol",
+        "grpc_port",
+    ]
+    for prop_name in advanced_samples:
+        assert prop_name in props, f"Advanced prop {prop_name} missing"
+        assert props[prop_name].get("x-advanced") is True, f"{prop_name} should be x-advanced: True"
+
+    advanced_count = sum(1 for p in props.values() if p.get("x-advanced") is True)
+    assert advanced_count >= 40
+
+    # Verify /api/testers/live-stt passes x-advanced through
+    client, _, _ = app_and_client
+    res = client.get("/api/testers/live-stt")
+    assert res.status_code == 200
+    api_schema = res.json()["config_schema"]
+    api_props = api_schema.get("properties", {})
+    assert api_props["concurrency_burst_size"].get("x-advanced") is True
+    assert not api_props["language"].get("x-advanced", False)
+

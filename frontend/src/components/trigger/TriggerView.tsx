@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   api,
+  type StarterTemplate,
   type Target,
   type TestDefinition,
   type TesterInfo,
@@ -15,6 +16,7 @@ export function TriggerView() {
   const [testers, setTesters] = useState<TesterInfo[]>([])
   const [targets, setTargets] = useState<Target[]>([])
   const [templates, setTemplates] = useState<TestDefinition[]>([])
+  const [starters, setStarters] = useState<StarterTemplate[]>([])
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
 
   const [selectedTester, setSelectedTester] = useState<string>('')
@@ -33,15 +35,17 @@ export function TriggerView() {
       try {
         setLoading(true)
         setError(null)
-        const [testersData, targetsData, defsData] = await Promise.all([
+        const [testersData, targetsData, defsData, startersData] = await Promise.all([
           api.testers.list(),
           api.targets.list(),
           api.definitions.list(),
+          api.definitions.listStarters().catch(() => [] as StarterTemplate[]),
         ])
 
         setTesters(testersData)
         setTargets(targetsData)
         setTemplates(defsData)
+        setStarters(startersData)
 
         if (testersData.length > 0) {
           const first = testersData[0]
@@ -67,11 +71,22 @@ export function TriggerView() {
     }
   }
 
-  // Load a template into the form without modifying the template
-  const handleLoadTemplate = (tplId: string) => {
-    setSelectedTemplateId(tplId)
-    if (!tplId) return
-    const id = parseInt(tplId, 10)
+  // Load a template or starter into the form without modifying the template
+  const handleLoadTemplate = (val: string) => {
+    setSelectedTemplateId(val)
+    if (!val) return
+    if (val.startsWith('starter:')) {
+      const idx = parseInt(val.replace('starter:', ''), 10)
+      const starter = starters[idx]
+      if (starter) {
+        setSelectedTester(starter.tester)
+        setSelectedTargetId('')
+        setSelectedSuites(starter.suites ? [...starter.suites] : [])
+        setConfigValues(starter.config ? { ...starter.config } : {})
+      }
+      return
+    }
+    const id = parseInt(val, 10)
     const tpl = templates.find((d) => d.id === id)
     if (tpl) {
       setSelectedTester(tpl.tester)
@@ -154,11 +169,24 @@ export function TriggerView() {
               disabled={submitting}
             >
               <option value="">-- Choose a template to load settings --</option>
-              {templates.map((tpl) => (
-                <option key={tpl.id} value={tpl.id}>
-                  {tpl.name} ({tpl.tester})
-                </option>
-              ))}
+              {starters.length > 0 && (
+                <optgroup label="Starters">
+                  {starters.map((starter, idx) => (
+                    <option key={`starter-${starter.tester}-${starter.name}`} value={`starter:${idx}`}>
+                      {starter.name} ({starter.tester})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {templates.length > 0 && (
+                <optgroup label="Saved Templates">
+                  {templates.map((tpl) => (
+                    <option key={tpl.id} value={String(tpl.id)}>
+                      {tpl.name} ({tpl.tester})
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </div>
 

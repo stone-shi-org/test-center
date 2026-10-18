@@ -21,6 +21,7 @@ import type {
   Run,
   RunLogsResponse,
   RunsFilterParams,
+  StarterTemplate,
   Target,
   TargetCreate,
   TargetTestRequest,
@@ -143,6 +144,12 @@ export const api = {
       if (params?.offset) query.set('offset', String(params.offset))
       const qs = query.toString()
       return request<TestDefinition[]>(`/test-definitions${qs ? `?${qs}` : ''}`)
+    },
+    listStarters: (tester?: string) => {
+      const query = new URLSearchParams()
+      if (tester) query.set('tester', tester)
+      const qs = query.toString()
+      return request<StarterTemplate[]>(`/test-definitions/starters${qs ? `?${qs}` : ''}`)
     },
     get: (id: number) => request<TestDefinition>(`/test-definitions/${id}`),
     create: (data: TestDefinitionCreate) =>

@@ -761,3 +761,37 @@ def test_compare_end_to_end_executed_runs(app_and_client):
     assert data["case_map"]["case_load_001"]["status_regression"] is True
     assert data["case_map"]["case_smoke_001"]["status_changed"] is False
 
+
+def test_compare_runs_config_diff_effort(app_and_client):
+    """Verify that difference in reasoning effort between two runs is reported in config_keys_changed."""
+    client, session_factory, _ = app_and_client
+
+    r1, _ = _seed_run_with_result(
+        session_factory,
+        tester="llm",
+        config_snapshot={
+            "tester": "llm",
+            "suites": ["reasoning"],
+            "config": {"model": "o3-mini", "effort": "low"},
+        },
+        metrics={"tps": {"value": 50.0, "better": "higher"}},
+    )
+
+    r2, _ = _seed_run_with_result(
+        session_factory,
+        tester="llm",
+        config_snapshot={
+            "tester": "llm",
+            "suites": ["reasoning"],
+            "config": {"model": "o3-mini", "effort": "high"},
+        },
+        metrics={"tps": {"value": 40.0, "better": "higher"}},
+    )
+
+    resp = client.get(f"/api/compare?run_ids={r1},{r2}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "effort" in data["config_diff"]["config_keys_changed"]
+    assert data["runs"][0]["config"].get("effort") == "low"
+    assert data["runs"][1]["config"].get("effort") == "high"
+

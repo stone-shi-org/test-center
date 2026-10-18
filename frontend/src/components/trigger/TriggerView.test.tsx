@@ -167,4 +167,55 @@ describe('TriggerView', () => {
     expect(updateDefSpy).not.toHaveBeenCalled()
     expect(window.location.pathname).toBe('/runs/42')
   })
+
+  it('lists starters in Load from template dropdown and loads starter config directly', async () => {
+    vi.spyOn(api.testers, 'list').mockResolvedValue(mockTesters)
+    vi.spyOn(api.targets, 'list').mockResolvedValue(mockTargets)
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(mockTemplates)
+
+    const mockStarters = [
+      {
+        tester: 'dummy',
+        name: 'Smoke',
+        description: 'Dummy smoke suite',
+        suites: ['smoke'],
+        config: { duration_seconds: 0.05 },
+      },
+    ]
+    vi.spyOn(api.definitions, 'listStarters').mockResolvedValue(mockStarters)
+
+    render(
+      <RouterProvider>
+        <TriggerView />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Load from template/i)).toBeTruthy()
+    })
+
+    // Verify Starters optgroup and option exist
+    expect(screen.getByRole('group', { name: /Starters/i })).toBeTruthy()
+    expect(screen.getByRole('group', { name: /Saved Templates/i })).toBeTruthy()
+
+    // Select the starter option
+    const templateSelect = screen.getByLabelText(/Load from template/i)
+    fireEvent.change(templateSelect, { target: { value: 'starter:0' } })
+
+    // Verify fields populated
+    const testerSelect = screen.getByLabelText(/Tester Plugin/i) as HTMLSelectElement
+    expect(testerSelect.value).toBe('dummy')
+
+    const targetSelect = screen.getByLabelText(/Target Endpoint/i) as HTMLSelectElement
+    expect(targetSelect.value).toBe('')
+
+    const smokeCheckbox = screen.getByRole('checkbox', { name: 'smoke' }) as HTMLInputElement
+    const loadCheckbox = screen.getByRole('checkbox', { name: 'load' }) as HTMLInputElement
+    expect(smokeCheckbox.checked).toBe(true)
+    expect(loadCheckbox.checked).toBe(false)
+
+    const durationInput = screen.getByLabelText(/duration_seconds/i) as HTMLInputElement
+    expect(durationInput.value).toBe('0.05')
+  })
 })
+

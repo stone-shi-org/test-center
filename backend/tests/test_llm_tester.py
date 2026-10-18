@@ -802,3 +802,110 @@ def test_llm_tester_worker_subprocess_with_judge_target(app_and_client, monkeypa
         primary_server.server_close()
         judge_server.shutdown()
         judge_server.server_close()
+
+
+def test_llm_reasoning_effort_schema_and_validation():
+    """Verify effort schema definition, enum values, normalization, and validation errors."""
+    tester = LLMTester()
+    props = tester.config_schema["properties"]
+    assert "effort" in props
+    assert props["effort"]["type"] == "string"
+    assert props["effort"]["enum"] == ["none", "low", "medium", "high", "xhigh", "max"]
+    assert "x-advanced" not in props["effort"] or props["effort"]["x-advanced"] is False
+
+    # Valid effort values pass
+    for valid_val in ["none", "low", "medium", "high", "xhigh", "max"]:
+        validated = tester.validate_and_apply_config({"effort": valid_val})
+        assert validated["effort"] == valid_val
+
+    # Empty string normalizes to unset
+    empty_val = tester.validate_and_apply_config({"effort": ""})
+    assert "effort" not in empty_val or empty_val["effort"] is None
+
+    # Invalid effort raises TesterConfigError
+    with pytest.raises(TesterConfigError, match="effort"):
+        tester.validate_and_apply_config({"effort": "super_maximum"})
+
+
+def test_llm_reasoning_effort_request_payload_and_artifacts(tmp_path: Path):
+    """Verify reasoning_effort in chat payload when set, absent when unset, and not sent to judge."""
+    recorded_primary_payloads: list[dict[str, Any]] = []
+    recorded_judge_payloads: list[dict[str, Any]] = []
+
+    def primary_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "mock-chat-v1"}]})
+        body = json.loads(request.content.decode("utf-8"))
+        recorded_primary_payloads.append(body)
+        reply = "```python\ndef rle_encode(s: str) -> str:\n    if not s: return ''\n    res, cnt = [], 1\n    for i in range(1, len(s)):\n        if s[i] == s[i-1]: cnt += 1\n        else:\n            res.append(f'{cnt}{s[i-1]}')\n            cnt = 1\n    res.append(f'{cnt}{s[-1]}')\n    return ''.join(res)\n\ndef rle_decode(s: str) -> str:\n    import re\n    return ''.join(int(cnt) * ch for cnt, ch in re.findall(r'(\\d+)([A-Za-z])', s))\n```"
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=_build_sse_response_for_text(reply))
+
+    def judge_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        recorded_judge_payloads.append(body)
+        judge_json = json.dumps({"score": 5, "passed": True, "justification": "Good"})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": judge_json}}]})
+
+    # Case A: effort="high"
+    tester = LLMTester()
+    ctx1 = TestContext(run_id=701, artifacts_dir=tmp_path / "a701", emit_stdout=False)
+    res1 = tester.run(
+        {
+            "_transport": httpx.MockTransport(primary_handler),
+            "_judge_transport": httpx.MockTransport(judge_handler),
+            "suites": ["coding"],
+            "effort": "high",
+            "judge_enabled": True,
+        },
+        {
+            "base_url": "http://primary:8000/v1",
+            "judge_target": {"base_url": "http://judge:8000/v1"},
+        },
+        ctx1,
+    )
+    assert res1.status == "pass"
+    assert len(recorded_primary_payloads) == 1
+    assert recorded_primary_payloads[0].get("reasoning_effort") == "high"
+    # Judge request must NOT have reasoning_effort
+    assert len(recorded_judge_payloads) == 1
+    assert "reasoning_effort" not in recorded_judge_payloads[0]
+
+    # Verify report and case detail
+    assert "effort=high" in (res1.summary or "").lower()
+    assert res1.cases[0].detail["effort"] == "high"
+    report_text = Path(next(a for a in res1.artifacts if a.name == "llm_report.txt").path).read_text(encoding="utf-8")
+    assert "Reasoning Effort      : high" in report_text
+
+    # Case B: effort="none"
+    recorded_primary_payloads.clear()
+    recorded_judge_payloads.clear()
+    ctx2 = TestContext(run_id=702, artifacts_dir=tmp_path / "a702", emit_stdout=False)
+    res2 = tester.run(
+        {
+            "_transport": httpx.MockTransport(primary_handler),
+            "suites": ["coding"],
+            "effort": "none",
+        },
+        {"base_url": "http://primary:8000/v1"},
+        ctx2,
+    )
+    assert res2.status == "pass"
+    assert len(recorded_primary_payloads) == 1
+    assert recorded_primary_payloads[0].get("reasoning_effort") == "none"
+    assert res2.cases[0].detail["effort"] == "none"
+
+    # Case C: effort unset (omitted)
+    recorded_primary_payloads.clear()
+    ctx3 = TestContext(run_id=703, artifacts_dir=tmp_path / "a703", emit_stdout=False)
+    res3 = tester.run(
+        {
+            "_transport": httpx.MockTransport(primary_handler),
+            "suites": ["coding"],
+        },
+        {"base_url": "http://primary:8000/v1"},
+        ctx3,
+    )
+    assert res3.status == "pass"
+    assert len(recorded_primary_payloads) == 1
+    assert "reasoning_effort" not in recorded_primary_payloads[0]
+    assert res3.cases[0].detail["effort"] is None
