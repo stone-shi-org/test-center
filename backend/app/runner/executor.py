@@ -49,7 +49,9 @@ def run_executor(payload: dict[str, Any]) -> int:
 
     def handle_signal(sig, frame):
         ctx.set_cancelled()
-        ctx.log(f"Received termination signal ({signal.Signals(sig).name})", level="warning")
+        sig_name = signal.Signals(sig).name
+        ctx.log(f"Received termination signal ({sig_name})", level="warning")
+        raise TesterCancelledError(f"Terminated by signal {sig_name}")
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)

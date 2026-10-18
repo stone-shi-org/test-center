@@ -173,19 +173,16 @@ class RunWorker:
                 })
                 return True
 
-            if run.status == "running":
+            if run.status in ("running", "cancelling"):
                 self._cancel_requests.add(run_id)
-                # Send SIGTERM to all active subprocesses for this run
+                # Force-stop all active subprocesses for this run immediately
                 procs = list(self._active_run_processes.get(run_id, set()))
                 single_proc = self._active_processes.get(run_id)
                 if single_proc and single_proc not in procs:
                     procs.append(single_proc)
                 for proc in procs:
                     if proc and proc.returncode is None:
-                        try:
-                            os.killpg(proc.pid, signal.SIGTERM)
-                        except OSError:
-                            pass
+                        await self._kill_process_group(proc)
                 return True
 
             return False
@@ -511,6 +508,9 @@ class RunWorker:
             self._active_processes[run_id] = process
             self._active_run_processes.setdefault(run_id, set()).add(process)
 
+            if run_id in self._cancel_requests:
+                await self._kill_process_group(process)
+
             async def read_stream():
                 assert process is not None and process.stdout is not None
                 while True:
@@ -808,22 +808,18 @@ class RunWorker:
             logger.warning(f"Failed to process Bamboo status report for run #{run_id}: {exc}")
 
     async def _kill_process_group(self, process: asyncio.subprocess.Process) -> None:
-        """Send SIGTERM, then SIGKILL if process doesn't exit promptly."""
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
+        """Force-kill the subprocess process group immediately with SIGKILL."""
+        if process.returncode is not None:
             return
-
-        # Give it up to 2 seconds to terminate gracefully
-        for _ in range(20):
-            if process.returncode is not None:
-                return
-            await asyncio.sleep(0.1)
-
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
-            pass
+            return
+        except OSError:
+            try:
+                process.kill()
+            except OSError:
+                return
 
     async def _finalize_run(self, run_id: int, status: str, summary: str) -> None:
         """Mark run finished with given status and summary."""

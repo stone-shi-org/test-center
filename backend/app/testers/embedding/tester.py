@@ -286,7 +286,8 @@ class EmbeddingTester(TesterPlugin):
             ctx.log(f"Phase 3b: Testing concurrent throughput with {concurrency} parallel workers...")
             ctx.check_cancelled()
             t_concurrent_start = time.perf_counter()
-            with cf.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            pool = cf.ThreadPoolExecutor(max_workers=concurrency)
+            try:
                 futures = [
                     pool.submit(client.embed, [d.text], model, dimensions)
                     for d in docs
@@ -300,6 +301,11 @@ class EmbeddingTester(TesterPlugin):
                     except Exception as e:
                         ctx.log(f"Concurrent embed request failed: {e}", level="error")
                         raise TesterError(f"Concurrent embedding worker failed: {e}") from e
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
 
             concurrent_wall_ms = (time.perf_counter() - t_concurrent_start) * 1000.0
             concurrent_throughput = n_docs / (concurrent_wall_ms / 1000.0) if concurrent_wall_ms > 0 else 0.0

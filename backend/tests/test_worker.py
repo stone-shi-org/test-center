@@ -147,6 +147,66 @@ async def test_worker_cancel_running(tmp_path: Path, test_db_session):
 
 
 @pytest.mark.asyncio
+async def test_worker_cancel_force_stops_unresponsive_subprocess(tmp_path: Path, test_db_session, monkeypatch):
+    """Verify cancelling a run force-kills a blocking subprocess that ignores SIGTERM without waiting."""
+    import sys
+    import time
+
+    artifacts_dir = tmp_path / "artifacts"
+    worker = RunWorker(session_factory=test_db_session, artifacts_dir=artifacts_dir)
+
+    db: Session = test_db_session()
+    run = Run(
+        status="queued",
+        queued_at=utc_now(),
+        config_snapshot={"tester": "dummy"},
+        target_snapshot={},
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    run_id = run.id
+    db.close()
+
+    orig_create = asyncio.create_subprocess_exec
+    started_event = asyncio.Event()
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        proc = await orig_create(
+            sys.executable,
+            "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+            **kwargs,
+        )
+        started_event.set()
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_task = asyncio.create_task(worker.poll_and_execute_once())
+    await asyncio.wait_for(started_event.wait(), timeout=5.0)
+    # Allow the subprocess a brief moment to install SIG_IGN
+    await asyncio.sleep(0.1)
+
+    t0 = time.monotonic()
+    cancelled = await worker.cancel_run(run_id)
+    assert cancelled is True
+
+    await asyncio.wait_for(exec_task, timeout=1.5)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.5
+
+    db = test_db_session()
+    updated_run = db.get(Run, run_id)
+    assert updated_run.status == "cancelled"
+    assert updated_run.finished_at is not None
+    assert len(updated_run.results) == 1
+    assert updated_run.results[0].status == "cancelled"
+    db.close()
+
+
+
+@pytest.mark.asyncio
 async def test_worker_cancel_queued(tmp_path: Path, test_db_session):
     artifacts_dir = tmp_path / "artifacts"
     worker = RunWorker(session_factory=test_db_session, artifacts_dir=artifacts_dir)
