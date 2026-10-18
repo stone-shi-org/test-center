@@ -356,3 +356,62 @@ def test_target_test_endpoint_capabilities(app_and_client, monkeypatch):
     res_404 = client.post("/api/targets/999999/test")
     assert res_404.status_code == 404
 
+
+
+def test_target_test_grpc_capability(app_and_client):
+    from backend.app.testers.live_stt.grpc_client import MockLiveSTTGRPCServer
+
+    client, _, _ = app_and_client
+
+    # Live-stt targets include grpc in their inferred capabilities
+    res = client.post(
+        "/api/targets",
+        json={"name": "stt-grpc-default", "kind": "live-stt", "base_url": "http://stt.local"},
+    )
+    assert res.status_code == 201
+    assert "grpc" in res.json()["capabilities"]
+
+    # Invalid grpc_port is rejected
+    bad = client.post(
+        "/api/targets",
+        json={
+            "name": "stt-bad-port",
+            "kind": "live-stt",
+            "base_url": "http://stt.local",
+            "extra": {"grpc_port": "abc"},
+        },
+    )
+    assert bad.status_code == 422
+
+    with MockLiveSTTGRPCServer() as server:
+        port = int(server.target.rsplit(":", 1)[1])
+        ok = client.post(
+            "/api/targets/test",
+            json={
+                "name": "grpc-ok",
+                "kind": "live-stt",
+                "base_url": "http://127.0.0.1:1",
+                "capabilities": ["grpc"],
+                "extra": {"grpc_port": port},
+            },
+        )
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["capabilities_tested"] == ["grpc"]
+        assert body["ok"] is True, body
+        assert body["results"][0]["detail"]["grpc_target"] == f"127.0.0.1:{port}"
+
+    # Nothing listening on the port -> failure
+    fail = client.post(
+        "/api/targets/test",
+        json={
+            "name": "grpc-down",
+            "kind": "live-stt",
+            "base_url": "http://127.0.0.1:1",
+            "capabilities": ["grpc"],
+            "extra": {"grpc_port": port},
+            "timeout_seconds": 2,
+        },
+    )
+    assert fail.status_code == 200
+    assert fail.json()["ok"] is False

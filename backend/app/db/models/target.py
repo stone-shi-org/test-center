@@ -21,6 +21,10 @@ _CAPABILITY_ALIASES: dict[str, str] = {
     "transcriptions": "asr",
     "live-stt": "asr",
     "live_stt": "asr",
+    "grpc": "grpc",
+    "grpc-streaming": "grpc",
+    "grpc_streaming": "grpc",
+    "streaming-asr": "grpc",
     "tts": "tts",
     "speech": "tts",
     "diarization": "diarization",
@@ -60,7 +64,7 @@ def infer_target_capabilities(kind: str | None, extra: dict[str, Any] | None = N
     if k in ("embedding", "embeddings"):
         return ["embedding"]
     if k in ("live-stt", "live_stt", "stt", "asr"):
-        return ["asr", "tts", "diarization"]
+        return ["asr", "tts", "diarization", "grpc"]
     if k in ("openai-compatible", "llm", "chat"):
         return ["chat"]
     return ["chat"]

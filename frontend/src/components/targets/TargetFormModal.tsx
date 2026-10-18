@@ -42,13 +42,18 @@ export const TARGET_CAPABILITY_OPTIONS = [
     label: 'diarization',
     title: 'Speaker diarization (/v1/audio/diarization)',
   },
+  {
+    id: 'grpc',
+    label: 'grpc',
+    title: 'gRPC StreamingASR (GetServerInfo probe on the gRPC port)',
+  },
 ] as const
 
 export function inferDefaultCapabilities(kind: string): string[] {
   const k = (kind || '').trim().toLowerCase()
   if (k === 'embedding' || k === 'embeddings') return ['embedding']
   if (k === 'live-stt' || k === 'live_stt' || k === 'stt' || k === 'asr') {
-    return ['asr', 'tts', 'diarization']
+    return ['asr', 'tts', 'diarization', 'grpc']
   }
   return ['chat']
 }
@@ -106,10 +111,15 @@ function TargetForm({
   const [capabilitiesCustomized, setCapabilitiesCustomized] = useState<boolean>(() =>
     Boolean(target)
   )
+  const [grpcPort, setGrpcPort] = useState(() => {
+    const p = target?.extra?.grpc_port
+    return p === undefined || p === null ? '' : String(p)
+  })
   const [extraJson, setExtraJson] = useState(() => {
     if (!target?.extra) return '{}'
     const copy = { ...target.extra }
     delete copy.capabilities
+    delete copy.grpc_port
     return JSON.stringify(copy, null, 2)
   })
   const [error, setError] = useState<string | null>(null)
@@ -185,6 +195,18 @@ function TargetForm({
         setError('Extra parameters is not valid JSON')
         return null
       }
+    }
+
+    const trimmedGrpcPort = grpcPort.trim()
+    if (trimmedGrpcPort) {
+      const portNum = Number(trimmedGrpcPort)
+      if (!/^\d+$/.test(trimmedGrpcPort) || portNum < 1 || portNum > 65535) {
+        setError('gRPC port must be an integer between 1 and 65535')
+        return null
+      }
+      parsedExtra = { ...parsedExtra, grpc_port: portNum }
+    } else {
+      delete parsedExtra.grpc_port
     }
 
     for (const key of Object.keys(parsedExtra)) {
@@ -338,6 +360,25 @@ function TargetForm({
         />
         <span className="field-hint">Root URL of the target service or API gateway.</span>
       </div>
+
+      {(capabilities.includes('grpc') || kind === 'live-stt') && (
+        <div className="form-group">
+          <label htmlFor="target-grpc-port">gRPC Port</label>
+          <input
+            id="target-grpc-port"
+            type="text"
+            inputMode="numeric"
+            className="form-input font-mono"
+            value={grpcPort}
+            onChange={(e) => setGrpcPort(e.target.value)}
+            placeholder="50051"
+          />
+          <span className="field-hint">
+            Optional. Uses the host of Base URL with this port for gRPC streaming. Leave empty
+            for the default (50051).
+          </span>
+        </div>
+      )}
 
       <div className="form-group">
         <label htmlFor="target-auth-env-var">Auth Environment Variable Reference</label>

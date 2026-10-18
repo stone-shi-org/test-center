@@ -31,6 +31,10 @@ from backend.app.testers.live_stt.client import (
     LiveSTTHTTPClient,
 )
 from backend.app.testers.live_stt.fixtures import make_pcm_wav_bytes
+from backend.app.testers.live_stt.grpc_client import (
+    LiveSTTGRPCClient,
+    resolve_grpc_target,
+)
 from backend.app.testers.llm.client import ChatClientError, OpenAIChatClient
 
 router = APIRouter(prefix="/targets", tags=["targets"])
@@ -106,6 +110,14 @@ def _validate_extra(extra_dict: dict[str, Any] | None) -> dict[str, Any]:
                     f"Direct secrets are forbidden in target extra ('{key}'). "
                     "Use auth_env_var to reference secrets via environment variables."
                 )
+    port = extra_dict.get("grpc_port")
+    if port is not None and not (isinstance(port, str) and not port.strip()):
+        try:
+            port_int = int(port)
+        except (TypeError, ValueError):
+            raise ValueError("extra.grpc_port must be an integer between 1 and 65535") from None
+        if isinstance(port, bool) or not 1 <= port_int <= 65535:
+            raise ValueError("extra.grpc_port must be an integer between 1 and 65535")
     return extra_dict
 
 
@@ -520,6 +532,63 @@ def _probe_live_stt_capability(
         )
 
 
+def _probe_grpc_capability(
+    base_url: str,
+    api_key: str | None,
+    extra: dict[str, Any],
+    timeout_seconds: float,
+) -> CapabilityTestResult:
+    """Probe the live-stt gRPC endpoint via StreamingASR.GetServerInfo.
+
+    The address comes from ``resolve_grpc_target``: ``extra.grpc_target`` / ``extra.grpc_host`` +
+    ``extra.grpc_port``, otherwise the host of ``base_url`` with ``extra.grpc_port`` or 50051.
+    """
+    t0 = time.perf_counter()
+    grpc_addr: str | None = None
+    try:
+        grpc_addr = resolve_grpc_target({"base_url": base_url, "extra": extra})
+        client = LiveSTTGRPCClient(grpc_addr, api_key=api_key, timeout=timeout_seconds)
+        info = client.get_server_info_sync(timeout=timeout_seconds)
+        elapsed_ms = round(max(0.01, (time.perf_counter() - t0) * 1000.0), 2)
+        if info.ok:
+            return CapabilityTestResult(
+                capability="grpc",
+                ok=True,
+                status_code=None,
+                latency_ms=info.latency_ms,
+                model=info.default_model or None,
+                message=f"gRPC GetServerInfo succeeded at {grpc_addr} ({info.latency_ms:.1f} ms)",
+                detail={
+                    "grpc_target": grpc_addr,
+                    "version": info.version,
+                    "backend": info.backend,
+                    "default_model": info.default_model,
+                    "max_concurrent_calls": info.max_concurrent_calls,
+                    "active_calls": info.active_calls,
+                },
+            )
+        return CapabilityTestResult(
+            capability="grpc",
+            ok=False,
+            status_code=None,
+            latency_ms=elapsed_ms,
+            message=f"gRPC GetServerInfo failed at {grpc_addr} with {info.grpc_status_code}",
+            error=_redact_secret(info.error_message or info.grpc_status_code, api_key),
+            detail={"grpc_target": grpc_addr},
+        )
+    except Exception as exc:
+        elapsed_ms = round(max(0.01, (time.perf_counter() - t0) * 1000.0), 2)
+        return CapabilityTestResult(
+            capability="grpc",
+            ok=False,
+            status_code=None,
+            latency_ms=elapsed_ms,
+            message=f"gRPC capability check failed ({elapsed_ms:.1f} ms)",
+            error=_redact_secret(str(exc), api_key),
+            detail={"grpc_target": grpc_addr} if grpc_addr else {},
+        )
+
+
 def _probe_generic_http_capability(
     capability: str,
     base_url: str,
@@ -615,6 +684,13 @@ def _execute_target_test(
                 model_override=model_override,
                 timeout_seconds=timeout_seconds,
                 transport=transport,
+            )
+        elif cap == "grpc":
+            res = _probe_grpc_capability(
+                base_url=base_url,
+                api_key=api_key,
+                extra=extra,
+                timeout_seconds=timeout_seconds,
             )
         elif cap in ("asr", "tts", "diarization"):
             res = _probe_live_stt_capability(
