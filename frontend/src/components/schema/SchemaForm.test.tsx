@@ -470,9 +470,9 @@ describe('SchemaForm component', () => {
       )
 
       // Built-in defaults are shown
-      expect(screen.getByText('parakeet-ctc-0.6b')).toBeTruthy()
+      expect(screen.getByText('realtime_eou_120m-v1')).toBeTruthy()
       expect(screen.getByText('pyannote/speaker-diarization-community-1')).toBeTruthy()
-      expect(screen.getByText('kokoro-82m')).toBeTruthy()
+      expect(screen.getByText('kokoro-82m-v1')).toBeTruthy()
 
       // Manual add input is visible
       const addInput = screen.getByLabelText('Add model ID')
@@ -481,9 +481,9 @@ describe('SchemaForm component', () => {
 
       expect(onChange).toHaveBeenCalledWith({
         models: [
-          'parakeet-ctc-0.6b',
+          'realtime_eou_120m-v1',
           'pyannote/speaker-diarization-community-1',
-          'kokoro-82m',
+          'kokoro-82m-v1',
           'whisper-large-v3-turbo',
         ],
       })

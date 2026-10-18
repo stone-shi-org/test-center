@@ -277,7 +277,7 @@ class TargetModelInfoResponse(BaseModel):
     type: str
     engine: str
     is_default: bool
-    sample_rate: int
+    sample_rate: int | None = None
     supports_streaming: bool
     supports_num_speakers_hint: bool
     default_voice: str | None = None

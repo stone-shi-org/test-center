@@ -443,31 +443,27 @@ def test_target_models_discovery_endpoint(app_and_client, monkeypatch):
                         "id": "parakeet-ctc-0.6b",
                         "type": "asr",
                         "engine": "parakeet",
-                        "is_default": True,
-                        "sample_rate": 16000,
-                        "supports_streaming": True,
+                        "default": True,
+                        "streaming_capable": True,
                     },
                     {
                         "id": "whisper-large-v3-turbo",
                         "type": "asr",
                         "engine": "whisper",
-                        "is_default": False,
-                        "sample_rate": 16000,
-                        "supports_streaming": True,
+                        "default": False,
+                        "streaming_capable": False,
                     },
                     {
                         "id": "pyannote/speaker-diarization-community-1",
                         "type": "diarization",
-                        "engine": "pyannote",
-                        "is_default": True,
-                        "sample_rate": 16000,
+                        "default": True,
                         "supports_num_speakers_hint": True,
                     },
                     {
                         "id": "kokoro-82m",
                         "type": "tts",
                         "engine": "kokoro",
-                        "is_default": True,
+                        "default": True,
                         "sample_rate": 24000,
                         "supports_streaming": True,
                         "default_voice": "af_heart",
@@ -499,8 +495,11 @@ def test_target_models_discovery_endpoint(app_and_client, monkeypatch):
     by_id = {m["id"]: m for m in models}
     assert by_id["parakeet-ctc-0.6b"]["grpc_streaming"] is True
     assert by_id["parakeet-ctc-0.6b"]["is_default"] is True
+    assert by_id["parakeet-ctc-0.6b"]["sample_rate"] is None
     assert by_id["whisper-large-v3-turbo"]["grpc_streaming"] is False
     assert by_id["pyannote/speaker-diarization-community-1"]["supports_num_speakers_hint"] is True
+    assert by_id["pyannote/speaker-diarization-community-1"]["sample_rate"] is None
+    assert by_id["kokoro-82m"]["sample_rate"] == 24000
     assert by_id["kokoro-82m"]["supported_voices"] == ["af_heart", "af_bella"]
     assert by_id["kokoro-82m"]["default_voice"] == "af_heart"
 

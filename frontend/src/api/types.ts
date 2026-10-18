@@ -75,7 +75,7 @@ export interface TargetModelInfo {
   type: 'asr' | 'diarization' | 'tts' | string
   engine: string
   is_default: boolean
-  sample_rate: number
+  sample_rate: number | null
   supports_streaming: boolean
   supports_num_speakers_hint: boolean
   default_voice: string | null
