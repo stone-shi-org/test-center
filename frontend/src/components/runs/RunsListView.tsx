@@ -72,6 +72,9 @@ function getRunModels(r: Run): string[] {
   const extra = (r.target_snapshot?.extra || {}) as Record<string, unknown>
   add(cfg.model)
   add(cfg.transcription_model)
+  if (Array.isArray(cfg.models)) {
+    cfg.models.forEach(add)
+  }
   add(extra.model)
   add(extra.transcription_model)
   add(r.target_snapshot?.model)

@@ -16,7 +16,9 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
         "name": "HTTP smoke",
         "description": "Quick HTTP health and JSON transcription smoke check.",
         "suites": ["admin", "transcriptions_json"],
-        "config": {},
+        "config": {
+            "models": "default",
+        },
     },
     {
         "tester": "live-stt",
@@ -31,14 +33,18 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
             "error_handling",
             "concurrency",
         ],
-        "config": {},
+        "config": {
+            "models": "per_engine",
+        },
     },
     {
         "tester": "live-stt",
         "name": "gRPC streaming",
         "description": "gRPC streaming contract verification suite.",
         "suites": ["grpc_streaming"],
-        "config": {},
+        "config": {
+            "models": "default",
+        },
     },
     {
         "tester": "live-stt",
@@ -46,6 +52,7 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
         "description": "Fast batch WER evaluation on up to 3 meetings (max 60s each).",
         "suites": ["accuracy_wer"],
         "config": {
+            "models": "default",
             "max_meetings": 3,
             "max_audio_duration_sec": 60,
             "wer_threshold": 0.3,
@@ -57,6 +64,7 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
         "description": "Streaming accuracy evaluation over gRPC on up to 3 meetings (max 60s each).",
         "suites": ["accuracy_streaming"],
         "config": {
+            "models": "default",
             "streaming_protocol": "grpc",
             "max_meetings": 3,
             "max_audio_duration_sec": 60,
@@ -68,6 +76,7 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
         "description": "Long-duration gRPC streaming stability and memory growth test.",
         "suites": ["grpc_long_call"],
         "config": {
+            "models": "default",
             "include_long_call": True,
         },
     },

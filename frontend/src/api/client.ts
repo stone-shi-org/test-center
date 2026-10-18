@@ -1,4 +1,5 @@
 import type {
+  AdHocTargetModelsRequest,
   AdHocTargetTestRequest,
   Artifact,
   ArtifactContentResponse,
@@ -24,6 +25,7 @@ import type {
   StarterTemplate,
   Target,
   TargetCreate,
+  TargetModelInfo,
   TargetTestRequest,
   TargetTestResponse,
   TargetUpdate,
@@ -125,6 +127,12 @@ export const api = {
       }),
     testAdHoc: (data: AdHocTargetTestRequest) =>
       request<TargetTestResponse>('/targets/test', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    listModels: (id: number) => request<TargetModelInfo[]>(`/targets/${id}/models`),
+    listModelsAdHoc: (data: AdHocTargetModelsRequest) =>
+      request<TargetModelInfo[]>('/targets/models', {
         method: 'POST',
         body: JSON.stringify(data),
       }),

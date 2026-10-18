@@ -272,6 +272,30 @@ class TargetTestResponse(BaseModel):
     tested_at: datetime
 
 
+class TargetModelInfoResponse(BaseModel):
+    id: str
+    type: str
+    engine: str
+    is_default: bool
+    sample_rate: int
+    supports_streaming: bool
+    supports_num_speakers_hint: bool
+    default_voice: str | None = None
+    supported_voices: list[str] = Field(default_factory=list)
+    grpc_streaming: bool
+
+
+class AdHocTargetModelsRequest(BaseModel):
+    base_url: str = Field(..., min_length=1, max_length=1024)
+    auth_env_var: str | None = Field(default=None)
+    timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+
+    @field_validator("auth_env_var")
+    @classmethod
+    def check_auth_env_var(cls, v: str | None) -> str | None:
+        return _validate_auth_env_var(v)
+
+
 def _probe_chat_capability(
     base_url: str,
     api_key: str | None,
@@ -780,6 +804,51 @@ def list_targets(
     return list(db.execute(stmt).scalars().all())
 
 
+def _discover_target_models(
+    base_url: str,
+    auth_env_var: str | None,
+    timeout_seconds: float = 10.0,
+) -> list[TargetModelInfoResponse]:
+    api_key: str | None = None
+    if auth_env_var and auth_env_var.strip():
+        raw_env = os.environ.get(auth_env_var.strip())
+        if raw_env and raw_env.strip():
+            api_key = raw_env.strip()
+    if not api_key:
+        api_key = os.environ.get("LIVE_STT_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
+    client = LiveSTTHTTPClient(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout_seconds,
+        transport=_get_http_transport(),
+    )
+    try:
+        discovered = client.discover_models()
+    except LiveSTTClientError as e:
+        redacted = _redact_secret(str(e), api_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Target unreachable: {redacted}",
+        ) from e
+
+    if discovered.status_code in (401, 403):
+        err_msg = _redact_secret(discovered.error or f"HTTP {discovered.status_code}", api_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Target authentication failed (HTTP {discovered.status_code}): {err_msg}",
+        )
+
+    if discovered.status_code != 200 or discovered.error:
+        err_msg = _redact_secret(discovered.error or f"HTTP {discovered.status_code}", api_key)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to query target models: {err_msg}",
+        )
+
+    return [TargetModelInfoResponse(**m.to_dict()) for m in discovered.models]
+
+
 @router.post("/test", response_model=TargetTestResponse)
 def test_adhoc_target(
     req: AdHocTargetTestRequest,
@@ -798,6 +867,18 @@ def test_adhoc_target(
     )
 
 
+@router.post("/models", response_model=list[TargetModelInfoResponse])
+def get_adhoc_target_models(
+    req: AdHocTargetModelsRequest,
+) -> list[TargetModelInfoResponse]:
+    """Discover models from an unsaved/ad-hoc target's /v1/models endpoint."""
+    return _discover_target_models(
+        base_url=req.base_url,
+        auth_env_var=req.auth_env_var,
+        timeout_seconds=req.timeout_seconds,
+    )
+
+
 @router.get("/{target_id}", response_model=TargetResponse)
 def get_target(
     target_id: int,
@@ -808,6 +889,21 @@ def get_target(
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Target {target_id} not found")
     return target
+
+
+@router.get("/{target_id}/models", response_model=list[TargetModelInfoResponse])
+def get_target_models(
+    target_id: int,
+    db: Session = Depends(get_db),
+) -> list[TargetModelInfoResponse]:
+    """Query the target's /v1/models endpoint using the server's auth key and return parsed ModelInfo items."""
+    target = db.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Target {target_id} not found")
+    return _discover_target_models(
+        base_url=target.base_url,
+        auth_env_var=target.auth_env_var,
+    )
 
 
 @router.post("/{target_id}/test", response_model=TargetTestResponse)

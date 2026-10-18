@@ -821,9 +821,15 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
             if "effort" not in inner_config and c.detail.get("effort") is not None:
                 inner_config["effort"] = c.detail["effort"]
 
+    explicit_models_cfg = (
+        [str(m).strip() for m in inner_config["models"] if str(m).strip()]
+        if isinstance(inner_config.get("models"), list)
+        else []
+    )
     model = (
         inner_config.get("model")
         or inner_config.get("transcription_model")
+        or (", ".join(explicit_models_cfg) if explicit_models_cfg else None)
         or target_extra.get("model")
         or target_extra.get("transcription_model")
         or target_snap.get("model")

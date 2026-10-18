@@ -93,9 +93,13 @@ function resolveResultTargetAndModel(
     const stepCfg = (matchedDef?.config || cfgSnap.config || {}) as Record<string, unknown>
     const stepTgt = (matchedDef?.target_snapshot || tgtSnap || {}) as Record<string, unknown>
     const stepExtra = (stepTgt.extra || {}) as Record<string, unknown>
+    const explicitModels = Array.isArray(stepCfg.models)
+      ? stepCfg.models.find((m) => typeof m === 'string' && m.trim())
+      : undefined
     const candidate =
       stepCfg.model ||
       stepCfg.transcription_model ||
+      explicitModels ||
       stepExtra.model ||
       stepExtra.transcription_model ||
       stepTgt.model

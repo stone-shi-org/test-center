@@ -647,6 +647,9 @@ export function TemplatesView() {
                 values={configValues}
                 onChange={setConfigValues}
                 disabled={saving}
+                context={{
+                  targetId: selectedTargetId ? parseInt(selectedTargetId, 10) : null,
+                }}
               />
             </div>
           )}

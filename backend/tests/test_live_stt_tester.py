@@ -1113,13 +1113,16 @@ def test_live_stt_tester_config_validation():
     """Verify config schema defaults and validation rules."""
     tester = LiveSTTTester()
     cfg = tester.validate_and_apply_config({})
-    assert cfg["model_parametrization"] == "per_engine"
+    assert cfg["models"] == "per_engine"
     assert cfg["repetitions"] == 1
     assert cfg["discover_models"] is True
     assert cfg["include_extended_admin"] is True
     assert cfg["allow_mutating_admin"] is False
     assert cfg["tts_response_format"] == "wav"
     assert cfg["tts_stream_format"] == "pcm"
+
+    with pytest.raises(TesterConfigError, match="models"):
+        tester.validate_and_apply_config({"models": "invalid_mode"})
 
     with pytest.raises(TesterConfigError, match="model_parametrization"):
         tester.validate_and_apply_config({"model_parametrization": "invalid_mode"})
@@ -1819,7 +1822,7 @@ def test_live_stt_schema_x_advanced_annotations(app_and_client):
     # Essential properties that MUST NOT have x-advanced: true
     essential = {
         "suites",
-        "transcription_model",
+        "models",
         "language",
         "repetitions",
         "timeout_seconds",
@@ -1832,6 +1835,24 @@ def test_live_stt_schema_x_advanced_annotations(app_and_client):
         assert prop_name in props, f"Essential prop {prop_name} missing"
         assert not props[prop_name].get("x-advanced", False), f"{prop_name} should not be x-advanced"
 
+    assert props["models"].get("x-widget") == "model-picker"
+
+    # Legacy model/engine keys should no longer appear in schema properties
+    removed_legacy_keys = {
+        "model_parametrization",
+        "engines",
+        "transcription_model",
+        "transcription_models",
+        "diarization_model",
+        "diarization_models",
+        "tts_model",
+        "tts_models",
+        "grpc_model",
+        "grpc_models",
+    }
+    for old_key in removed_legacy_keys:
+        assert old_key not in props, f"Legacy prop {old_key} should not appear in config_schema"
+
     # Verify advanced properties are flagged with x-advanced: True
     advanced_samples = [
         "concurrency_burst_size",
@@ -1839,9 +1860,6 @@ def test_live_stt_schema_x_advanced_annotations(app_and_client):
         "meetings",
         "audio_device",
         "include_long_call",
-        "model_parametrization",
-        "diarization_model",
-        "tts_model",
         "streaming_protocol",
         "grpc_port",
     ]
@@ -1850,9 +1868,9 @@ def test_live_stt_schema_x_advanced_annotations(app_and_client):
         assert props[prop_name].get("x-advanced") is True, f"{prop_name} should be x-advanced: True"
 
     advanced_count = sum(1 for p in props.values() if p.get("x-advanced") is True)
-    assert advanced_count >= 40
+    assert advanced_count >= 30
 
-    # Verify /api/testers/live-stt passes x-advanced through
+    # Verify /api/testers/live-stt passes x-advanced and x-widget through
     client, _, _ = app_and_client
     res = client.get("/api/testers/live-stt")
     assert res.status_code == 200
@@ -1860,4 +1878,205 @@ def test_live_stt_schema_x_advanced_annotations(app_and_client):
     api_props = api_schema.get("properties", {})
     assert api_props["concurrency_burst_size"].get("x-advanced") is True
     assert not api_props["language"].get("x-advanced", False)
+    assert api_props["models"].get("x-widget") == "model-picker"
+    assert not api_props["models"].get("x-advanced", False)
+
+
+# ===========================================================================
+# 8. TES-42: Single `models` Config Field, Backward Compatibility & Fallbacks
+# ===========================================================================
+
+def test_live_stt_legacy_model_keys_backward_compatibility():
+    """Verify legacy model_parametrization, *_model(s), and engines translate into `models`."""
+    tester = LiveSTTTester()
+
+    # 1. model_parametrization translates into preset
+    for preset in ("per_engine", "all", "default"):
+        cfg = tester.validate_and_apply_config({"model_parametrization": preset})
+        assert cfg["models"] == preset
+        assert "model_parametrization" not in cfg
+
+    # 2. Single and plural *_model(s) translate into an explicit flat list
+    cfg_explicit = tester.validate_and_apply_config(
+        {
+            "transcription_model": "parakeet-ctc-0.6b",
+            "diarization_models": ["pyannote/speaker-diarization-community-1"],
+            "tts_model": "kokoro-82m",
+            "grpc_models": ["realtime_eou_120m-v1", "parakeet-ctc-0.6b"],
+        }
+    )
+    assert cfg_explicit["models"] == [
+        "parakeet-ctc-0.6b",
+        "pyannote/speaker-diarization-community-1",
+        "kokoro-82m",
+        "realtime_eou_120m-v1",
+    ]
+
+    # 3. When both preset and explicit models are present, explicit models win
+    cfg_both = tester.validate_and_apply_config(
+        {
+            "model_parametrization": "all",
+            "transcription_models": ["whisper-large-v3-turbo"],
+            "tts_model": "piper-en-us-lessac-medium",
+        }
+    )
+    assert cfg_both["models"] == ["whisper-large-v3-turbo", "piper-en-us-lessac-medium"]
+
+    # 4. `engines` with a preset is preserved internally to filter candidates before preset applies
+    cfg_engines = tester.validate_and_apply_config(
+        {
+            "model_parametrization": "all",
+            "engines": ["whisper", "piper"],
+        }
+    )
+    assert cfg_engines["models"] == "all"
+    assert cfg_engines["engines"] == ["whisper", "piper"]
+
+    transport, _ = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    client = LiveSTTHTTPClient(base_url="http://localhost:8000", transport=transport)
+    discovered = client.discover_models()
+
+    asr_m, diar_m, tts_m = tester._resolve_parametrized_models(
+        cfg_engines,
+        {"base_url": "http://localhost:8000"},
+        discovered,
+    )
+    assert [m.id for m in asr_m] == ["whisper-large-v3-turbo"]
+    assert [m.id for m in tts_m] == ["piper-en-us-lessac-medium"]
+
+
+def test_live_stt_models_presets_and_explicit_list_resolution():
+    """Verify presets ('per_engine', 'all', 'default') and flat explicit lists resolve per type."""
+    tester = LiveSTTTester()
+    transport, _ = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    client = LiveSTTHTTPClient(base_url="http://localhost:8000", transport=transport)
+    discovered = client.discover_models()
+    target = {"base_url": "http://localhost:8000"}
+
+    # 1. Preset: default
+    asr_def, diar_def, tts_def = tester._resolve_parametrized_models(
+        {"models": "default"},
+        target,
+        discovered,
+    )
+    assert [m.id for m in asr_def] == ["parakeet-ctc-0.6b"]
+    assert [m.id for m in diar_def] == ["pyannote/speaker-diarization-community-1"]
+    assert [m.id for m in tts_def] == ["kokoro-82m"]
+
+    # 2. Preset: per_engine
+    asr_pe, diar_pe, tts_pe = tester._resolve_parametrized_models(
+        {"models": "per_engine"},
+        target,
+        discovered,
+    )
+    assert [m.id for m in asr_pe] == [
+        "parakeet-ctc-0.6b",
+        "parakeet-tdt-0.6b-v3",
+        "whisper-large-v3-turbo",
+    ]
+    assert [m.id for m in diar_pe] == ["pyannote/speaker-diarization-community-1"]
+    assert [m.id for m in tts_pe] == ["kokoro-82m", "piper-en-us-lessac-medium"]
+
+    # 3. Preset: all
+    asr_all, diar_all, tts_all = tester._resolve_parametrized_models(
+        {"models": "all"},
+        target,
+        discovered,
+    )
+    assert len(asr_all) == 4
+    assert len(diar_all) == 1
+    assert len(tts_all) == 2
+
+    # 4. Flat explicit list across ASR, diarization, and TTS (including unknown IDs inferred via infer_model_info)
+    asr_exp, diar_exp, tts_exp = tester._resolve_parametrized_models(
+        {
+            "models": [
+                "whisper-large-v3-turbo",
+                "piper-en-us-lessac-medium",
+                "pyannote/speaker-diarization-community-1",
+                "custom-nemo_sortformer-diarizer",
+                "custom-kokoro-voice-model",
+                "custom-parakeet-asr-v9",
+            ]
+        },
+        target,
+        discovered,
+    )
+    assert [m.id for m in asr_exp] == ["whisper-large-v3-turbo", "custom-parakeet-asr-v9"]
+    assert [m.id for m in diar_exp] == [
+        "pyannote/speaker-diarization-community-1",
+        "custom-nemo_sortformer-diarizer",
+    ]
+    assert [m.id for m in tts_exp] == ["piper-en-us-lessac-medium", "custom-kokoro-voice-model"]
+
+
+def test_live_stt_models_empty_type_fallback_logs_warning(tmp_path: Path):
+    """When an explicit list omits a model type whose suite is selected, it falls back to default and logs a warning."""
+    tester = LiveSTTTester()
+    transport, _ = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    events: list[dict[str, Any]] = []
+    ctx = TestContext(
+        run_id=801,
+        artifacts_dir=tmp_path / "artifacts_801",
+        on_event=events.append,
+        emit_stdout=False,
+    )
+
+    # Select only an ASR model in `models`, but run both transcriptions_json AND tts suites
+    res = tester.run(
+        {
+            "_transport": transport,
+            "suites": ["transcriptions_json", "tts"],
+            "models": ["whisper-large-v3-turbo"],
+        },
+        {"base_url": "http://localhost:8000/v1"},
+        ctx,
+    )
+    assert res.status == "pass"
+    # transcriptions_json ran on whisper-large-v3-turbo; tts fell back to default kokoro-82m
+    asr_cases = [c for c in res.cases if c.suite == "transcriptions_json"]
+    tts_cases = [c for c in res.cases if c.suite == "tts"]
+    assert all(c.detail["model"] == "whisper-large-v3-turbo" for c in asr_cases)
+    assert all(c.detail["model"] == "kokoro-82m" for c in tts_cases)
+
+    warning_messages = [
+        ev.get("message", "")
+        for ev in events
+        if ev.get("type") == "log" and ev.get("level") == "WARNING"
+    ]
+    assert any("No TTS models selected" in msg and "kokoro-82m" in msg for msg in warning_messages)
+    # Diarization suite was not selected, so no diarization warning should be logged
+    assert not any("No diarization models selected" in msg for msg in warning_messages)
+
+
+def test_live_stt_grpc_skips_batch_only_models_from_models_list():
+    """Verify gRPC streaming uses selected ASR models and skips batch-only models via grpc_streaming."""
+    from backend.app.testers.live_stt.streaming import select_grpc_streaming_models
+
+    tester = LiveSTTTester()
+    transport, _ = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    client = LiveSTTHTTPClient(base_url="http://localhost:8000", transport=transport)
+    discovered = client.discover_models()
+
+    asr_models, _, _ = tester._resolve_parametrized_models(
+        {
+            "models": [
+                "whisper-large-v3-turbo",
+                "parakeet-tdt-0.6b-v3",
+                "parakeet-ctc-0.6b",
+                "realtime_eou_120m-v1",
+            ]
+        },
+        {"base_url": "http://localhost:8000"},
+        discovered,
+    )
+    by_id = {m.id: m for m in asr_models}
+    assert by_id["whisper-large-v3-turbo"].grpc_streaming is False
+    assert by_id["parakeet-tdt-0.6b-v3"].grpc_streaming is False
+    assert by_id["parakeet-ctc-0.6b"].grpc_streaming is True
+    assert by_id["realtime_eou_120m-v1"].grpc_streaming is True
+
+    grpc_models = select_grpc_streaming_models(asr_models)
+    assert [m.id for m in grpc_models] == ["parakeet-ctc-0.6b", "realtime_eou_120m-v1"]
+
 

@@ -225,10 +225,16 @@ def _extract_run_models(run: Run) -> list[str]:
         if isinstance(cfg_dict, dict):
             _add_model(cfg_dict.get("model"))
             _add_model(cfg_dict.get("transcription_model"))
+            if isinstance(cfg_dict.get("models"), list):
+                for m in cfg_dict["models"]:
+                    _add_model(m)
             inner = cfg_dict.get("config")
             if isinstance(inner, dict):
                 _add_model(inner.get("model"))
                 _add_model(inner.get("transcription_model"))
+                if isinstance(inner.get("models"), list):
+                    for m in inner["models"]:
+                        _add_model(m)
         if isinstance(tgt_dict, dict):
             _add_model(tgt_dict.get("model"))
             extra = tgt_dict.get("extra")

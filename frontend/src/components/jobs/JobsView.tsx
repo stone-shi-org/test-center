@@ -1070,6 +1070,9 @@ curl -fsSL "$TEST_CENTER_URL/api/bamboo/runs/$RUN_ID/junit.xml" \\
                       values={newDefConfig}
                       onChange={setNewDefConfig}
                       disabled={creatingDef}
+                      context={{
+                        targetId: newDefTargetId ? parseInt(newDefTargetId, 10) : null,
+                      }}
                     />
                   </div>
                 )}
@@ -1261,6 +1264,11 @@ curl -fsSL "$TEST_CENTER_URL/api/bamboo/runs/$RUN_ID/junit.xml" \\
                                   }))
                                 }
                                 disabled={savingJob}
+                                context={{
+                                  targetId: step.targetIdOverride
+                                    ? parseInt(step.targetIdOverride, 10)
+                                    : def?.target_id ?? null,
+                                }}
                               />
                             </div>
                           )}

@@ -28,9 +28,13 @@ function getRunTester(r: Run): string {
 function getRunModel(r: Run): string | null {
   const cfg = (r.config_snapshot?.config as Record<string, unknown>) || {}
   const extra = (r.target_snapshot?.extra as Record<string, unknown>) || {}
+  const explicitModels = Array.isArray(cfg.models)
+    ? cfg.models.find((m) => typeof m === 'string' && m.trim())
+    : undefined
   const model =
     cfg.model ||
     cfg.transcription_model ||
+    explicitModels ||
     extra.model ||
     extra.transcription_model ||
     r.target_snapshot?.model

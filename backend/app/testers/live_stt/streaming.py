@@ -26,8 +26,10 @@ from backend.app.testers.base import (
     TesterResult,
 )
 from backend.app.testers.live_stt.client import (
+    KNOWN_BATCH_ONLY_PREFIXES,
     ModelInfo,
     infer_model_info,
+    is_batch_only_grpc_model,
 )
 from backend.app.testers.live_stt.fixtures import (
     AudioFixture,
@@ -54,7 +56,6 @@ from backend.app.testers.live_stt.pb import asr_pb2
 
 
 DEFAULT_GRPC_STREAMING_MODEL = "realtime_eou_120m-v1"
-KNOWN_BATCH_ONLY_PREFIXES = ("whisper", "parakeet-tdt", "parakeet_tdt")
 
 
 class _IntentionalMidStreamAbort(Exception):
@@ -285,15 +286,6 @@ def compute_grpc_streaming_summary(
     }
 
 
-def is_batch_only_grpc_model(model_id: str, engine: str = "") -> bool:
-    """Return True if a model is batch-only (e.g. whisper or parakeet-tdt) and rejected on gRPC Transcribe."""
-    low_id = model_id.strip().lower()
-    low_eng = engine.strip().lower()
-    if low_eng in ("whisper", "parakeet_tdt", "parakeet-tdt"):
-        return True
-    return any(tok in low_id for tok in KNOWN_BATCH_ONLY_PREFIXES)
-
-
 def select_grpc_streaming_models(
     asr_models: Sequence[ModelInfo],
     server_info: ServerInfoResult | None = None,
@@ -307,13 +299,16 @@ def select_grpc_streaming_models(
     elif cfg.get("grpc_model"):
         explicit = [str(cfg["grpc_model"]).strip()]
 
-    if explicit:
-        return [infer_model_info({"id": m, "type": "asr", "supports_streaming": True}) for m in explicit]
+    candidates = (
+        [infer_model_info({"id": m, "type": "asr", "supports_streaming": True}) for m in explicit]
+        if explicit
+        else list(asr_models)
+    )
 
-    streaming_capable = [
+    streaming_models = [
         m
-        for m in asr_models
-        if m.supports_streaming and not is_batch_only_grpc_model(m.id, m.engine)
+        for m in candidates
+        if m.grpc_streaming
     ]
 
     default_from_server = (
@@ -322,10 +317,10 @@ def select_grpc_streaming_models(
         else DEFAULT_GRPC_STREAMING_MODEL
     )
 
-    if not streaming_capable:
+    if not streaming_models:
         return [infer_model_info({"id": default_from_server, "type": "asr", "supports_streaming": True})]
 
-    return streaming_capable
+    return streaming_models
 
 
 def build_long_call_audio_fixture(

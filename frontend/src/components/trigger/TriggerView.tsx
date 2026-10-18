@@ -303,6 +303,9 @@ export function TriggerView() {
                 values={configValues}
                 onChange={setConfigValues}
                 disabled={submitting}
+                context={{
+                  targetId: selectedTargetId ? parseInt(selectedTargetId, 10) : null,
+                }}
               />
             </div>
           )}

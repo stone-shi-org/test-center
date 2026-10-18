@@ -43,6 +43,31 @@ def validate_schema(data: Any, schema: dict[str, Any], path: str = "config") -> 
     if not isinstance(schema, dict):
         return
 
+    # Check oneOf / anyOf composite schemas
+    subschemas = schema.get("oneOf") or schema.get("anyOf")
+    if isinstance(subschemas, list) and subschemas:
+        last_specific_error: SchemaValidationError | None = None
+        for sub in subschemas:
+            if not isinstance(sub, dict):
+                continue
+            try:
+                validate_schema(data, sub, path=path)
+                return
+            except SchemaValidationError as err:
+                sub_type = sub.get("type")
+                if (
+                    (sub_type == "string" and isinstance(data, str))
+                    or (sub_type == "array" and isinstance(data, list))
+                    or (sub_type == "object" and isinstance(data, dict))
+                ):
+                    last_specific_error = err
+        if last_specific_error is not None:
+            raise last_specific_error
+        allowed_types = [s.get("type") for s in subschemas if isinstance(s, dict) and s.get("type")]
+        raise SchemaValidationError(
+            f"Field '{path}' expected type {' or '.join(repr(t) for t in allowed_types)}, got '{type(data).__name__}'"
+        )
+
     # Check type
     expected_type = schema.get("type")
     if expected_type:

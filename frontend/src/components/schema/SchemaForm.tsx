@@ -1,5 +1,20 @@
-import { useState, useEffect, useRef, useMemo, type ChangeEvent } from 'react'
+import { useState, useEffect, useRef, useMemo, type ChangeEvent, type ReactNode } from 'react'
 import type { JSONSchemaObject, JSONSchemaProperty } from '../../api/types.ts'
+import { ModelPicker } from './ModelPicker.tsx'
+
+export interface SchemaFormContext {
+  targetId?: number | string | null
+}
+
+export interface CustomWidgetRenderProps {
+  fieldKey: string
+  property: JSONSchemaProperty
+  value: unknown
+  allValues: Record<string, unknown>
+  context?: SchemaFormContext
+  disabled: boolean
+  onChange: (newValue: unknown) => void
+}
 
 function isFieldNonDefault(val: unknown, prop: JSONSchemaProperty): boolean {
   if (val === undefined || val === null) {
@@ -28,15 +43,22 @@ export function SchemaForm({
   values,
   onChange,
   disabled = false,
+  context,
+  targetId,
+  widgets,
 }: {
   schema: JSONSchemaObject
   values: Record<string, unknown>
   onChange: (newValues: Record<string, unknown>) => void
   disabled?: boolean
+  context?: SchemaFormContext
+  targetId?: number | string | null
+  widgets?: Record<string, (props: CustomWidgetRenderProps) => ReactNode>
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const prevSchemaRef = useRef(schema)
   const lastEmittedValuesRef = useRef<Record<string, unknown> | null>(null)
+  const resolvedTargetId = context?.targetId !== undefined ? context.targetId : targetId
 
   const handleFieldChange = (key: string, value: unknown) => {
     const next: Record<string, unknown> = { ...values }
@@ -116,6 +138,38 @@ export function SchemaForm({
   const renderField = (key: string, prop: JSONSchemaProperty) => {
     const isRequired = schema.required?.includes(key)
     const val = values[key] !== undefined ? values[key] : prop.default
+    const widgetName = prop['x-widget']
+
+    if (widgetName && widgets?.[widgetName]) {
+      return (
+        <div key={key} className="schema-custom-widget-wrapper">
+          {widgets[widgetName]({
+            fieldKey: key,
+            property: prop,
+            value: val,
+            allValues: values,
+            context: { targetId: resolvedTargetId },
+            disabled,
+            onChange: (newVal) => handleFieldChange(key, newVal),
+          })}
+        </div>
+      )
+    }
+
+    if (widgetName === 'model-picker') {
+      return (
+        <ModelPicker
+          key={key}
+          fieldKey={key}
+          property={prop}
+          value={val}
+          allValues={values}
+          targetId={resolvedTargetId}
+          disabled={disabled}
+          onChange={(newVal) => handleFieldChange(key, newVal)}
+        />
+      )
+    }
 
     // 1. Boolean field
     if (prop.type === 'boolean') {

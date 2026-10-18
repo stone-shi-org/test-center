@@ -36,6 +36,7 @@ from backend.app.testers.live_stt.client import (
     LiveSTTClientError,
     LiveSTTHTTPClient,
     ModelInfo,
+    infer_model_info,
     select_parametrized_models,
 )
 from backend.app.testers.live_stt.dataset import (
@@ -237,15 +238,17 @@ class LiveSTTTester(TesterPlugin):
                 ],
                 "description": "HTTP endpoint, contract, gRPC streaming, and NOTSOFAR-1 accuracy test suites to execute",
             },
-            "model_parametrization": {
-                "type": "string",
-                "enum": ["per_engine", "all", "default"],
+            "models": {
+                "oneOf": [
+                    {"type": "string", "enum": ["per_engine", "all", "default"]},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
                 "default": "per_engine",
                 "description": (
-                    "How to parametrize models discovered from /v1/models: "
-                    "'per_engine' (one model per distinct engine), 'all' (every model), or 'default' (default model only)"
+                    "Models to test: preset ('per_engine', 'all', 'default') resolved against /v1/models at run time, "
+                    "or an explicit list of model IDs across ASR, diarization, and TTS"
                 ),
-                "x-advanced": True,
+                "x-widget": "model-picker",
             },
             "discover_models": {
                 "type": "boolean",
@@ -277,44 +280,6 @@ class LiveSTTTester(TesterPlugin):
                     "Optional explicit number of concurrent transcription requests for the concurrency suite; "
                     "defaults to max_concurrent_calls + 2 discovered from /api/stats or /api/health"
                 ),
-                "x-advanced": True,
-            },
-            "engines": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional filter of engine names or model IDs to test (e.g. ['parakeet', 'whisper', 'pyannote', 'kokoro'])",
-                "x-advanced": True,
-            },
-            "transcription_model": {
-                "type": "string",
-                "description": "Optional single ASR model override for /v1/audio/transcriptions",
-            },
-            "transcription_models": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional explicit list of ASR models to parametrize over",
-                "x-advanced": True,
-            },
-            "diarization_model": {
-                "type": "string",
-                "description": "Optional single model override for /v1/audio/diarization",
-                "x-advanced": True,
-            },
-            "diarization_models": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional explicit list of diarization models to parametrize over",
-                "x-advanced": True,
-            },
-            "tts_model": {
-                "type": "string",
-                "description": "Optional single model override for /v1/audio/speech",
-                "x-advanced": True,
-            },
-            "tts_models": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional explicit list of TTS models to parametrize over",
                 "x-advanced": True,
             },
             "tts_voice": {
@@ -464,17 +429,6 @@ class LiveSTTTester(TesterPlugin):
                 "description": "Optional explicit number of concurrent streams for gRPC over-budget admission test",
                 "x-advanced": True,
             },
-            "grpc_model": {
-                "type": "string",
-                "description": "Optional single ASR model override for gRPC Transcribe suite",
-                "x-advanced": True,
-            },
-            "grpc_models": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional explicit list of ASR models for gRPC Transcribe suite",
-                "x-advanced": True,
-            },
             "include_long_call": {
                 "type": "boolean",
                 "default": False,
@@ -589,8 +543,12 @@ class LiveSTTTester(TesterPlugin):
     }
 
     def validate_and_apply_config(self, raw_config: dict[str, Any] | None) -> dict[str, Any]:
-        """Normalize optional None fields, suite aliases, and string meetings list before JSON Schema validation."""
+        """Normalize optional None fields, suite aliases, legacy model keys, and string meetings list before JSON Schema validation."""
         cleaned: dict[str, Any] = {}
+        legacy_preset: Any = None
+        legacy_models: list[str] = []
+        has_legacy_models = False
+
         if isinstance(raw_config, dict):
             for k, v in raw_config.items():
                 if v is None:
@@ -599,8 +557,48 @@ class LiveSTTTester(TesterPlugin):
                     cleaned[k] = normalize_live_stt_suites(v, self.suites)
                 elif k == "meetings" and isinstance(v, str):
                     cleaned[k] = [m.strip() for m in v.split(",") if m.strip()]
+                elif k == "model_parametrization":
+                    legacy_preset = v
+                elif k in ("transcription_model", "diarization_model", "tts_model", "grpc_model"):
+                    if not isinstance(v, str):
+                        raise TesterConfigError(
+                            f"Property '{k}' expected type 'string', got '{type(v).__name__}'"
+                        )
+                    if v.strip():
+                        has_legacy_models = True
+                        if v.strip() not in legacy_models:
+                            legacy_models.append(v.strip())
+                elif k in ("transcription_models", "diarization_models", "tts_models", "grpc_models"):
+                    if not isinstance(v, list) or not all(isinstance(item, str) for item in v):
+                        raise TesterConfigError(
+                            f"Property '{k}' expected type 'array' of strings, got '{type(v).__name__}'"
+                        )
+                    non_empty = [item.strip() for item in v if item.strip()]
+                    if non_empty:
+                        has_legacy_models = True
+                        for item in non_empty:
+                            if item not in legacy_models:
+                                legacy_models.append(item)
+                elif k == "engines":
+                    if not isinstance(v, list) or not all(isinstance(item, str) for item in v):
+                        raise TesterConfigError(
+                            f"Property 'engines' expected type 'array' of strings, got '{type(v).__name__}'"
+                        )
+                    cleaned["engines"] = v
                 else:
                     cleaned[k] = v
+
+        if "models" not in cleaned:
+            if has_legacy_models:
+                cleaned["models"] = legacy_models
+            elif legacy_preset is not None:
+                if not isinstance(legacy_preset, str) or legacy_preset not in ("per_engine", "all", "default"):
+                    raise TesterConfigError(
+                        f"Property 'models' (translated from 'model_parametrization'): "
+                        f"value {legacy_preset!r} is not one of ['per_engine', 'all', 'default']"
+                    )
+                cleaned["models"] = legacy_preset
+
         return super().validate_and_apply_config(cleaned)
 
     @staticmethod
@@ -644,42 +642,121 @@ class LiveSTTTester(TesterPlugin):
         cfg: dict[str, Any],
         target: dict[str, Any],
         discovered: DiscoveredModels | None,
+        suites_to_run: list[str] | None = None,
+        ctx: TestContext | None = None,
     ) -> tuple[list[ModelInfo], list[ModelInfo], list[ModelInfo]]:
         """Resolve parametrized ASR, diarization, and TTS models from /v1/models and config overrides."""
-        mode = str(cfg.get("model_parametrization", "per_engine"))
-        engines_filter = cfg.get("engines")
-        extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
+        if "models" not in cfg:
+            cfg = self.validate_and_apply_config(cfg)
 
-        # Explicit overrides for ASR
-        explicit_asr: list[str] = []
-        if isinstance(cfg.get("transcription_models"), list) and cfg["transcription_models"]:
-            explicit_asr = [str(m) for m in cfg["transcription_models"] if str(m).strip()]
-        elif cfg.get("transcription_model"):
-            explicit_asr = [str(cfg["transcription_model"])]
-        elif extra.get("transcription_model") or extra.get("model"):
-            explicit_asr = [str(extra.get("transcription_model") or extra.get("model"))]
-
-        # Explicit overrides for Diarization
-        explicit_diar: list[str] = []
-        if isinstance(cfg.get("diarization_models"), list) and cfg["diarization_models"]:
-            explicit_diar = [str(m) for m in cfg["diarization_models"] if str(m).strip()]
-        elif cfg.get("diarization_model"):
-            explicit_diar = [str(cfg["diarization_model"])]
-        elif extra.get("diarization_model"):
-            explicit_diar = [str(extra["diarization_model"])]
-
-        # Explicit overrides for TTS
-        explicit_tts: list[str] = []
-        if isinstance(cfg.get("tts_models"), list) and cfg["tts_models"]:
-            explicit_tts = [str(m) for m in cfg["tts_models"] if str(m).strip()]
-        elif cfg.get("tts_model"):
-            explicit_tts = [str(cfg["tts_model"])]
-        elif extra.get("tts_model"):
-            explicit_tts = [str(extra["tts_model"])]
-
+        models_cfg = cfg.get("models", "per_engine")
         disc_asr = discovered.asr_models if discovered else []
         disc_diar = discovered.diarization_models if discovered else []
         disc_tts = discovered.tts_models if discovered else []
+
+        if isinstance(models_cfg, list):
+            discovered_by_id: dict[str, ModelInfo] = {}
+            if discovered:
+                for m in discovered.models:
+                    discovered_by_id[m.id] = m
+
+            selected_asr: list[ModelInfo] = []
+            selected_diar: list[ModelInfo] = []
+            selected_tts: list[ModelInfo] = []
+
+            for raw_id in models_cfg:
+                clean_id = str(raw_id).strip()
+                if not clean_id:
+                    continue
+                m_info = discovered_by_id.get(clean_id) or infer_model_info({"id": clean_id})
+                if m_info.type == "diarization":
+                    if all(x.id != m_info.id for x in selected_diar):
+                        selected_diar.append(m_info)
+                elif m_info.type == "tts":
+                    if all(x.id != m_info.id for x in selected_tts):
+                        selected_tts.append(m_info)
+                else:
+                    if all(x.id != m_info.id for x in selected_asr):
+                        selected_asr.append(m_info)
+
+            asr_suite_selected = suites_to_run is None or any(
+                s in suites_to_run
+                for s in (
+                    "transcriptions_json",
+                    "transcriptions_sse",
+                    "grpc_streaming",
+                    "grpc_long_call",
+                    "accuracy_wer",
+                    "accuracy_streaming",
+                )
+            )
+            diar_suite_selected = suites_to_run is None or any(
+                s in suites_to_run for s in ("diarization", "accuracy_diarization")
+            )
+            tts_suite_selected = suites_to_run is None or ("tts" in suites_to_run)
+
+            if selected_asr:
+                asr_models = selected_asr
+            else:
+                asr_models = select_parametrized_models(
+                    discovered=disc_asr,
+                    model_type="asr",
+                    mode="default",
+                    fallback=DEFAULT_ASR_MODEL,
+                )
+                if ctx is not None and asr_suite_selected:
+                    ctx.log(
+                        f"No ASR models selected in 'models'; falling back to default ASR model '{asr_models[0].id}'",
+                        level="warning",
+                    )
+
+            if selected_diar:
+                diar_models = selected_diar
+            else:
+                diar_models = select_parametrized_models(
+                    discovered=disc_diar,
+                    model_type="diarization",
+                    mode="default",
+                    fallback=DEFAULT_DIARIZATION_MODEL,
+                )
+                if ctx is not None and diar_suite_selected:
+                    ctx.log(
+                        f"No diarization models selected in 'models'; falling back to default diarization model '{diar_models[0].id}'",
+                        level="warning",
+                    )
+
+            if selected_tts:
+                tts_models = selected_tts
+            else:
+                tts_models = select_parametrized_models(
+                    discovered=disc_tts,
+                    model_type="tts",
+                    mode="default",
+                    fallback=DEFAULT_TTS_MODEL,
+                )
+                if ctx is not None and tts_suite_selected:
+                    ctx.log(
+                        f"No TTS models selected in 'models'; falling back to default TTS model '{tts_models[0].id}'",
+                        level="warning",
+                    )
+
+            return asr_models, diar_models, tts_models
+
+        mode = str(models_cfg or "per_engine")
+        engines_filter = cfg.get("engines")
+        extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
+
+        explicit_asr: list[str] = []
+        if extra.get("transcription_model") or extra.get("model"):
+            explicit_asr = [str(extra.get("transcription_model") or extra.get("model"))]
+
+        explicit_diar: list[str] = []
+        if extra.get("diarization_model"):
+            explicit_diar = [str(extra["diarization_model"])]
+
+        explicit_tts: list[str] = []
+        if extra.get("tts_model"):
+            explicit_tts = [str(extra["tts_model"])]
 
         asr_models = select_parametrized_models(
             discovered=disc_asr,
@@ -735,7 +812,8 @@ class LiveSTTTester(TesterPlugin):
         tts_stream_format = str(cfg.get("tts_stream_format", "pcm") or "pcm")
         tts_voice_override = cfg.get("tts_voice")
         discover_enabled = bool(cfg.get("discover_models", True))
-        param_mode = str(cfg.get("model_parametrization", "per_engine"))
+        models_cfg = cfg.get("models", "per_engine")
+        param_mode = "explicit" if isinstance(models_cfg, list) else str(models_cfg or "per_engine")
         grpc_only = bool(suites_to_run) and set(suites_to_run) <= {"grpc_streaming", "grpc_long_call"}
 
         ctx.check_cancelled()
@@ -784,6 +862,8 @@ class LiveSTTTester(TesterPlugin):
             cfg=cfg,
             target=target,
             discovered=discovered,
+            suites_to_run=suites_to_run,
+            ctx=ctx,
         )
 
         include_extended_admin = bool(cfg.get("include_extended_admin", True))

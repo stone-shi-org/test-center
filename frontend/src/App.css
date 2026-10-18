@@ -2928,4 +2928,203 @@
   padding: 12px 0;
 }
 
+/* =========================================
+   MODEL PICKER WIDGET (TES-42)
+   ========================================= */
 
+.model-picker-field {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  background-color: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.model-picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.model-picker-presets {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.model-preset-btn {
+  background-color: var(--bg-muted);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.model-preset-btn:hover:not(:disabled) {
+  color: var(--text-main);
+  border-color: var(--accent-primary);
+}
+
+.model-preset-btn.active {
+  background-color: var(--accent-primary-subtle);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.model-preset-clear {
+  color: var(--text-muted);
+}
+
+.model-picker-preset-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+
+.model-picker-status-note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-picker-fallback-notice {
+  font-size: 12px;
+  color: #fde047;
+  background-color: rgba(250, 204, 21, 0.08);
+  border: 1px solid rgba(250, 204, 21, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+
+.model-picker-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.model-picker-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background-color: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.model-picker-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.model-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-picker-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-card);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.model-picker-item.checked {
+  border-color: var(--accent-primary);
+  background-color: rgba(59, 130, 246, 0.08);
+}
+
+.model-picker-item.mismatch {
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+.model-picker-id {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--text-main);
+  word-break: break-all;
+}
+
+.model-picker-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.model-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
+  border-radius: 9999px;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-muted);
+  color: var(--text-secondary);
+}
+
+.model-engine-badge {
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.35);
+  background-color: rgba(56, 189, 248, 0.12);
+}
+
+.model-default-badge {
+  color: #6ee7b7;
+  border-color: rgba(16, 185, 129, 0.35);
+  background-color: rgba(16, 185, 129, 0.12);
+}
+
+.model-batch-badge {
+  color: #fdba74;
+  border-color: rgba(249, 115, 22, 0.35);
+  background-color: rgba(249, 115, 22, 0.12);
+}
+
+.model-voices-badge {
+  color: #d8b4fe;
+  border-color: rgba(168, 85, 247, 0.35);
+  background-color: rgba(168, 85, 247, 0.12);
+}
+
+.model-picker-mismatch-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.model-picker-manual-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 360px;
+}
+
+.model-picker-manual-input {
+  flex: 1;
+}

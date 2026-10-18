@@ -70,6 +70,25 @@ export interface TargetTestResponse {
   tested_at: string
 }
 
+export interface TargetModelInfo {
+  id: string
+  type: 'asr' | 'diarization' | 'tts' | string
+  engine: string
+  is_default: boolean
+  sample_rate: number
+  supports_streaming: boolean
+  supports_num_speakers_hint: boolean
+  default_voice: string | null
+  supported_voices: string[]
+  grpc_streaming: boolean
+}
+
+export interface AdHocTargetModelsRequest {
+  base_url: string
+  auth_env_var?: string | null
+  timeout_seconds?: number
+}
+
 export interface JSONSchemaProperty {
   type?: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object'
   description?: string
@@ -81,9 +100,12 @@ export interface JSONSchemaProperty {
     type?: string
     enum?: string[]
   }
+  oneOf?: JSONSchemaProperty[]
+  anyOf?: JSONSchemaProperty[]
   properties?: Record<string, JSONSchemaProperty>
   required?: string[]
   'x-advanced'?: boolean
+  'x-widget'?: string
 }
 
 export interface JSONSchemaObject {

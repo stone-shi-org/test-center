@@ -415,3 +415,135 @@ def test_target_test_grpc_capability(app_and_client):
     )
     assert fail.status_code == 200
     assert fail.json()["ok"] is False
+
+
+def test_target_models_discovery_endpoint(app_and_client, monkeypatch):
+    """Verify GET /api/targets/{id}/models and POST /api/targets/models with mock and unreachable targets."""
+    import httpx
+    from backend.app.api import targets as targets_api
+
+    client, _, _ = app_and_client
+    secret_val = "sk-live-stt-models-secret-token-777"
+    monkeypatch.setenv("LIVE_STT_MODELS_KEY", secret_val)
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        auth_header = request.headers.get("Authorization", "")
+        if host == "unreachable.local":
+            raise httpx.ConnectError(f"Connection refused to {host}")
+        if host == "auth-fail.local":
+            return httpx.Response(401, json={"error": {"message": f"Invalid key {secret_val}"}})
+        assert auth_header == f"Bearer {secret_val}"
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "parakeet-ctc-0.6b",
+                        "type": "asr",
+                        "engine": "parakeet",
+                        "is_default": True,
+                        "sample_rate": 16000,
+                        "supports_streaming": True,
+                    },
+                    {
+                        "id": "whisper-large-v3-turbo",
+                        "type": "asr",
+                        "engine": "whisper",
+                        "is_default": False,
+                        "sample_rate": 16000,
+                        "supports_streaming": True,
+                    },
+                    {
+                        "id": "pyannote/speaker-diarization-community-1",
+                        "type": "diarization",
+                        "engine": "pyannote",
+                        "is_default": True,
+                        "sample_rate": 16000,
+                        "supports_num_speakers_hint": True,
+                    },
+                    {
+                        "id": "kokoro-82m",
+                        "type": "tts",
+                        "engine": "kokoro",
+                        "is_default": True,
+                        "sample_rate": 24000,
+                        "supports_streaming": True,
+                        "default_voice": "af_heart",
+                        "supported_voices": ["af_heart", "af_bella"],
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(targets_api, "_get_http_transport", lambda: httpx.MockTransport(mock_handler))
+
+    # 1. Create target and query GET /api/targets/{id}/models
+    res_create = client.post(
+        "/api/targets",
+        json={
+            "name": "Mock Live-STT Models Target",
+            "kind": "live-stt",
+            "base_url": "http://stt-models.local/v1",
+            "auth_env_var": "LIVE_STT_MODELS_KEY",
+        },
+    )
+    assert res_create.status_code == 201
+    target_id = res_create.json()["id"]
+
+    res_models = client.get(f"/api/targets/{target_id}/models")
+    assert res_models.status_code == 200
+    models = res_models.json()
+    assert len(models) == 4
+    by_id = {m["id"]: m for m in models}
+    assert by_id["parakeet-ctc-0.6b"]["grpc_streaming"] is True
+    assert by_id["parakeet-ctc-0.6b"]["is_default"] is True
+    assert by_id["whisper-large-v3-turbo"]["grpc_streaming"] is False
+    assert by_id["pyannote/speaker-diarization-community-1"]["supports_num_speakers_hint"] is True
+    assert by_id["kokoro-82m"]["supported_voices"] == ["af_heart", "af_bella"]
+    assert by_id["kokoro-82m"]["default_voice"] == "af_heart"
+
+    # 2. Ad-hoc POST /api/targets/models
+    res_adhoc = client.post(
+        "/api/targets/models",
+        json={
+            "base_url": "http://stt-models.local",
+            "auth_env_var": "LIVE_STT_MODELS_KEY",
+        },
+    )
+    assert res_adhoc.status_code == 200
+    assert len(res_adhoc.json()) == 4
+
+    # 3. Unreachable target returns 502 with clear message
+    res_down_create = client.post(
+        "/api/targets",
+        json={
+            "name": "Unreachable Live-STT Target",
+            "kind": "live-stt",
+            "base_url": "http://unreachable.local",
+        },
+    )
+    assert res_down_create.status_code == 201
+    down_id = res_down_create.json()["id"]
+
+    res_down = client.get(f"/api/targets/{down_id}/models")
+    assert res_down.status_code == 502
+    assert "unreachable" in res_down.json()["detail"].lower()
+
+    # 4. Auth failure returns 502 with redacted message (never leaks secret)
+    res_auth_fail = client.post(
+        "/api/targets/models",
+        json={
+            "base_url": "http://auth-fail.local",
+            "auth_env_var": "LIVE_STT_MODELS_KEY",
+        },
+    )
+    assert res_auth_fail.status_code == 502
+    assert secret_val not in res_auth_fail.text
+    assert "authentication failed" in res_auth_fail.json()["detail"].lower()
+
+    # 5. Non-existent target returns 404
+    res_404 = client.get("/api/targets/999999/models")
+    assert res_404.status_code == 404
+

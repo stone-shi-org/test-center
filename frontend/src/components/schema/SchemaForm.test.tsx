@@ -1,9 +1,17 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
-import type { JSONSchemaObject } from '../../api/types.ts'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api, type JSONSchemaObject, type TargetModelInfo } from '../../api/index.ts'
 import { SchemaForm } from './SchemaForm.tsx'
 
 describe('SchemaForm component', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   const mockSchema: JSONSchemaObject = {
     type: 'object',
     properties: {
@@ -240,6 +248,287 @@ describe('SchemaForm component', () => {
     expect(onChange).toHaveBeenCalledWith({
       model: 'updated-model',
       secret_ratio: 2.5,
+    })
+  })
+
+  describe('model-picker widget (TES-42)', () => {
+    const liveSttSchema: JSONSchemaObject = {
+      type: 'object',
+      properties: {
+        models: {
+          description: 'Model preset or explicit list of model IDs.',
+          default: 'per_engine',
+          'x-widget': 'model-picker',
+          oneOf: [
+            { type: 'string', enum: ['per_engine', 'all', 'default'] },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
+        language: {
+          type: 'string',
+          default: 'en',
+        },
+        grpc_addr: {
+          type: 'string',
+          default: '',
+          'x-advanced': true,
+        },
+      },
+    }
+
+    const mockDiscoveredModels: TargetModelInfo[] = [
+      {
+        id: 'parakeet-ctc-0.6b',
+        type: 'asr',
+        engine: 'parakeet',
+        is_default: true,
+        sample_rate: 16000,
+        supports_streaming: true,
+        supports_num_speakers_hint: false,
+        default_voice: null,
+        supported_voices: [],
+        grpc_streaming: true,
+      },
+      {
+        id: 'parakeet-ctc-1.1b',
+        type: 'asr',
+        engine: 'parakeet',
+        is_default: false,
+        sample_rate: 16000,
+        supports_streaming: true,
+        supports_num_speakers_hint: false,
+        default_voice: null,
+        supported_voices: [],
+        grpc_streaming: true,
+      },
+      {
+        id: 'whisper-large-v3-turbo',
+        type: 'asr',
+        engine: 'whisper',
+        is_default: false,
+        sample_rate: 16000,
+        supports_streaming: true,
+        supports_num_speakers_hint: false,
+        default_voice: null,
+        supported_voices: [],
+        grpc_streaming: false,
+      },
+      {
+        id: 'pyannote/speaker-diarization-community-1',
+        type: 'diarization',
+        engine: 'pyannote',
+        is_default: true,
+        sample_rate: 16000,
+        supports_streaming: false,
+        supports_num_speakers_hint: true,
+        default_voice: null,
+        supported_voices: [],
+        grpc_streaming: false,
+      },
+      {
+        id: 'kokoro-82m',
+        type: 'tts',
+        engine: 'kokoro',
+        is_default: true,
+        sample_rate: 24000,
+        supports_streaming: true,
+        supports_num_speakers_hint: false,
+        default_voice: 'af_heart',
+        supported_voices: ['af_heart', 'bf_emma'],
+        grpc_streaming: false,
+      },
+    ]
+
+    it('renders the model picker outside Advanced options', () => {
+      const onChange = vi.fn()
+      render(<SchemaForm schema={liveSttSchema} values={{}} onChange={onChange} />)
+
+      const picker = screen.getByTestId('model-picker-models')
+      expect(picker).toBeTruthy()
+      expect(picker.closest('.essential-fields')).not.toBeNull()
+      expect(picker.closest('.advanced-fields')).toBeNull()
+
+      // Advanced option grpc_addr is hidden until toggled
+      expect(screen.queryByLabelText(/grpc_addr/i)).toBeNull()
+    })
+
+    it('stores preset and previews checkboxes when clicking All, Default, or Per engine', async () => {
+      vi.spyOn(api.targets, 'listModels').mockResolvedValue(mockDiscoveredModels)
+      const onChange = vi.fn()
+
+      const { rerender } = render(
+        <SchemaForm
+          schema={liveSttSchema}
+          values={{}}
+          onChange={onChange}
+          context={{ targetId: 7 }}
+        />
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText('whisper-large-v3-turbo')).toBeTruthy()
+      })
+
+      // Default value is 'per_engine' -> banner shows "Per engine (resolved when the run starts)"
+      expect(screen.getByTestId('model-picker-preset-status').textContent).toBe(
+        'Per engine (resolved when the run starts)'
+      )
+
+      // Badges rendered: batch only on whisper-large-v3-turbo, voices on kokoro-82m
+      expect(screen.getByText('batch only')).toBeTruthy()
+      expect(screen.getByText(/voices: af_heart, bf_emma/i)).toBeTruthy()
+
+      const getCheckboxFor = (modelId: string) => {
+        const label = screen.getByText(modelId).closest('label')!
+        return within(label).getByRole('checkbox') as HTMLInputElement
+      }
+
+      // Per engine previews: parakeet-ctc-0.6b (default parakeet), whisper-large-v3-turbo (whisper), pyannote, kokoro
+      expect(getCheckboxFor('parakeet-ctc-0.6b').checked).toBe(true)
+      expect(getCheckboxFor('parakeet-ctc-1.1b').checked).toBe(false)
+      expect(getCheckboxFor('whisper-large-v3-turbo').checked).toBe(true)
+      expect(getCheckboxFor('pyannote/speaker-diarization-community-1').checked).toBe(true)
+      expect(getCheckboxFor('kokoro-82m').checked).toBe(true)
+
+      // Click 'All' preset button
+      fireEvent.click(screen.getByRole('button', { name: 'All' }))
+      expect(onChange).toHaveBeenCalledWith({ models: 'all' })
+
+      rerender(
+        <SchemaForm
+          schema={liveSttSchema}
+          values={{ models: 'all' }}
+          onChange={onChange}
+          context={{ targetId: 7 }}
+        />
+      )
+      expect(screen.getByTestId('model-picker-preset-status').textContent).toBe(
+        'All (resolved when the run starts)'
+      )
+      expect(getCheckboxFor('parakeet-ctc-1.1b').checked).toBe(true)
+
+      // Click 'Default' preset button
+      fireEvent.click(screen.getByRole('button', { name: 'Default' }))
+      expect(onChange).toHaveBeenCalledWith({ models: 'default' })
+
+      rerender(
+        <SchemaForm
+          schema={liveSttSchema}
+          values={{ models: 'default' }}
+          onChange={onChange}
+          context={{ targetId: 7 }}
+        />
+      )
+      expect(screen.getByTestId('model-picker-preset-status').textContent).toBe(
+        'Default (resolved when the run starts)'
+      )
+      expect(getCheckboxFor('parakeet-ctc-0.6b').checked).toBe(true)
+      expect(getCheckboxFor('whisper-large-v3-turbo').checked).toBe(false)
+      expect(getCheckboxFor('pyannote/speaker-diarization-community-1').checked).toBe(true)
+      expect(getCheckboxFor('kokoro-82m').checked).toBe(true)
+    })
+
+    it('switches to an explicit list when toggling any checkbox or clicking Clear', async () => {
+      vi.spyOn(api.targets, 'listModels').mockResolvedValue(mockDiscoveredModels)
+      const onChange = vi.fn()
+
+      render(
+        <SchemaForm
+          schema={liveSttSchema}
+          values={{ models: 'default' }}
+          onChange={onChange}
+          context={{ targetId: 7 }}
+        />
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText('whisper-large-v3-turbo')).toBeTruthy()
+      })
+
+      // Toggle 'whisper-large-v3-turbo' checkbox ON while on 'default' preset
+      const whisperLabel = screen.getByText('whisper-large-v3-turbo').closest('label')!
+      fireEvent.click(within(whisperLabel).getByRole('checkbox'))
+
+      expect(onChange).toHaveBeenCalledWith({
+        models: [
+          'parakeet-ctc-0.6b',
+          'pyannote/speaker-diarization-community-1',
+          'kokoro-82m',
+          'whisper-large-v3-turbo',
+        ],
+      })
+
+      // Clicking Clear sets models to []
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+      expect(onChange).toHaveBeenCalledWith({ models: [] })
+    })
+
+    it('shows built-in defaults and manual add input when no target is selected or target fails', async () => {
+      const onChange = vi.fn()
+      const { rerender } = render(
+        <SchemaForm schema={liveSttSchema} values={{}} onChange={onChange} />
+      )
+
+      // Built-in defaults are shown
+      expect(screen.getByText('parakeet-ctc-0.6b')).toBeTruthy()
+      expect(screen.getByText('pyannote/speaker-diarization-community-1')).toBeTruthy()
+      expect(screen.getByText('kokoro-82m')).toBeTruthy()
+
+      // Manual add input is visible
+      const addInput = screen.getByLabelText('Add model ID')
+      fireEvent.change(addInput, { target: { value: 'whisper-large-v3-turbo' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Add' }))
+
+      expect(onChange).toHaveBeenCalledWith({
+        models: [
+          'parakeet-ctc-0.6b',
+          'pyannote/speaker-diarization-community-1',
+          'kokoro-82m',
+          'whisper-large-v3-turbo',
+        ],
+      })
+
+      // Also test unreachable target fallback
+      vi.spyOn(api.targets, 'listModels').mockRejectedValue(
+        new Error('Failed to reach target /v1/models')
+      )
+      rerender(
+        <SchemaForm
+          schema={liveSttSchema}
+          values={{}}
+          onChange={onChange}
+          context={{ targetId: 99 }}
+        />
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText(/Target models unavailable/i)).toBeTruthy()
+      })
+      expect(screen.getByLabelText('Add model ID')).toBeTruthy()
+    })
+
+    it('shows "not on this target" warning badge when an explicit model is missing from the target', async () => {
+      vi.spyOn(api.targets, 'listModels').mockResolvedValue(mockDiscoveredModels)
+      const onChange = vi.fn()
+
+      render(
+        <SchemaForm
+          schema={liveSttSchema}
+          values={{ models: ['parakeet-ctc-0.6b', 'custom-missing-asr-model'] }}
+          onChange={onChange}
+          context={{ targetId: 7 }}
+        />
+      )
+
+      await waitFor(() => {
+        expect(screen.getByText('custom-missing-asr-model')).toBeTruthy()
+      })
+
+      const missingLabel = screen.getByText('custom-missing-asr-model').closest('label')!
+      expect(within(missingLabel).getByText('not on this target')).toBeTruthy()
+      expect((within(missingLabel).getByRole('checkbox') as HTMLInputElement).checked).toBe(
+        true
+      )
     })
   })
 })

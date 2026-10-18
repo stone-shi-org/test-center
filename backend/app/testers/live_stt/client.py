@@ -16,6 +16,18 @@ class LiveSTTClientError(Exception):
     pass
 
 
+KNOWN_BATCH_ONLY_PREFIXES = ("whisper", "parakeet-tdt", "parakeet_tdt")
+
+
+def is_batch_only_grpc_model(model_id: str, engine: str = "") -> bool:
+    """Return True if a model is batch-only (e.g. whisper or parakeet-tdt) and rejected on gRPC Transcribe."""
+    low_id = model_id.strip().lower()
+    low_eng = engine.strip().lower()
+    if low_eng in ("whisper", "parakeet_tdt", "parakeet-tdt"):
+        return True
+    return any(tok in low_id for tok in KNOWN_BATCH_ONLY_PREFIXES)
+
+
 @dataclass
 class ModelInfo:
     """Metadata for a model discovered via GET /v1/models or configured explicitly."""
@@ -23,7 +35,6 @@ class ModelInfo:
     type: str  # "asr" | "diarization" | "tts"
     engine: str
     is_default: bool = False
-    streaming_capable: bool = True
     supports_num_speakers_hint: bool = True
     sample_rate: int | None = None
     default_voice: str | None = None
@@ -31,18 +42,27 @@ class ModelInfo:
     supports_streaming: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def grpc_streaming(self) -> bool:
+        """Return True if this model supports gRPC StreamingASR.Transcribe."""
+        if self.type != "asr":
+            return False
+        if "supports_grpc_streaming" in self.raw:
+            return bool(self.raw["supports_grpc_streaming"])
+        return self.supports_streaming and not is_batch_only_grpc_model(self.id, self.engine)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "type": self.type,
             "engine": self.engine,
             "is_default": self.is_default,
-            "streaming_capable": self.streaming_capable,
             "supports_num_speakers_hint": self.supports_num_speakers_hint,
             "sample_rate": self.sample_rate,
             "default_voice": self.default_voice,
             "supported_voices": self.supported_voices,
             "supports_streaming": self.supports_streaming,
+            "grpc_streaming": self.grpc_streaming,
         }
 
 
@@ -56,6 +76,10 @@ class DiscoveredModels:
     diarization_models: list[ModelInfo] = field(default_factory=list)
     tts_models: list[ModelInfo] = field(default_factory=list)
     error: str | None = None
+
+    @property
+    def models(self) -> list[ModelInfo]:
+        return [*self.asr_models, *self.diarization_models, *self.tts_models]
 
     @property
     def total_count(self) -> int:
@@ -161,7 +185,7 @@ DEFAULT_ASR_MODEL = ModelInfo(
     type="asr",
     engine="parakeet",
     is_default=True,
-    streaming_capable=True,
+    supports_streaming=True,
 )
 
 DEFAULT_DIARIZATION_MODEL = ModelInfo(
@@ -214,8 +238,7 @@ def infer_model_info(item: dict[str, Any]) -> ModelInfo:
         else:
             engine = "parakeet"
 
-    is_default = bool(item.get("default", False))
-    streaming_capable = bool(item.get("streaming_capable", True))
+    is_default = bool(item.get("default", item.get("is_default", False)))
     supports_hint = bool(item.get("supports_num_speakers_hint", engine == "pyannote"))
 
     sample_rate = item.get("sample_rate")
@@ -238,14 +261,16 @@ def infer_model_info(item: dict[str, Any]) -> ModelInfo:
     if model_type == "tts" and not supported_voices and default_voice:
         supported_voices = [default_voice]
 
-    supports_streaming = bool(item.get("supports_streaming", True))
+    raw_supports_streaming = item.get("supports_streaming")
+    if raw_supports_streaming is None:
+        raw_supports_streaming = item.get("streaming_capable", True)
+    supports_streaming = bool(raw_supports_streaming)
 
     return ModelInfo(
         id=model_id,
         type=model_type,
         engine=engine,
         is_default=is_default,
-        streaming_capable=streaming_capable,
         supports_num_speakers_hint=supports_hint,
         sample_rate=sample_rate,
         default_voice=default_voice,
