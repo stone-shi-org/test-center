@@ -13,8 +13,11 @@ describe('Router context and matching', () => {
     expect(matchRoute('/dashboard').name).toBe('dashboard')
   })
 
-  it('matches targets route', () => {
+  it('matches targets and templates routes', () => {
     expect(matchRoute('/targets').name).toBe('targets')
+    expect(matchRoute('/templates').name).toBe('templates')
+    expect(matchRoute('/definitions').name).toBe('templates')
+    expect(matchRoute('/test-definitions').name).toBe('templates')
   })
 
   it('matches trigger and jobs routes', () => {

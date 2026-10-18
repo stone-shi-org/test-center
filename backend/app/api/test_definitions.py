@@ -217,10 +217,24 @@ def delete_test_definition(
     definition_id: int,
     db: Session = Depends(get_db),
 ) -> None:
-    """Delete a test definition."""
+    """Delete a test definition, blocking if it is referenced by any Job."""
     definition = db.get(TestDefinition, definition_id)
     if not definition:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"TestDefinition {definition_id} not found")
+
+    from backend.app.db.models.job import Job
+
+    jobs_using = [
+        job
+        for job in db.execute(select(Job).order_by(Job.id.asc())).scalars().all()
+        if isinstance(job.definition_ids, list) and definition_id in job.definition_ids
+    ]
+    if jobs_using:
+        job_names = ", ".join(f"'{j.name}' (#{j.id})" for j in jobs_using)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot delete template '{definition.name}' (#{definition_id}) because it is used by job(s): {job_names}. Remove it from those jobs first.",
+        )
 
     db.delete(definition)
     db.commit()

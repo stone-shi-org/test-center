@@ -2,6 +2,7 @@ import { Header } from './components/layout/Header.tsx'
 import { Navigation } from './components/layout/Navigation.tsx'
 import { DashboardView } from './components/dashboard/DashboardView.tsx'
 import { TargetsView } from './components/targets/TargetsView.tsx'
+import { TemplatesView } from './components/templates/TemplatesView.tsx'
 import { JobsView } from './components/jobs/JobsView.tsx'
 import { TriggerView } from './components/trigger/TriggerView.tsx'
 import { RunsListView } from './components/runs/RunsListView.tsx'
@@ -21,6 +22,7 @@ function AppContent() {
       <main className="app-main">
         {route.name === 'dashboard' && <DashboardView />}
         {route.name === 'targets' && <TargetsView />}
+        {route.name === 'templates' && <TemplatesView />}
         {route.name === 'jobs' && (
           <JobsView
             initialJobId={route.params.id ? parseInt(route.params.id, 10) : undefined}

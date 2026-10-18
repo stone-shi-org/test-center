@@ -14,10 +14,10 @@ export function TriggerView() {
 
   const [testers, setTesters] = useState<TesterInfo[]>([])
   const [targets, setTargets] = useState<Target[]>([])
-  const [definitions, setDefinitions] = useState<TestDefinition[]>([])
+  const [templates, setTemplates] = useState<TestDefinition[]>([])
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('')
 
   const [selectedTester, setSelectedTester] = useState<string>('')
-  const [definitionName, setDefinitionName] = useState<string>('')
   const [selectedTargetId, setSelectedTargetId] = useState<string>('')
   const [selectedSuites, setSelectedSuites] = useState<string[]>([])
   const [configValues, setConfigValues] = useState<Record<string, unknown>>({})
@@ -26,7 +26,6 @@ export function TriggerView() {
   const [loading, setLoading] = useState<boolean>(true)
   const [submitting, setSubmitting] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
-  const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   // Load initial data
   useEffect(() => {
@@ -42,13 +41,12 @@ export function TriggerView() {
 
         setTesters(testersData)
         setTargets(targetsData)
-        setDefinitions(defsData)
+        setTemplates(defsData)
 
         if (testersData.length > 0) {
           const first = testersData[0]
           setSelectedTester(first.name)
-          setSelectedSuites(first.suites || [])
-          setDefinitionName(`${first.name}-run-${new Date().toISOString().slice(0, 10)}`)
+          setSelectedSuites(first.suites ? [...first.suites] : [])
         }
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : String(err))
@@ -59,28 +57,27 @@ export function TriggerView() {
     initData()
   }, [])
 
-  // When tester changes, update suites and default name
+  // When tester changes, update suites and reset config
   const handleTesterChange = (testerName: string) => {
     setSelectedTester(testerName)
     const t = testers.find((item) => item.name === testerName)
     if (t) {
-      setSelectedSuites(t.suites || [])
-      setDefinitionName(`${t.name}-run-${new Date().toISOString().slice(0, 10)}`)
+      setSelectedSuites(t.suites ? [...t.suites] : [])
       setConfigValues({})
     }
   }
 
-  // Load an existing definition into the form
-  const handleLoadDefinition = (defId: string) => {
-    if (!defId) return
-    const id = parseInt(defId, 10)
-    const def = definitions.find((d) => d.id === id)
-    if (def) {
-      setSelectedTester(def.tester)
-      setDefinitionName(`${def.name} (copy)`)
-      setSelectedTargetId(def.target_id ? String(def.target_id) : '')
-      setSelectedSuites(def.suites || [])
-      setConfigValues(def.config || {})
+  // Load a template into the form without modifying the template
+  const handleLoadTemplate = (tplId: string) => {
+    setSelectedTemplateId(tplId)
+    if (!tplId) return
+    const id = parseInt(tplId, 10)
+    const tpl = templates.find((d) => d.id === id)
+    if (tpl) {
+      setSelectedTester(tpl.tester)
+      setSelectedTargetId(tpl.target_id ? String(tpl.target_id) : '')
+      setSelectedSuites(tpl.suites ? [...tpl.suites] : [])
+      setConfigValues(tpl.config ? { ...tpl.config } : {})
     }
   }
 
@@ -94,16 +91,11 @@ export function TriggerView() {
     }
   }
 
-  const handleSubmit = async (startRunImmediately: boolean) => {
+  const handleStartRun = async () => {
     setError(null)
-    setSuccessMessage(null)
 
     if (!selectedTester) {
       setError('Please select a tester plugin')
-      return
-    }
-    if (!definitionName.trim()) {
-      setError('Please provide a name for this test definition')
       return
     }
 
@@ -112,28 +104,15 @@ export function TriggerView() {
       const targetIdNum = selectedTargetId ? parseInt(selectedTargetId, 10) : null
       const timeoutVal = timeoutSeconds.trim() ? parseFloat(timeoutSeconds) : undefined
 
-      // 1. Create or save definition
-      const def = await api.definitions.create({
-        name: definitionName.trim(),
+      const run = await api.runs.create({
         tester: selectedTester,
         suites: selectedSuites,
         config: configValues,
         target_id: targetIdNum,
+        timeout: timeoutVal,
       })
 
-      if (startRunImmediately) {
-        // 2. Trigger run immediately
-        const run = await api.definitions.trigger(def.id, {
-          timeout: timeoutVal,
-        })
-        // Navigate to the newly created run's detail page
-        navigate(`/runs/${run.id}`)
-      } else {
-        setSuccessMessage(`Test definition "${def.name}" created successfully (ID #${def.id})!`)
-        // Refresh definitions list
-        const updatedDefs = await api.definitions.list()
-        setDefinitions(updatedDefs)
-      }
+      navigate(`/runs/${run.id}`)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -156,30 +135,32 @@ export function TriggerView() {
         </div>
       </div>
 
-      {error && <div className="banner error-banner">{error}</div>}
-      {successMessage && <div className="banner success-banner">{successMessage}</div>}
+      {error && (
+        <div className="banner error-banner" role="alert">
+          {error}
+        </div>
+      )}
 
       <div className="trigger-layout">
         <div className="trigger-form-card card">
-          {/* Preset / Load definition selector */}
-          {definitions.length > 0 && (
-            <div className="form-group load-preset-group">
-              <label htmlFor="load-def-select">Load from Existing Definition (Optional)</label>
-              <select
-                id="load-def-select"
-                className="form-select"
-                defaultValue=""
-                onChange={(e) => handleLoadDefinition(e.target.value)}
-              >
-                <option value="">-- Choose a saved definition to load settings --</option>
-                {definitions.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    #{d.id}: {d.name} ({d.tester})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+          {/* Load from template selector */}
+          <div className="form-group load-preset-group">
+            <label htmlFor="load-template-select">Load from template</label>
+            <select
+              id="load-template-select"
+              className="form-select"
+              value={selectedTemplateId}
+              onChange={(e) => handleLoadTemplate(e.target.value)}
+              disabled={submitting}
+            >
+              <option value="">-- Choose a template to load settings --</option>
+              {templates.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>
+                  {tpl.name} ({tpl.tester})
+                </option>
+              ))}
+            </select>
+          </div>
 
           <div className="form-row">
             {/* Tester Plugin selection */}
@@ -220,32 +201,6 @@ export function TriggerView() {
                 ))}
               </select>
             </div>
-          </div>
-
-          {currentTesterInfo?.description && (
-            <div className="tester-description-box">
-              <span className="info-icon">ℹ️</span>
-              <p>{currentTesterInfo.description}</p>
-            </div>
-          )}
-
-          <div className="form-row">
-            {/* Definition Name */}
-            <div className="form-group flex-2">
-              <label htmlFor="definition-name">
-                Definition Name <span className="required-star">*</span>
-              </label>
-              <input
-                id="definition-name"
-                type="text"
-                className="form-input"
-                value={definitionName}
-                onChange={(e) => setDefinitionName(e.target.value)}
-                placeholder="e.g. embedding-eval-baseline"
-                disabled={submitting}
-                required
-              />
-            </div>
 
             {/* Optional Timeout */}
             <div className="form-group flex-1">
@@ -263,6 +218,13 @@ export function TriggerView() {
             </div>
           </div>
 
+          {currentTesterInfo?.description && (
+            <div className="tester-description-box">
+              <span className="info-icon">ℹ️</span>
+              <p>{currentTesterInfo.description}</p>
+            </div>
+          )}
+
           {/* Suites selection */}
           {currentTesterInfo?.suites && currentTesterInfo.suites.length > 0 && (
             <div className="form-group">
@@ -272,7 +234,7 @@ export function TriggerView() {
                   <button
                     type="button"
                     className="btn-link"
-                    onClick={() => setSelectedSuites(currentTesterInfo.suites)}
+                    onClick={() => setSelectedSuites([...currentTesterInfo.suites])}
                   >
                     Select All
                   </button>
@@ -321,19 +283,11 @@ export function TriggerView() {
           <div className="form-submit-bar">
             <button
               type="button"
-              className="btn btn-secondary"
-              onClick={() => handleSubmit(false)}
-              disabled={submitting}
-            >
-              Save Definition Only
-            </button>
-            <button
-              type="button"
               className="btn btn-primary btn-lg"
-              onClick={() => handleSubmit(true)}
+              onClick={handleStartRun}
               disabled={submitting}
             >
-              {submitting ? 'Starting Run...' : '🚀 Save & Start Run Now'}
+              {submitting ? 'Starting Run...' : 'Start Run'}
             </button>
           </div>
         </div>

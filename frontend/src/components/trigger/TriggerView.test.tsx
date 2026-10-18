@@ -1,0 +1,170 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  api,
+  type Target,
+  type TestDefinition,
+  type TesterInfo,
+} from '../../api/index.ts'
+import { RouterProvider } from '../../router/index.ts'
+import { TriggerView } from './TriggerView.tsx'
+
+describe('TriggerView', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    window.history.pushState({}, '', '/trigger')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const mockTesters: TesterInfo[] = [
+    {
+      name: 'dummy',
+      description: 'Dummy tester plugin',
+      suites: ['smoke', 'load'],
+      config_schema: {
+        type: 'object',
+        properties: {
+          duration_seconds: {
+            type: 'number',
+            default: 0.1,
+            description: 'Duration in seconds',
+          },
+          fail_case: {
+            type: 'boolean',
+            default: false,
+            description: 'Fail a test case',
+          },
+        },
+      },
+    },
+    {
+      name: 'embedding',
+      description: 'Embedding benchmark plugin',
+      suites: ['retrieval', 'sts'],
+      config_schema: {
+        type: 'object',
+        properties: {
+          batch_size: {
+            type: 'integer',
+            default: 32,
+            description: 'Batch size',
+          },
+        },
+      },
+    },
+  ]
+
+  const mockTargets: Target[] = [
+    {
+      id: 2,
+      name: 'embed-server',
+      kind: 'openai-compatible',
+      base_url: 'http://localhost:8002/v1',
+      auth_env_var: null,
+      extra: {},
+      created_at: '2026-10-16T00:00:00Z',
+      updated_at: '2026-10-16T00:00:00Z',
+    },
+  ]
+
+  const mockTemplates: TestDefinition[] = [
+    {
+      id: 15,
+      name: 'embed-prod-template',
+      tester: 'embedding',
+      suites: ['retrieval'],
+      config: { batch_size: 64 },
+      target_id: 2,
+      created_at: '2026-10-16T00:00:00Z',
+      updated_at: '2026-10-17T00:00:00Z',
+    },
+  ]
+
+  it('loads a template into the form, keeps values editable, and starts a run without creating a definition', async () => {
+    vi.spyOn(api.testers, 'list').mockResolvedValue(mockTesters)
+    vi.spyOn(api.targets, 'list').mockResolvedValue(mockTargets)
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(mockTemplates)
+
+    const createDefSpy = vi.spyOn(api.definitions, 'create')
+    const updateDefSpy = vi.spyOn(api.definitions, 'update')
+    const createRunSpy = vi.spyOn(api.runs, 'create').mockResolvedValue({
+      id: 42,
+      job_id: null,
+      status: 'queued',
+      queued_at: '2026-10-17T12:00:00Z',
+      started_at: null,
+      finished_at: null,
+      config_snapshot: {
+        tester: 'embedding',
+        suites: ['retrieval', 'sts'],
+        config: { batch_size: 128 },
+      },
+      target_snapshot: { id: 2, name: 'embed-server' },
+      git_info: null,
+      results: [],
+    })
+
+    render(
+      <RouterProvider>
+        <TriggerView />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Load from template/i)).toBeTruthy()
+    })
+
+    // Ensure Definition Name and Save Definition Only are removed
+    expect(screen.queryByLabelText(/Definition Name/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /Save Definition Only/i })).toBeNull()
+
+    // Select template from dropdown
+    const templateSelect = screen.getByLabelText(/Load from template/i)
+    fireEvent.change(templateSelect, { target: { value: '15' } })
+
+    // Verify tester, target, suites, and config were populated from the template
+    const testerSelect = screen.getByLabelText(/Tester Plugin/i) as HTMLSelectElement
+    expect(testerSelect.value).toBe('embedding')
+
+    const targetSelect = screen.getByLabelText(/Target Endpoint/i) as HTMLSelectElement
+    expect(targetSelect.value).toBe('2')
+
+    const retrievalCheckbox = screen.getByRole('checkbox', { name: 'retrieval' }) as HTMLInputElement
+    const stsCheckbox = screen.getByRole('checkbox', { name: 'sts' }) as HTMLInputElement
+    expect(retrievalCheckbox.checked).toBe(true)
+    expect(stsCheckbox.checked).toBe(false)
+
+    // Edit values in the form (toggle sts suite, change batch_size and timeout)
+    fireEvent.click(stsCheckbox)
+    const batchSizeInput = screen.getByLabelText(/batch_size/i) as HTMLInputElement
+    expect(batchSizeInput.value).toBe('64')
+    fireEvent.change(batchSizeInput, { target: { value: '128' } })
+
+    const timeoutInput = screen.getByLabelText(/Timeout \(Seconds\)/i)
+    fireEvent.change(timeoutInput, { target: { value: '90' } })
+
+    // Template object in memory is not mutated
+    expect(mockTemplates[0].suites).toEqual(['retrieval'])
+    expect(mockTemplates[0].config).toEqual({ batch_size: 64 })
+
+    // Click Start Run
+    fireEvent.click(screen.getByRole('button', { name: /^Start Run$/i }))
+
+    await waitFor(() => {
+      expect(createRunSpy).toHaveBeenCalledWith({
+        tester: 'embedding',
+        suites: ['retrieval', 'sts'],
+        config: { batch_size: 128 },
+        target_id: 2,
+        timeout: 90,
+      })
+    })
+
+    expect(createDefSpy).not.toHaveBeenCalled()
+    expect(updateDefSpy).not.toHaveBeenCalled()
+    expect(window.location.pathname).toBe('/runs/42')
+  })
+})

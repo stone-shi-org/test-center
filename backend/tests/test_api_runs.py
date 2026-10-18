@@ -183,3 +183,92 @@ def test_api_websocket_log_stream(app_and_client):
         parsed = json.loads(data)
         assert parsed["type"] == "log"
         assert "WebSocket test line" in parsed["message"]
+
+
+def test_run_without_definition_id_end_to_end(app_and_client):
+    """Runs triggered without a test_definition_id work end-to-end across worker, results, JUnit, Compare, and notifications."""
+    from backend.app.runner.notifications import _pair_results_for_comparison
+
+    client, session_factory, _ = app_and_client
+
+    # Create a target
+    res_t = client.post(
+        "/api/targets",
+        json={"name": "Direct Run Target", "kind": "dummy", "base_url": "http://127.0.0.1:8000"},
+    )
+    assert res_t.status_code == 201
+    target_id = res_t.json()["id"]
+
+    defs_before = client.get("/api/test-definitions").json()
+
+    # Trigger two runs without test_definition_id (as the simplified Trigger page does)
+    run_ids = []
+    for duration in (0.05, 0.08):
+        res_run = client.post(
+            "/api/runs",
+            json={
+                "tester": "dummy",
+                "suites": ["smoke"],
+                "config": {"duration_seconds": duration, "step_delay": 0.01},
+                "target_id": target_id,
+                "timeout": 30.0,
+            },
+        )
+        assert res_run.status_code == 201
+        r_json = res_run.json()
+        assert r_json["config_snapshot"].get("test_definition_id") is None
+        assert r_json["config_snapshot"]["timeout"] == 30.0
+        assert r_json["target_snapshot"]["id"] == target_id
+        run_ids.append(r_json["id"])
+
+    # No new TestDefinition rows created
+    defs_after = client.get("/api/test-definitions").json()
+    assert len(defs_after) == len(defs_before)
+
+    # Execute both runs with worker
+    worker = get_worker()
+    loop = asyncio.new_event_loop()
+    for _ in run_ids:
+        assert loop.run_until_complete(worker.poll_and_execute_once()) is True
+    loop.close()
+
+    # Check Run Detail, Results list, and JUnit XML for both runs
+    result_ids = []
+    for rid in run_ids:
+        detail = client.get(f"/api/runs/{rid}").json()
+        assert detail["status"] == "completed"
+        assert len(detail["results"]) == 1
+        res_item = detail["results"][0]
+        assert res_item["test_definition_id"] is None
+        assert res_item["definition_name"] is None
+        assert res_item["status"] == "pass"
+        result_ids.append(res_item["id"])
+
+        res_junit_run = client.get(f"/api/runs/{rid}/junit.xml")
+        assert res_junit_run.status_code == 200
+        assert "<testsuites" in res_junit_run.text
+
+        res_junit_result = client.get(f"/api/results/{res_item['id']}/junit.xml")
+        assert res_junit_result.status_code == 200
+        assert "<testsuites" in res_junit_result.text
+
+    # Compare the two definition-less runs
+    res_cmp = client.get(f"/api/compare?run_ids={run_ids[0]},{run_ids[1]}")
+    assert res_cmp.status_code == 200
+    cmp_data = res_cmp.json()
+    assert cmp_data["tester"] == "dummy"
+    assert len(cmp_data["runs"]) == 2
+    assert all(r["test_definition_id"] is None for r in cmp_data["runs"])
+
+    # Notifications pairing fallback by tester when test_definition_id is None
+    db = session_factory()
+    try:
+        r0 = db.get(Result, result_ids[0])
+        r1 = db.get(Result, result_ids[1])
+        pairs = _pair_results_for_comparison([r0], [r1])
+        assert len(pairs) == 1
+        assert pairs[0][0].id == r0.id
+        assert pairs[0][1].id == r1.id
+    finally:
+        db.close()
+

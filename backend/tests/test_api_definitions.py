@@ -199,3 +199,50 @@ def test_trigger_manual_run_from_test_definition(app_and_client):
     assert len(results_list) >= 1
     assert results_list[0]["run_id"] == run_id
     assert results_list[0]["test_definition_id"] == def_id
+
+
+def test_delete_definition_blocked_when_used_by_job(app_and_client):
+    """Deleting a template referenced in Job.definition_ids returns 409 Conflict."""
+    client, _, _ = app_and_client
+
+    res_d1 = client.post(
+        "/api/test-definitions",
+        json={"name": "Template In Use", "tester": "dummy", "suites": ["smoke"]},
+    )
+    assert res_d1.status_code == 201
+    def1_id = res_d1.json()["id"]
+
+    res_d2 = client.post(
+        "/api/test-definitions",
+        json={"name": "Unused Template", "tester": "dummy", "suites": ["smoke"]},
+    )
+    assert res_d2.status_code == 201
+    def2_id = res_d2.json()["id"]
+
+    res_job = client.post(
+        "/api/jobs",
+        json={
+            "name": "Nightly Regression Job",
+            "run_mode": "sequential",
+            "definition_ids": [def1_id],
+        },
+    )
+    assert res_job.status_code == 201
+    job_id = res_job.json()["id"]
+
+    # Deleting template used by job is blocked with 409
+    res_del_blocked = client.delete(f"/api/test-definitions/{def1_id}")
+    assert res_del_blocked.status_code == 409
+    assert "Nightly Regression Job" in res_del_blocked.json()["detail"]
+
+    # Deleting unused template succeeds
+    res_del_unused = client.delete(f"/api/test-definitions/{def2_id}")
+    assert res_del_unused.status_code == 204
+
+    # After deleting the job, the template can be deleted
+    res_del_job = client.delete(f"/api/jobs/{job_id}")
+    assert res_del_job.status_code == 204
+
+    res_del_ok = client.delete(f"/api/test-definitions/{def1_id}")
+    assert res_del_ok.status_code == 204
+

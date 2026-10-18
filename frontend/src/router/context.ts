@@ -3,6 +3,7 @@ import { createContext, useContext } from 'react'
 export type RouteName =
   | 'dashboard'
   | 'targets'
+  | 'templates'
   | 'jobs'
   | 'trigger'
   | 'runs'
@@ -56,6 +57,13 @@ export function matchRoute(path: string): RouteMatch {
   }
   if (cleanPath === '/targets') {
     return { name: 'targets', params: queryParams, path: cleanPath }
+  }
+  if (
+    cleanPath === '/templates' ||
+    cleanPath === '/definitions' ||
+    cleanPath === '/test-definitions'
+  ) {
+    return { name: 'templates', params: queryParams, path: '/templates' }
   }
   if (cleanPath === '/jobs') {
     return { name: 'jobs', params: queryParams, path: cleanPath }

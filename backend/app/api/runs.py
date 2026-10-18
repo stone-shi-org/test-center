@@ -487,11 +487,11 @@ def create_run(
             raise HTTPException(status_code=404, detail=f"TestDefinition {req.test_definition_id} not found")
 
     target_id = req.target_id
-    if target_id is None and req.target is None and test_def and test_def.target_id:
+    if target_id is None and req.target is None and test_def and test_def.target_id is not None:
         target_id = test_def.target_id
 
     target_snapshot: dict[str, Any] = {}
-    if target_id:
+    if target_id is not None:
         target = db.get(Target, target_id)
         if not target:
             raise HTTPException(status_code=404, detail=f"Target id {target_id} not found")
@@ -528,7 +528,7 @@ def create_run(
     }
     if test_def:
         config_snapshot["test_definition_id"] = test_def.id
-    if req.timeout:
+    if req.timeout is not None:
         config_snapshot["timeout"] = req.timeout
 
     run = Run(
