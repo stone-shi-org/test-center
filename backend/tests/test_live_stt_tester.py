@@ -93,6 +93,44 @@ from backend.app.testers.live_stt import (
 # Helpers for building mock WAV & /v1/models payloads
 # ===========================================================================
 
+
+# Real GET /api/backends response captured from live-stt-2 (homesrv, 2026-10-19).
+# Keep mock payloads in the real live-stt shape: an invented shape here once hid
+# a validator that failed against every real server (runs 22/23).
+REAL_API_BACKENDS_RESPONSE: dict = {
+    "store_available": True,
+    "registered": [
+        {"engine": "parakeet", "flavor": "cpu", "repo": "mudler/parakeet.cpp", "tag": "v0.5.0", "wired": True},
+        {"engine": "parakeet", "flavor": "cuda", "repo": "mudler/parakeet.cpp", "tag": "v0.5.0", "wired": True},
+        {"engine": "whisper", "flavor": "cpu", "repo": "ggerganov/whisper.cpp", "tag": "b5130", "wired": True},
+        {
+            "engine": "whisper",
+            "flavor": "cuda",
+            "repo": "stone-shi-org/live-stt",
+            "tag": "backend-whisper-v1.9.4-cuda12",
+            "wired": True,
+        },
+    ],
+    "installed": [
+        {
+            "engine": "parakeet",
+            "flavor": "cuda",
+            "version": "v0.5.0-cuda12",
+            "path": "/app/data/backends/parakeet/cuda/v0.5.0-cuda12",
+            "installed_at": "2026-10-18T16:46:01.052679+00:00",
+            "active": True,
+        },
+        {
+            "engine": "whisper",
+            "flavor": "cuda",
+            "version": "backend-whisper-v1.9.4-cuda12",
+            "path": "/app/data/backends/whisper/cuda/backend-whisper-v1.9.4-cuda12",
+            "installed_at": "2026-10-18T16:46:49.497853+00:00",
+            "active": True,
+        },
+    ],
+}
+
 def _build_mock_tts_wav(duration_sec: float = 0.8, sample_rate: int = 24000) -> bytes:
     """Create a valid mono 16-bit PCM WAV byte payload for TTS responses."""
     words = (
@@ -411,21 +449,7 @@ def _create_mock_live_stt_transport(
             )
 
         if request.method == "GET" and path.endswith("/api/backends"):
-            return httpx.Response(
-                200,
-                json={
-                    "store_available": True,
-                    "registered": [
-                        {"engine": "parakeet", "device": "cuda", "name": "parakeet-cuda"},
-                        {"engine": "whisper", "device": "cuda", "name": "whisper-cuda"},
-                        {"engine": "parakeet_tdt", "device": "cuda", "name": "parakeet_tdt-cuda"},
-                    ],
-                    "installed": [
-                        {"engine": "parakeet", "device": "cuda", "installed": True, "active": True},
-                        {"engine": "whisper", "device": "cuda", "installed": True, "active": True},
-                    ],
-                },
-            )
+            return httpx.Response(200, json=REAL_API_BACKENDS_RESPONSE)
 
         if request.method == "GET" and path.endswith("/api/diarization-engines"):
             return httpx.Response(
@@ -1629,6 +1653,51 @@ def test_validate_admin_and_contract_schemas():
         shape="flat",
         expected_substring="Unknown TTS model",
     ).valid is True
+
+
+
+def test_validate_backends_response_real_shape():
+    # Real live-stt payload passes
+    res = validate_backends_response(REAL_API_BACKENDS_RESPONSE, status_code=200)
+    assert res.valid is True, res.errors
+
+    # Store unavailable: empty lists are valid
+    empty = {"store_available": False, "registered": [], "installed": []}
+    assert validate_backends_response(empty).valid is True
+
+    # Empty registered list while the store is available is invalid
+    no_reg = {"store_available": True, "registered": [], "installed": []}
+    res_no_reg = validate_backends_response(no_reg)
+    assert res_no_reg.valid is False
+    assert any("registered is empty" in e for e in res_no_reg.errors)
+
+    # Old invented shape (device/name instead of flavor/repo/tag/wired) fails with a clear message
+    old_shape = {
+        "store_available": True,
+        "registered": [{"engine": "parakeet", "device": "cuda", "name": "parakeet-cuda"}],
+        "installed": [],
+    }
+    res_old = validate_backends_response(old_shape)
+    assert res_old.valid is False
+    reg_err = next(e for e in res_old.errors if e.startswith("registered_backends_list"))
+    assert "registered[0] missing flavor, repo, tag, wired" in reg_err
+
+    # Wrong types and malformed installed entries are reported per entry
+    bad_types = {
+        "store_available": True,
+        "registered": [{**REAL_API_BACKENDS_RESPONSE["registered"][0], "wired": "yes"}],
+        "installed": [{"engine": "parakeet", "flavor": "cuda"}, "oops"],
+    }
+    res_bad = validate_backends_response(bad_types)
+    assert res_bad.valid is False
+    joined = " | ".join(res_bad.errors)
+    assert "registered[0] wrong type wired=str" in joined
+    assert "installed[0] missing version, path, active" in joined
+    assert "installed[1] is not an object" in joined
+
+    # installed must be a list
+    res_inst = validate_backends_response({**REAL_API_BACKENDS_RESPONSE, "installed": None})
+    assert any("installed is not a list" in e for e in res_inst.errors)
 
 
 def test_live_stt_admin_suite_read_only_no_mutating_calls(tmp_path: Path):

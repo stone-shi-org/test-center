@@ -1151,6 +1151,57 @@ def validate_settings_response(
     return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
 
 
+# Field contracts for GET /api/backends, matching live-stt's admin_http.py
+# (stable since LS-5). "flavor" is the cpu/cuda build; there is no "device" or "name".
+_REGISTERED_BACKEND_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "engine": str,
+    "flavor": str,
+    "repo": str,
+    "tag": str,
+    "wired": bool,
+}
+_INSTALLED_BACKEND_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "engine": str,
+    "flavor": str,
+    "version": str,
+    "path": str,
+    "active": bool,
+}
+
+
+def _backend_entry_problems(
+    entries: Any,
+    label: str,
+    fields: dict[str, type | tuple[type, ...]],
+    max_reported: int = 5,
+) -> list[str]:
+    """Return human-readable problems for a list of backend entries (empty list means valid)."""
+    if not isinstance(entries, list):
+        return [f"{label} is not a list (got {type(entries).__name__})"]
+    problems: list[str] = []
+    for idx, item in enumerate(entries):
+        if not isinstance(item, dict):
+            problems.append(f"{label}[{idx}] is not an object")
+            continue
+        missing = [k for k in fields if k not in item]
+        wrong = [
+            f"{k}={type(item[k]).__name__}"
+            for k, typ in fields.items()
+            if k in item and not isinstance(item[k], typ)
+        ]
+        parts = []
+        if missing:
+            parts.append(f"missing {', '.join(missing)}")
+        if wrong:
+            parts.append(f"wrong type {', '.join(wrong)}")
+        if parts:
+            problems.append(f"{label}[{idx}] {'; '.join(parts)}")
+    if len(problems) > max_reported:
+        extra = len(problems) - max_reported
+        problems = problems[:max_reported] + [f"... and {extra} more"]
+    return problems
+
+
 def validate_backends_response(
     body: Any,
     status_code: int = 200,
@@ -1188,33 +1239,35 @@ def validate_backends_response(
         f"store_available={body.get('store_available')!r}",
     )
 
+    store_available = body.get("store_available")
     registered = body.get("registered")
-    reg_ok = (
-        isinstance(registered, list)
-        and len(registered) > 0
-        and all(
-            isinstance(item, dict)
-            and isinstance(item.get("engine"), str)
-            and isinstance(item.get("device"), str)
-            and isinstance(item.get("name"), str)
-            for item in registered
-        )
-    )
+    reg_problems = _backend_entry_problems(registered, "registered", _REGISTERED_BACKEND_FIELDS)
+    if isinstance(registered, list) and not registered and store_available is not False:
+        reg_problems.insert(0, "registered is empty while store_available is not false")
     _record_check(
         checks,
         errors,
         "registered_backends_list",
-        reg_ok,
-        f"registered count={len(registered) if isinstance(registered, list) else 'N/A'}",
+        not reg_problems,
+        (
+            f"registered count={len(registered)}"
+            if not reg_problems
+            else "; ".join(reg_problems)
+        ),
     )
 
     installed = body.get("installed")
+    inst_problems = _backend_entry_problems(installed, "installed", _INSTALLED_BACKEND_FIELDS)
     _record_check(
         checks,
         errors,
         "installed_backends_list",
-        isinstance(installed, list),
-        f"installed count={len(installed) if isinstance(installed, list) else 'N/A'}",
+        not inst_problems,
+        (
+            f"installed count={len(installed)}"
+            if not inst_problems
+            else "; ".join(inst_problems)
+        ),
     )
 
     return SchemaCheckResult(valid=len(errors) == 0, checks=checks, errors=errors)
