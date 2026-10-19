@@ -248,11 +248,11 @@ def test_worker_default_timeout_is_90_minutes(tmp_path: Path, test_db_session):
 @pytest.mark.asyncio
 async def test_worker_timeout(tmp_path: Path, test_db_session):
     artifacts_dir = tmp_path / "artifacts"
-    # Set a short default timeout (0.5s) so initial steps (0.05s each) finish and the 5s run times out
+    # Set a short default timeout (3.0s) so initial steps (0.05s each) finish and the 8s run times out
     worker = RunWorker(
         session_factory=test_db_session,
         artifacts_dir=artifacts_dir,
-        default_timeout=0.5,
+        default_timeout=3.0,
     )
 
     db: Session = test_db_session()
@@ -262,7 +262,7 @@ async def test_worker_timeout(tmp_path: Path, test_db_session):
         config_snapshot={
             "tester": "dummy",
             "config": {
-                "duration_seconds": 5.0,
+                "duration_seconds": 8.0,
                 "step_delay": 0.05,
             },
         },

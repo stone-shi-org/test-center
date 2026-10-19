@@ -24,7 +24,6 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from backend.app.api.compare import _SECRET_FIELD_NAMES, _sanitize_dict, compare_runs_and_results
 from backend.app.config import get_settings
 from backend.app.db.base import utc_now
 from backend.app.db.models.job import Job
@@ -32,6 +31,20 @@ from backend.app.db.models.result import Result
 from backend.app.db.models.run import Run
 
 logger = logging.getLogger(__name__)
+
+_SECRET_FIELD_NAMES = {
+    "api_key",
+    "apikey",
+    "secret",
+    "secret_key",
+    "password",
+    "token",
+    "access_token",
+    "auth_token",
+    "bearer_token",
+    "private_key",
+    "_transport",
+}
 
 TERMINAL_RUN_STATUSES_FOR_BASELINE = ("completed", "pass", "fail", "failed", "error")
 FAILURE_STATUSES = ("fail", "failed", "error")
@@ -479,6 +492,8 @@ def evaluate_run_for_notifications(
     step_comparisons: list[dict[str, Any]] = []
 
     if prev_run is not None and prev_run.results and run.results:
+        from backend.app.api.compare import compare_runs_and_results
+
         pairs = _pair_results_for_comparison(list(prev_run.results), list(run.results))
         for prev_res, curr_res in pairs:
             try:
@@ -644,6 +659,8 @@ def build_notification_payload(
     results_summary: list[dict[str, Any]] = []
     overall_result_status = "pass"
     if run is not None:
+        from backend.app.api.compare import _sanitize_dict
+
         for r in run.results or []:
             if r.status == "error":
                 overall_result_status = "error"
