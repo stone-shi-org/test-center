@@ -40,12 +40,15 @@ from backend.app.testers.live_stt.client import (
     select_parametrized_models,
 )
 from backend.app.testers.live_stt.dataset import (
+    DEFAULT_DIARIZATION_CLIP_SEC,
     DEFAULT_NOTSOFAR_SPLIT,
     NotsofarMeeting,
+    build_notsofar_dialog_fixture,
     load_notsofar_meetings,
 )
 from backend.app.testers.live_stt.fixtures import (
     BUILTIN_AUDIO_FIXTURES,
+    AudioFixture,
     BUILTIN_BAD_AUDIO_FIXTURES,
     BUILTIN_TTS_FIXTURES,
     get_audio_fixture,
@@ -322,6 +325,25 @@ class LiveSTTTester(TesterPlugin):
             "dataset_dir": {
                 "type": "string",
                 "description": "Optional path override to NOTSOFAR-1 dataset root or split directory",
+                "x-advanced": True,
+            },
+            "diarization_fixture": {
+                "type": "string",
+                "enum": ["auto", "notsofar", "synthetic"],
+                "default": "auto",
+                "description": (
+                    "Audio for the diarization suite: 'notsofar' uses a real multi-speaker NOTSOFAR-1 excerpt, "
+                    "'synthetic' uses the generated tone fixture (neural diarizers such as Sortformer find no "
+                    "speech in it), 'auto' uses NOTSOFAR-1 when the dataset is available and falls back to synthetic"
+                ),
+                "x-advanced": True,
+            },
+            "diarization_clip_sec": {
+                "type": "number",
+                "default": 30.0,
+                "minimum": 5.0,
+                "maximum": 300.0,
+                "description": "Length in seconds of the NOTSOFAR-1 excerpt used by the diarization suite",
                 "x-advanced": True,
             },
             "dataset_split": {
@@ -636,6 +658,43 @@ class LiveSTTTester(TesterPlugin):
             timeout=timeout,
             transport=transport,
         )
+
+    def _resolve_diarization_fixture(
+        self,
+        cfg: dict[str, Any],
+        ctx: Any,
+    ) -> tuple[AudioFixture, str]:
+        """Pick the audio for the diarization suite.
+
+        The generated 'two_speaker_dialog' fixture is tones, not speech: pyannote accepts it, but neural
+        diarizers (e.g. NeMo Sortformer) correctly find no speech and live-stt returns 400. Prefer a real
+        NOTSOFAR-1 excerpt when the dataset is available.
+        """
+        mode = str(cfg.get("diarization_fixture", "auto") or "auto").strip().lower()
+        if mode != "synthetic":
+            clip_sec = float(cfg.get("diarization_clip_sec", DEFAULT_DIARIZATION_CLIP_SEC) or DEFAULT_DIARIZATION_CLIP_SEC)
+            real_fix = build_notsofar_dialog_fixture(
+                dataset_dir=cfg.get("dataset_dir"),
+                split=cfg.get("dataset_split"),
+                clip_sec=clip_sec,
+            )
+            if real_fix is not None:
+                ctx.log(
+                    f"Diarization fixture: {real_fix.name} "
+                    f"({len(real_fix.words)} reference words)"
+                )
+                return real_fix, "notsofar"
+            if mode == "notsofar":
+                raise TesterConfigError(
+                    "diarization_fixture='notsofar' but no NOTSOFAR-1 meeting with 2+ speakers was found "
+                    f"(dataset_dir={cfg.get('dataset_dir')!r}, dataset_split={cfg.get('dataset_split')!r})"
+                )
+            ctx.log(
+                "Diarization fixture: NOTSOFAR-1 dataset not available, falling back to the synthetic "
+                "'two_speaker_dialog' fixture (neural diarizers such as Sortformer may find no speech in it)",
+                level="warning",
+            )
+        return get_audio_fixture("two_speaker_dialog"), "synthetic"
 
     def _resolve_parametrized_models(
         self,
@@ -1235,8 +1294,10 @@ class LiveSTTTester(TesterPlugin):
         # Suite 3: POST /v1/audio/diarization
         # -------------------------------------------------------------------
         if "diarization" in suites_to_run:
-            dialog_fix = get_audio_fixture("two_speaker_dialog")
+            dialog_fix, dialog_source = self._resolve_diarization_fixture(cfg, ctx)
             words_payload = dialog_fix.words_payload()
+            # Speaker-count hints sized to the fixture (a real excerpt can have more than 2 speakers)
+            hint_max_speakers = max(2, int(dialog_fix.expected_speakers or 2))
 
             for m_info in diar_models:
                 tested_engines.add(m_info.engine)
@@ -1254,7 +1315,7 @@ class LiveSTTTester(TesterPlugin):
                 d_rtfs: list[float] = []
                 last_dres = None
                 min_spk = 1 if m_info.supports_num_speakers_hint else None
-                max_spk = 2 if m_info.supports_num_speakers_hint else None
+                max_spk = hint_max_speakers if m_info.supports_num_speakers_hint else None
 
                 for _ in range(repetitions):
                     ctx.check_cancelled()
@@ -1313,6 +1374,8 @@ class LiveSTTTester(TesterPlugin):
                         "engine": m_info.engine,
                         "mode": "segments",
                         "fixture_id": dialog_fix.id,
+                        "fixture_source": dialog_source,
+                        "expected_speakers": dialog_fix.expected_speakers,
                         "audio_duration_sec": dialog_fix.duration_sec,
                         "status_code": last_dres.status_code,
                         "content_type": last_dres.content_type,
@@ -1401,6 +1464,8 @@ class LiveSTTTester(TesterPlugin):
                         "engine": m_info.engine,
                         "mode": "words_alignment",
                         "fixture_id": dialog_fix.id,
+                        "fixture_source": dialog_source,
+                        "expected_speakers": dialog_fix.expected_speakers,
                         "audio_duration_sec": dialog_fix.duration_sec,
                         "words_supplied": len(words_payload),
                         "status_code": last_dwres.status_code,

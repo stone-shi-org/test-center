@@ -800,3 +800,103 @@ def load_notsofar_meetings(
 NotsofarAudioDevice = NotsofarDevice
 NotsofarTranscriptSegment = NotsofarSegment
 
+
+
+# ---------------------------------------------------------------------------
+# Real-speech diarization fixture (excerpt of a NOTSOFAR-1 meeting)
+# ---------------------------------------------------------------------------
+
+DEFAULT_DIARIZATION_CLIP_SEC = 30.0
+
+
+def _words_for_clip(meeting: NotsofarMeeting) -> list[Any]:
+    """Word timestamps for a clipped meeting: GT word timings when present, otherwise words
+    spread evenly across their segment (good enough for the words_alignment contract check)."""
+    from backend.app.testers.live_stt.fixtures import WordTimestamp
+
+    words: list[WordTimestamp] = []
+    for seg in meeting.segments:
+        if seg.word_timings:
+            for wt in seg.word_timings:
+                if wt.word.strip() and wt.end_sec > wt.start_sec:
+                    words.append(WordTimestamp(wt.word.strip(), wt.start_sec, wt.end_sec))
+            continue
+        raw = [w for w in seg.text.split() if w.strip()]
+        if not raw or seg.end_time <= seg.start_time:
+            continue
+        step = (seg.end_time - seg.start_time) / len(raw)
+        for i, w in enumerate(raw):
+            start = seg.start_time + i * step
+            words.append(WordTimestamp(w, start, start + step * 0.9))
+    words.sort(key=lambda w: (w.start_sec, w.end_sec))
+    return words
+
+
+_DIALOG_FIXTURE_CACHE: dict[tuple[str, str, float, int], Any] = {}
+
+
+def build_notsofar_dialog_fixture(
+    *,
+    dataset_dir: str | Path | None = None,
+    split: str | None = None,
+    clip_sec: float = DEFAULT_DIARIZATION_CLIP_SEC,
+    min_speakers: int = 2,
+    max_candidates: int = 20,
+) -> Any | None:
+    """Build a real-speech multi-speaker AudioFixture from the first ``clip_sec`` seconds of a
+    NOTSOFAR-1 meeting with at least ``min_speakers`` speakers talking in that window.
+
+    Meetings are tried in sorted ID order, so the choice is deterministic for a given dataset.
+    Returns None if the dataset is not available or no meeting qualifies. Found fixtures are cached.
+    """
+    from backend.app.testers.live_stt.fixtures import AudioFixture
+
+    cache_key = (str(dataset_dir or ""), str(split or DEFAULT_NOTSOFAR_SPLIT), float(clip_sec), int(min_speakers))
+    if cache_key in _DIALOG_FIXTURE_CACHE:
+        return _DIALOG_FIXTURE_CACHE[cache_key]
+
+    fixture: AudioFixture | None = None
+    try:
+        meeting_ids = sorted(discover_notsofar_meetings(dataset_dir=dataset_dir, split=split))
+    except (FileNotFoundError, ValueError, OSError):
+        meeting_ids = []
+
+    for mid in meeting_ids[: max(1, int(max_candidates))]:
+        try:
+            meeting = load_notsofar_meeting(
+                mid, dataset_dir=dataset_dir, split=split, max_duration_sec=clip_sec
+            )
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        speakers = {s.speaker_id for s in meeting.segments if s.speaker_id}
+        if len(speakers) < min_speakers:
+            continue
+        words = _words_for_clip(meeting)
+        if not words:
+            continue
+        try:
+            wav_bytes, duration = meeting.read_wav_bytes(max_duration_sec=meeting.duration_sec)
+        except (FileNotFoundError, ValueError, OSError, wave.Error):
+            continue
+        fixture = AudioFixture(
+            id=f"notsofar:{meeting.meeting_id}:0-{int(round(duration))}s",
+            name=f"NOTSOFAR-1 {meeting.meeting_id} excerpt ({duration:.1f}s, {len(speakers)} speakers)",
+            description=(
+                f"First {duration:.1f}s of NOTSOFAR-1 meeting {meeting.meeting_id} "
+                f"({meeting.split}, device {meeting.device_name}): real multi-speaker speech"
+            ),
+            duration_sec=round(float(duration), 3),
+            sample_rate=16000,
+            channels=1,
+            sample_width=2,
+            wav_bytes=wav_bytes,
+            expected_speakers=len(speakers),
+            reference_text=meeting.normalized_reference_text,
+            words=tuple(words),
+        )
+        break
+
+    if fixture is not None:
+        # Only cache hits, so a dataset mounted later is still picked up.
+        _DIALOG_FIXTURE_CACHE[cache_key] = fixture
+    return fixture

@@ -2149,3 +2149,104 @@ def test_live_stt_grpc_skips_batch_only_models_from_models_list():
     assert [m.id for m in grpc_models] == ["parakeet-ctc-0.6b", "realtime_eou_120m-v1"]
 
 
+
+
+# ===========================================================================
+# Diarization fixture selection (real NOTSOFAR-1 excerpt vs synthetic tones)
+# ===========================================================================
+
+
+def _run_diarization_suite(tmp_path: Path, run_id: int, extra_cfg: dict[str, Any]):
+    tester = LiveSTTTester()
+    transport, requests = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+    ctx = TestContext(run_id=run_id, artifacts_dir=tmp_path / f"artifacts_{run_id}", emit_stdout=False)
+    result = tester.run(
+        {"_transport": transport, "suites": ["diarization"], **extra_cfg},
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+    diar_requests = [r for r in requests if r.url.path.endswith("/v1/audio/diarization")]
+    return result, diar_requests
+
+
+def test_build_notsofar_dialog_fixture(tmp_path: Path):
+    from backend.app.testers.live_stt.dataset import build_notsofar_dialog_fixture
+    from backend.tests.test_live_stt_accuracy import _create_synthetic_notsofar_split
+
+    ds_root = _create_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+
+    fix = build_notsofar_dialog_fixture(dataset_dir=ds_root, clip_sec=30.0)
+    assert fix is not None
+    assert fix.id == "notsofar:MTG_90001:0-3s"
+    assert fix.expected_speakers == 2
+    assert fix.duration_sec == pytest.approx(3.0, abs=0.01)
+    assert len(fix.words) == 14  # GT word timings from both segments
+    assert fix.words[0].text == "Hello" and fix.words[0].start_sec == pytest.approx(0.2)
+    assert all(fix.words[i].start_sec <= fix.words[i + 1].start_sec for i in range(len(fix.words) - 1))
+    assert fix.wav_bytes[:4] == b"RIFF"
+
+    # Clip shorter than the second speaker's first segment -> MTG_90001 no longer qualifies
+    short = build_notsofar_dialog_fixture(dataset_dir=ds_root, clip_sec=1.5)
+    assert short is not None and short.id.startswith("notsofar:MTG_90002:")
+
+    # Asking for 3 speakers skips the 2-speaker meeting
+    three = build_notsofar_dialog_fixture(dataset_dir=ds_root, clip_sec=30.0, min_speakers=3)
+    assert three is not None and three.id.startswith("notsofar:MTG_90002:") and three.expected_speakers == 3
+
+    # No dataset -> None (and the miss is not cached)
+    assert build_notsofar_dialog_fixture(dataset_dir=tmp_path / "missing", clip_sec=30.0) is None
+
+
+def test_live_stt_diarization_uses_notsofar_fixture_when_available(tmp_path: Path):
+    from backend.tests.test_live_stt_accuracy import _create_synthetic_notsofar_split
+
+    ds_root = _create_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+    result, diar_requests = _run_diarization_suite(tmp_path, 520, {"dataset_dir": str(ds_root)})
+
+    diar_cases = [c for c in result.cases if c.suite == "diarization"]
+    assert len(diar_cases) == 2
+    assert all(c.status == "pass" for c in diar_cases)
+    for c in diar_cases:
+        assert c.detail["fixture_source"] == "notsofar"
+        assert c.detail["fixture_id"] == "notsofar:MTG_90001:0-3s"
+        assert c.detail["expected_speakers"] == 2
+    words_case = next(c for c in diar_cases if c.case_id.endswith(":words_alignment"))
+    assert words_case.detail["words_supplied"] == 14
+
+    # The uploaded audio is the 3s excerpt, not the 4s synthetic fixture
+    assert diar_requests
+    for req in diar_requests:
+        _, files = _parse_multipart_form(req.content, req.headers.get("content-type", ""))
+        with wave.open(io.BytesIO(files["file"]), "rb") as wf:
+            assert wf.getnframes() / wf.getframerate() == pytest.approx(3.0, abs=0.01)
+
+
+def test_live_stt_diarization_fixture_modes(tmp_path: Path):
+    from backend.tests.test_live_stt_accuracy import _create_synthetic_notsofar_split
+
+    ds_root = _create_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+
+    # Explicit synthetic ignores the dataset
+    result, _ = _run_diarization_suite(
+        tmp_path, 521, {"dataset_dir": str(ds_root), "diarization_fixture": "synthetic"}
+    )
+    diar_cases = [c for c in result.cases if c.suite == "diarization"]
+    assert diar_cases and all(c.detail["fixture_source"] == "synthetic" for c in diar_cases)
+    assert all(c.detail["fixture_id"] == "two_speaker_dialog" for c in diar_cases)
+
+    # auto without a dataset falls back to synthetic
+    result_auto, _ = _run_diarization_suite(
+        tmp_path, 522, {"dataset_dir": str(tmp_path / "no-dataset"), "diarization_fixture": "auto"}
+    )
+    auto_cases = [c for c in result_auto.cases if c.suite == "diarization"]
+    assert auto_cases and all(c.detail["fixture_source"] == "synthetic" for c in auto_cases)
+
+    # notsofar without a dataset is a config error, not a silent fallback
+    with pytest.raises(TesterConfigError, match="diarization_fixture='notsofar'"):
+        _run_diarization_suite(
+            tmp_path, 523, {"dataset_dir": str(tmp_path / "no-dataset"), "diarization_fixture": "notsofar"}
+        )
+
+    # Invalid mode is rejected by schema validation
+    with pytest.raises(TesterConfigError):
+        LiveSTTTester().validate_and_apply_config({"diarization_fixture": "tones"})
