@@ -78,11 +78,13 @@ class TriggerDefinitionRunRequest(BaseModel):
 
 def _validate_definition_config(tester_name: str, config: dict[str, Any], suites: list[str] | None) -> dict[str, Any]:
     """Validate tester and config if tester plugin is registered."""
+    cleaned_input = dict(config or {})
+    cleaned_input.pop("suites", None)
     try:
         plugin = tester_registry.get(tester_name)
     except TesterNotFoundError:
         # If tester plugin is not registered, return config as is (or fail if strict)
-        return config
+        return cleaned_input
 
     if suites:
         allowed_suites = set(plugin.suites) | set(getattr(plugin, "suite_aliases", set()))
@@ -94,7 +96,8 @@ def _validate_definition_config(tester_name: str, config: dict[str, Any], suites
             )
 
     try:
-        validated_config = plugin.validate_and_apply_config(config)
+        validated_config = plugin.validate_and_apply_config(cleaned_input)
+        validated_config.pop("suites", None)
         return validated_config
     except TesterConfigError as e:
         raise HTTPException(
@@ -131,12 +134,16 @@ def create_test_definition(
             if not judge_target:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Judge target {judge_tid} not found")
 
-    validated_config = _validate_definition_config(req.tester, req.config, req.suites)
+    eff_suites = req.suites
+    if eff_suites is None and isinstance(req.config, dict) and isinstance(req.config.get("suites"), list):
+        eff_suites = list(req.config["suites"])
+
+    validated_config = _validate_definition_config(req.tester, req.config, eff_suites)
 
     definition = TestDefinition(
         name=req.name,
         tester=req.tester,
-        suites=req.suites,
+        suites=eff_suites,
         config=validated_config,
         target_id=req.target_id,
     )
@@ -210,6 +217,9 @@ def update_test_definition(
     tester = update_data.get("tester", definition.tester)
     config = update_data.get("config", definition.config)
     suites = update_data.get("suites", definition.suites)
+    if suites is None and isinstance(config, dict) and isinstance(config.get("suites"), list):
+        suites = list(config["suites"])
+        update_data["suites"] = suites
 
     if isinstance(config, dict) and config.get("judge_target_id") is not None:
         judge_tid = config["judge_target_id"]
@@ -285,9 +295,12 @@ def trigger_definition_run(
         target_snapshot = target.to_snapshot()
 
     suites = req_data.suites if req_data.suites is not None else definition.suites
-    config = dict(definition.config)
+    config = dict(definition.config or {})
     if req_data.config:
         config.update(req_data.config)
+    if suites is None and isinstance(config.get("suites"), list):
+        suites = list(config["suites"])
+    config.pop("suites", None)
 
     judge_target_id = config.get("judge_target_id")
     if judge_target_id is not None and not isinstance(target_snapshot.get("judge_target"), dict):

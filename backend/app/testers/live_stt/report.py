@@ -37,6 +37,9 @@ def format_live_stt_report(
         f"{metrics.get('cases_total', {}).get('value', 0)} "
         f"({metrics.get('pass_rate', {}).get('value', 0.0):.1f}%)",
     ]
+    errored_cnt = int(metrics.get("errored_cases", metrics.get("cases_errored", {})).get("value", 0) or 0)
+    if errored_cnt > 0:
+        lines.append(f"  Cases Errored       : {errored_cnt} (excluded from aggregates)")
 
     # Per-endpoint section
     endpoint_lines: list[str] = []
@@ -92,30 +95,43 @@ def format_live_stt_report(
             f"recycled={int(metrics.get('grpc_long_call_recycled_count', {}).get('value', 0))}"
         )
     if "wer" in metrics:
+        wer_n = int(metrics.get("wer_evaluated_cases", {}).get("value", 0) or 0)
+        wer_cov = f", n={wer_n}" if wer_n > 0 else ""
         endpoint_lines.append(
             f"  NOTSOFAR-1 WER      : {metrics['wer']['value'] * 100.0:.2f}% "
-            f"(ratio {metrics['wer']['value']:.4f}, mean {metrics.get('wer_mean', {}).get('value', 0.0) * 100.0:.2f}%)"
+            f"(ratio {metrics['wer']['value']:.4f}, mean {metrics.get('wer_mean', {}).get('value', 0.0) * 100.0:.2f}%{wer_cov})"
         )
     if "http_wer" in metrics:
+        http_n = int(metrics.get("accuracy_wer_evaluated_cases", {}).get("value", 0) or 0)
+        http_err = int(metrics.get("accuracy_wer_errored_cases", {}).get("value", 0) or 0)
+        http_cov = f", n={http_n}" + (f", errored={http_err}" if http_err > 0 else "") if http_n > 0 else ""
         endpoint_lines.append(
             f"  Batch HTTP WER      : {metrics['http_wer']['value'] * 100.0:.2f}% "
-            f"(ratio {metrics['http_wer']['value']:.4f})"
+            f"(ratio {metrics['http_wer']['value']:.4f}{http_cov})"
         )
     if "streaming_wer" in metrics:
+        stream_n = int(metrics.get("accuracy_streaming_evaluated_cases", {}).get("value", 0) or 0)
+        stream_err = int(metrics.get("accuracy_streaming_errored_cases", {}).get("value", 0) or 0)
+        stream_cov = f", n={stream_n}" + (f", errored={stream_err}" if stream_err > 0 else "") if stream_n > 0 else ""
         endpoint_lines.append(
             f"  Streaming WER       : {metrics['streaming_wer']['value'] * 100.0:.2f}% "
-            f"(ratio {metrics['streaming_wer']['value']:.4f})"
+            f"(ratio {metrics['streaming_wer']['value']:.4f}{stream_cov})"
         )
     if "cpwer" in metrics:
+        cp_n = int(metrics.get("cpwer_evaluated_cases", {}).get("value", 0) or 0)
+        cp_cov = f", n={cp_n}" if cp_n > 0 else ""
         endpoint_lines.append(
             f"  Speaker cpWER       : {metrics['cpwer']['value'] * 100.0:.2f}% "
-            f"(ratio {metrics['cpwer']['value']:.4f})"
+            f"(ratio {metrics['cpwer']['value']:.4f}{cp_cov})"
         )
     if "der" in metrics:
+        der_n = int(metrics.get("accuracy_diarization_evaluated_cases", {}).get("value", 0) or 0)
+        der_err = int(metrics.get("accuracy_diarization_errored_cases", {}).get("value", 0) or 0)
+        der_cov = f", n={der_n}" + (f", errored={der_err}" if der_err > 0 else "") if der_n > 0 else ""
         endpoint_lines.append(
             f"  Diarization DER     : {metrics['der']['value'] * 100.0:.2f}% "
             f"(ratio {metrics['der']['value']:.4f}, "
-            f"spk_err {metrics.get('speaker_count_error', {}).get('value', 0.0):.2f})"
+            f"spk_err {metrics.get('speaker_count_error', {}).get('value', 0.0):.2f}{der_cov})"
         )
     if "accuracy_cache_hits" in metrics or "accuracy_cache_misses" in metrics:
         endpoint_lines.append(

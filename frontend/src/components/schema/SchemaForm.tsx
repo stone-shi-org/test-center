@@ -46,6 +46,7 @@ export function SchemaForm({
   context,
   targetId,
   widgets,
+  omitFields,
 }: {
   schema: JSONSchemaObject
   values: Record<string, unknown>
@@ -54,11 +55,13 @@ export function SchemaForm({
   context?: SchemaFormContext
   targetId?: number | string | null
   widgets?: Record<string, (props: CustomWidgetRenderProps) => ReactNode>
+  omitFields?: string[]
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const prevSchemaRef = useRef(schema)
   const lastEmittedValuesRef = useRef<Record<string, unknown> | null>(null)
   const resolvedTargetId = context?.targetId !== undefined ? context.targetId : targetId
+  const omittedSet = useMemo(() => new Set(omitFields ?? []), [omitFields])
 
   const handleFieldChange = (key: string, value: unknown) => {
     const next: Record<string, unknown> = { ...values }
@@ -75,6 +78,7 @@ export function SchemaForm({
     if (!schema?.properties) return
     const defaults: Record<string, unknown> = {}
     for (const [key, prop] of Object.entries(schema.properties)) {
+      if (omittedSet.has(key)) continue
       if (prop.default !== undefined) {
         defaults[key] = prop.default
       }
@@ -91,6 +95,7 @@ export function SchemaForm({
     const essential: [string, JSONSchemaProperty][] = []
     const advanced: [string, JSONSchemaProperty][] = []
     for (const [key, prop] of Object.entries(schema.properties)) {
+      if (omittedSet.has(key)) continue
       if (prop['x-advanced'] === true) {
         advanced.push([key, prop])
       } else {
@@ -98,7 +103,7 @@ export function SchemaForm({
       }
     }
     return { essentialEntries: essential, advancedEntries: advanced }
-  }, [schema])
+  }, [schema, omittedSet])
 
   // Count changed non-default advanced options
   const changedAdvancedCount = useMemo(() => {

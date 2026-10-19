@@ -1929,11 +1929,34 @@ class LiveSTTTester(TesterPlugin):
         result.set_metric("models_tested", len(tested_models), unit="models", better="higher")
 
         passed_cases = sum(1 for c in result.cases if c.status == "pass")
+        failed_cases = sum(1 for c in result.cases if c.status == "fail")
+        errored_cases = sum(1 for c in result.cases if c.status == "error")
+        evaluated_cases = passed_cases + failed_cases
         total_cases = len(result.cases)
         pass_rate = round(passed_cases / total_cases * 100.0, 2) if total_cases > 0 else 0.0
         result.set_metric("cases_passed", passed_cases, unit="cases", better="higher")
+        result.set_metric("cases_failed", failed_cases, unit="cases", better="lower")
+        result.set_metric("errored_cases", errored_cases, unit="cases", better="lower")
+        result.set_metric("cases_errored", errored_cases, unit="cases", better="lower")
+        result.set_metric("evaluated_cases", evaluated_cases, unit="cases", better="higher")
         result.set_metric("cases_total", total_cases, unit="cases", better="higher")
         result.set_metric("pass_rate", pass_rate, unit="%", better="higher")
+
+        suite_summary: dict[str, dict[str, int]] = {}
+        for s_name in suites_to_run:
+            s_cases = [c for c in result.cases if c.suite == s_name]
+            if not s_cases:
+                continue
+            s_passed = sum(1 for c in s_cases if c.status == "pass")
+            s_failed = sum(1 for c in s_cases if c.status == "fail")
+            s_errored = sum(1 for c in s_cases if c.status == "error")
+            suite_summary[s_name] = {
+                "total_cases": len(s_cases),
+                "evaluated_cases": s_passed + s_failed,
+                "passed_cases": s_passed,
+                "failed_cases": s_failed,
+                "errored_cases": s_errored,
+            }
 
         result.status = "fail" if passed_cases < total_cases else "pass"
         acc_summary_parts: list[str] = []
@@ -1942,13 +1965,30 @@ class LiveSTTTester(TesterPlugin):
         if "grpc_final_latency_mean_ms" in result.metrics:
             acc_summary_parts.append(f"Final={result.metrics['grpc_final_latency_mean_ms']['value']:.2f}ms")
         if "wer" in result.metrics:
-            acc_summary_parts.append(f"WER={result.metrics['wer']['value'] * 100.0:.2f}%")
+            wer_cov = result.metrics.get("wer_evaluated_cases", {}).get("value")
+            cov_str = f" ({wer_cov} cases)" if wer_cov is not None else ""
+            acc_summary_parts.append(f"WER={result.metrics['wer']['value'] * 100.0:.2f}%{cov_str}")
         if "cpwer" in result.metrics:
-            acc_summary_parts.append(f"cpWER={result.metrics['cpwer']['value'] * 100.0:.2f}%")
+            cpwer_cov = result.metrics.get("cpwer_evaluated_cases", {}).get("value")
+            cov_str = f" ({cpwer_cov} cases)" if cpwer_cov is not None else ""
+            acc_summary_parts.append(f"cpWER={result.metrics['cpwer']['value'] * 100.0:.2f}%{cov_str}")
         if "der" in result.metrics:
-            acc_summary_parts.append(f"DER={result.metrics['der']['value'] * 100.0:.2f}%")
+            der_cov = result.metrics.get("accuracy_diarization_evaluated_cases", {}).get("value")
+            cov_str = f" ({der_cov} cases)" if der_cov is not None else ""
+            acc_summary_parts.append(f"DER={result.metrics['der']['value'] * 100.0:.2f}%{cov_str}")
         if "speaker_count_error" in result.metrics:
             acc_summary_parts.append(f"spk_err={result.metrics['speaker_count_error']['value']:.2f}")
+        if errored_cases > 0:
+            suite_err_parts = [
+                f"{s}: {info['errored_cases']}"
+                for s, info in suite_summary.items()
+                if info["errored_cases"] > 0
+            ]
+            suite_err_str = f" ({', '.join(suite_err_parts)})" if suite_err_parts else ""
+            acc_summary_parts.append(
+                f"errored_cases={errored_cases}{suite_err_str} "
+                f"({errored_cases} cases errored; aggregates exclude them)"
+            )
         acc_suffix = f" | {', '.join(acc_summary_parts)}" if acc_summary_parts else ""
 
         result.summary = (
@@ -1979,6 +2019,7 @@ class LiveSTTTester(TesterPlugin):
             "tts_models": [m.id for m in tts_models] if "tts" in suites_to_run else [],
             "engines_tested": sorted(tested_engines),
             "models_tested": sorted(tested_models),
+            "suite_summary": suite_summary,
         }
 
         case_dicts = [c.to_dict() for c in result.cases]
@@ -3029,6 +3070,34 @@ class LiveSTTTester(TesterPlugin):
 
         return compute_cpwer(meeting.speaker_reference_texts, hyp_spk_texts)
 
+    @staticmethod
+    def _format_http_error_message(
+        status_code: int,
+        body: Any,
+        schema_msg: str | None = None,
+        transport_error: str | None = None,
+    ) -> tuple[str, str]:
+        """Return (server_error_message, formatted_eval_message) for HTTP / schema / transport errors."""
+        if transport_error:
+            return transport_error, f"Transport error: {transport_error}"
+        server_err = extract_error_message(body)
+        if not server_err and isinstance(body, dict):
+            for k in ("message", "detail"):
+                val = body.get(k)
+                if isinstance(val, str) and val.strip():
+                    server_err = val.strip()
+                    break
+        if server_err:
+            if status_code and status_code != 200:
+                return server_err, f"HTTP {status_code}: {server_err}"
+            if schema_msg:
+                return server_err, f"HTTP {status_code}: {server_err} ({schema_msg})"
+            return server_err, f"HTTP {status_code}: {server_err}"
+        fallback = schema_msg or "Invalid response"
+        if status_code and status_code != 200:
+            return fallback, f"HTTP {status_code}: {fallback}"
+        return fallback, fallback
+
     def _evaluate_meeting_diarization(
         self,
         client: LiveSTTHTTPClient,
@@ -3074,15 +3143,29 @@ class LiveSTTTester(TesterPlugin):
             )
         except LiveSTTClientError as e:
             ctx.log(f"Error calling {client.diarization_url} for {meeting.meeting_id}: {e}", level="error")
-            raise TesterError(f"live-stt API error: {e}") from e
+            return {
+                "status_code": 0,
+                "content_type": "",
+                "latency_ms": 0.0,
+                "body": {},
+                "transport_error": str(e),
+                "cache_hit": False,
+            }
 
+        body = dres.body if isinstance(dres.body, dict) else {}
         payload = {
             "status_code": dres.status_code,
             "content_type": dres.content_type,
             "latency_ms": dres.latency_ms,
-            "body": dres.body if isinstance(dres.body, dict) else {},
+            "body": body,
         }
-        if dres.status_code == 200 and isinstance(dres.body, dict):
+        diar_valid = (
+            dres.status_code == 200
+            and isinstance(dres.body, dict)
+            and "error" not in body
+            and isinstance(body.get("segments"), list)
+        )
+        if diar_valid:
             eval_cache.put(cache_key, payload)
 
         return {
@@ -3143,7 +3226,14 @@ class LiveSTTTester(TesterPlugin):
                     )
                     diar_by_model_meeting[(d_model.id, meeting.meeting_id)] = d_payload
                     d_body = d_payload.get("body", {})
-                    segs = d_body.get("segments", []) if isinstance(d_body, dict) and isinstance(d_body.get("segments"), list) else []
+                    segs = (
+                        d_body.get("segments", [])
+                        if d_payload.get("status_code") == 200
+                        and isinstance(d_body, dict)
+                        and "error" not in d_body
+                        and isinstance(d_body.get("segments"), list)
+                        else []
+                    )
                     if segs and meeting.meeting_id not in primary_diar_by_meeting:
                         primary_diar_by_meeting[meeting.meeting_id] = segs
 
@@ -3154,17 +3244,20 @@ class LiveSTTTester(TesterPlugin):
         http_cpwer_list: list[CPWERResult] = []
         http_latencies: list[float] = []
         http_rtfs: list[float] = []
+        wer_errored_cases = 0
 
         stream_wer_list: list[WERResult] = []
         stream_cpwer_list: list[CPWERResult] = []
         stream_latencies: list[float] = []
         stream_rtfs: list[float] = []
         stream_ttfps: list[float] = []
+        stream_errored_cases = 0
 
         der_list: list[DERResult] = []
         diar_cpwer_list: list[CPWERResult] = []
         acc_diar_latencies: list[float] = []
         acc_diar_rtfs: list[float] = []
+        diar_errored_cases = 0
 
         # -------------------------------------------------------------------
         # Suite 8: accuracy_wer (Batch HTTP transcription WER & cpWER on NOTSOFAR-1)
@@ -3194,6 +3287,7 @@ class LiveSTTTester(TesterPlugin):
                         "duration_sec": round(meeting.duration_sec, 3),
                     }
                     cached_http = eval_cache.get(wer_cache_key)
+                    transport_error: str | None = None
                     if cached_http is not None:
                         status_code = int(cached_http.get("status_code", 200))
                         content_type = str(cached_http.get("content_type", "application/json"))
@@ -3201,6 +3295,7 @@ class LiveSTTTester(TesterPlugin):
                         body = cached_http.get("body", {})
                         cache_hit = True
                     else:
+                        cache_hit = False
                         try:
                             res = client.transcribe_json(
                                 wav_bytes=meeting.wav_bytes,
@@ -3209,25 +3304,87 @@ class LiveSTTTester(TesterPlugin):
                                 language=language,
                                 filename=f"{meeting.meeting_id}.wav",
                             )
+                            status_code = res.status_code
+                            content_type = res.content_type
+                            latency_ms = res.latency_ms
+                            body = res.body if isinstance(res.body, dict) else {}
                         except LiveSTTClientError as e:
                             ctx.log(f"Error calling {client.transcriptions_url} for {meeting.meeting_id}: {e}", level="error")
-                            raise TesterError(f"live-stt API error: {e}") from e
+                            transport_error = str(e)
+                            status_code = 0
+                            content_type = ""
+                            latency_ms = 0.0
+                            body = {}
 
-                        status_code = res.status_code
-                        content_type = res.content_type
-                        latency_ms = res.latency_ms
-                        body = res.body if isinstance(res.body, dict) else {}
-                        cache_hit = False
-                        if status_code == 200 and isinstance(res.body, dict):
-                            eval_cache.put(
-                                wer_cache_key,
-                                {
-                                    "status_code": status_code,
-                                    "content_type": content_type,
-                                    "latency_ms": latency_ms,
-                                    "body": body,
-                                },
-                            )
+                    schema_res = validate_transcription_json_response(
+                        body=body,
+                        content_type=content_type,
+                        status_code=status_code,
+                    )
+                    is_valid_wer_response = (
+                        transport_error is None
+                        and status_code == 200
+                        and schema_res.valid
+                    )
+
+                    if not cache_hit and is_valid_wer_response and isinstance(body, dict):
+                        eval_cache.put(
+                            wer_cache_key,
+                            {
+                                "status_code": status_code,
+                                "content_type": content_type,
+                                "latency_ms": latency_ms,
+                                "body": body,
+                            },
+                        )
+
+                    if not is_valid_wer_response:
+                        wer_errored_cases += 1
+                        server_err, eval_msg = self._format_http_error_message(
+                            status_code=status_code,
+                            body=body,
+                            schema_msg=schema_res.summary_message,
+                            transport_error=transport_error,
+                        )
+                        err_metrics: dict[str, Any] = {
+                            "audio_duration_sec": {"value": round(meeting.duration_sec, 3), "unit": "s"},
+                        }
+                        if status_code > 0:
+                            err_metrics["http_status"] = {"value": status_code}
+
+                        result.add_case(
+                            case_id=case_id,
+                            suite="accuracy_wer",
+                            status="error",
+                            metrics=err_metrics,
+                            detail={
+                                "endpoint": "/v1/audio/transcriptions",
+                                "path": "batch_http",
+                                "model": m_info.id,
+                                "engine": m_info.engine,
+                                "meeting_id": meeting.meeting_id,
+                                "split": meeting.split,
+                                "device_alias": meeting.device_alias,
+                                "audio_duration_sec": round(meeting.duration_sec, 3),
+                                "expected_speakers": meeting.expected_speakers,
+                                "cache_hit": cache_hit,
+                                "http_status": status_code,
+                                "error_message": server_err,
+                                "error": server_err,
+                                "wer": None,
+                                "cpwer": None,
+                                "passed": False,
+                                "eval_message": eval_msg,
+                            },
+                        )
+                        completed_cases += 1
+                        ctx.log(
+                            f"  {case_id} -> ERROR | {eval_msg} | "
+                            f"Latency={latency_ms:.2f}ms, Cache={'HIT' if cache_hit else 'MISS'}",
+                            level="error",
+                        )
+                        ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+                        continue
 
                     rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
                     all_latencies_ms.append(latency_ms)
@@ -3235,11 +3392,6 @@ class LiveSTTTester(TesterPlugin):
                     http_latencies.append(latency_ms)
                     http_rtfs.append(rtf_val)
 
-                    schema_res = validate_transcription_json_response(
-                        body=body,
-                        content_type=content_type,
-                        status_code=status_code,
-                    )
                     hyp_text = str(body.get("text", "") or "") if isinstance(body, dict) else ""
                     words = body.get("words", []) if isinstance(body, dict) and isinstance(body.get("words"), list) else []
                     asr_segments = body.get("segments", []) if isinstance(body, dict) and isinstance(body.get("segments"), list) else []
@@ -3262,7 +3414,7 @@ class LiveSTTTester(TesterPlugin):
                         if cpwer_res is not None:
                             http_cpwer_list.append(cpwer_res)
 
-                    passed = schema_res.valid and (wer_res.wer <= wer_threshold)
+                    passed = wer_res.wer <= wer_threshold
                     case_status = "pass" if passed else "fail"
 
                     case_metrics: dict[str, Any] = {
@@ -3285,8 +3437,6 @@ class LiveSTTTester(TesterPlugin):
                         f"WER={wer_res.wer_pct:.2f}% ({wer_res.edit_distance}/{wer_res.ref_word_count} words"
                         f"{f', cpWER={cpwer_res.cpwer_pct:.2f}%' if cpwer_res is not None else ''})"
                     )
-                    if not schema_res.valid:
-                        eval_msg = f"{schema_res.summary_message}; {eval_msg}"
 
                     result.add_case(
                         case_id=case_id,
@@ -3304,6 +3454,7 @@ class LiveSTTTester(TesterPlugin):
                             "audio_duration_sec": round(meeting.duration_sec, 3),
                             "expected_speakers": meeting.expected_speakers,
                             "cache_hit": cache_hit,
+                            "http_status": status_code,
                             "wer": wer_res.to_dict(),
                             "cpwer": cpwer_res.to_dict() if cpwer_res is not None else None,
                             "reference_preview": wer_res.ref_normalized[:500],
@@ -3370,6 +3521,8 @@ class LiveSTTTester(TesterPlugin):
                             "realtime_pacing": realtime_pacing if proto == "grpc" else False,
                         }
                         cached_stream = eval_cache.get(stream_cache_key)
+                        stream_status_code: int | str | None = None
+                        server_err: str | None = None
                         if cached_stream is not None:
                             stream_ok = bool(cached_stream.get("ok", True))
                             hyp_text = str(cached_stream.get("text", "") or "")
@@ -3379,35 +3532,59 @@ class LiveSTTTester(TesterPlugin):
                             ttfp_ms = cached_stream.get("ttfp_ms")
                             cache_hit = True
                             err_msg = cached_stream.get("error_message")
+                            server_err = err_msg
                         elif proto == "grpc":
                             assert grpc_harness is not None
-                            session = grpc_harness.run_session_sync(
-                                meeting.wav_bytes,
-                                model=m_info.id,
-                                language=language,
-                                chunk_ms=chunk_ms,
-                                speed=1.0 if realtime_pacing else 0.0,
-                                realtime=realtime_pacing,
-                                enable_word_timestamps=True,
-                                cancel_check=ctx.check_cancelled,
-                            )
-                            stream_ok = session.ok
-                            hyp_text = session.text
-                            words = [w.to_dict() for w in session.words]
-                            asr_segments = [
-                                {
-                                    "speaker": str(ev.detail.get("speaker", "")),
-                                    "start_sec": float(ev.audio_offset_sec or 0.0),
-                                    "end_sec": float(ev.audio_sent_sec_at_receipt or meeting.duration_sec),
-                                    "text": ev.text,
-                                }
-                                for ev in session.events
-                                if isinstance(ev.detail, dict) and ev.detail.get("speaker") and ev.text
-                            ]
-                            latency_ms = session.total_latency_ms
-                            ttfp_ms = session.ttfp_ms
-                            err_msg = session.error_message
                             cache_hit = False
+                            try:
+                                session = grpc_harness.run_session_sync(
+                                    meeting.wav_bytes,
+                                    model=m_info.id,
+                                    language=language,
+                                    chunk_ms=chunk_ms,
+                                    speed=1.0 if realtime_pacing else 0.0,
+                                    realtime=realtime_pacing,
+                                    enable_word_timestamps=True,
+                                    cancel_check=ctx.check_cancelled,
+                                )
+                                stream_ok = bool(session.ok)
+                                hyp_text = session.text
+                                words = [w.to_dict() for w in session.words]
+                                asr_segments = [
+                                    {
+                                        "speaker": str(ev.detail.get("speaker", "")),
+                                        "start_sec": float(ev.audio_offset_sec or 0.0),
+                                        "end_sec": float(ev.audio_sent_sec_at_receipt or meeting.duration_sec),
+                                        "text": ev.text,
+                                    }
+                                    for ev in session.events
+                                    if isinstance(ev.detail, dict) and ev.detail.get("speaker") and ev.text
+                                ]
+                                latency_ms = session.total_latency_ms
+                                ttfp_ms = session.ttfp_ms
+                                stream_status_code = session.grpc_status_code
+                                server_err = session.error_message
+                                if not stream_ok:
+                                    grpc_code_str = session.grpc_status_code or "ERROR"
+                                    err_msg = (
+                                        f"gRPC {grpc_code_str}: {session.error_message}"
+                                        if session.error_message
+                                        else f"gRPC {grpc_code_str}"
+                                    )
+                                else:
+                                    err_msg = None
+                            except (LiveSTTGRPCError, LiveSTTClientError) as e:
+                                ctx.log(f"Error calling gRPC streaming for {meeting.meeting_id}: {e}", level="error")
+                                stream_ok = False
+                                hyp_text = ""
+                                words = []
+                                asr_segments = []
+                                latency_ms = 0.0
+                                ttfp_ms = None
+                                stream_status_code = "ERROR"
+                                server_err = str(e)
+                                err_msg = f"gRPC error: {e}"
+
                             if stream_ok:
                                 eval_cache.put(
                                     stream_cache_key,
@@ -3422,6 +3599,7 @@ class LiveSTTTester(TesterPlugin):
                                     },
                                 )
                         else:
+                            cache_hit = False
                             try:
                                 sres = client.transcribe_sse(
                                     wav_bytes=meeting.wav_bytes,
@@ -3429,40 +3607,83 @@ class LiveSTTTester(TesterPlugin):
                                     language=language,
                                     filename=f"{meeting.meeting_id}.wav",
                                 )
+                                stream_status_code = sres.status_code
+                                sse_schema = validate_transcription_sse_response(
+                                    events=sres.events,
+                                    saw_done=sres.saw_done,
+                                    content_type=sres.content_type,
+                                    status_code=sres.status_code,
+                                )
+                                sse_event_err: str | None = None
+                                for ev in sres.events:
+                                    if not isinstance(ev, dict):
+                                        continue
+                                    ev_type = str(ev.get("type", "") or "").strip().lower()
+                                    if "error" in ev or ev_type in ("error", "transcript.error"):
+                                        sse_event_err = (
+                                            extract_error_message(ev)
+                                            or (str(ev["message"]).strip() if isinstance(ev.get("message"), str) and ev["message"].strip() else None)
+                                            or (str(ev["error"]).strip() if isinstance(ev.get("error"), str) and ev["error"].strip() else None)
+                                            or "SSE error event"
+                                        )
+                                        break
+
+                                if sres.status_code != 200:
+                                    stream_ok = False
+                                    parsed_err_body: Any = None
+                                    if sres.raw_body:
+                                        try:
+                                            parsed_err_body = json.loads(sres.raw_body)
+                                        except Exception:
+                                            parsed_err_body = None
+                                    server_err, err_msg = self._format_http_error_message(
+                                        status_code=sres.status_code,
+                                        body=parsed_err_body,
+                                        schema_msg=(sres.raw_body or "").strip() or sse_schema.summary_message,
+                                    )
+                                elif sse_event_err is not None:
+                                    stream_ok = False
+                                    server_err = sse_event_err
+                                    err_msg = f"SSE error: {sse_event_err}"
+                                else:
+                                    stream_ok = sse_schema.valid or bool(sres.text)
+                                    if not stream_ok:
+                                        server_err = sse_schema.summary_message
+                                        err_msg = f"HTTP {sres.status_code}: {sse_schema.summary_message}"
+                                    else:
+                                        err_msg = None
+
+                                hyp_text = sres.text
+                                words = []
+                                asr_segments = []
+                                for ev in sres.events:
+                                    if not isinstance(ev, dict):
+                                        continue
+                                    if isinstance(ev.get("words"), list):
+                                        words.extend(ev["words"])
+                                    if isinstance(ev.get("segments"), list):
+                                        asr_segments.extend(ev["segments"])
+                                    elif ev.get("speaker") and ev.get("text"):
+                                        asr_segments.append({
+                                            "speaker": str(ev["speaker"]),
+                                            "start_sec": float(ev.get("start_sec", ev.get("start", 0.0)) or 0.0),
+                                            "end_sec": float(ev.get("end_sec", ev.get("end", 0.0)) or 0.0),
+                                            "text": str(ev["text"]),
+                                        })
+                                latency_ms = sres.latency_ms
+                                ttfp_ms = sres.ttft_ms
                             except LiveSTTClientError as e:
                                 ctx.log(f"Error calling {client.transcriptions_url} (SSE) for {meeting.meeting_id}: {e}", level="error")
-                                raise TesterError(f"live-stt API error: {e}") from e
+                                stream_ok = False
+                                hyp_text = ""
+                                words = []
+                                asr_segments = []
+                                latency_ms = 0.0
+                                ttfp_ms = None
+                                stream_status_code = 0
+                                server_err = str(e)
+                                err_msg = f"Transport error: {e}"
 
-                            sse_schema = validate_transcription_sse_response(
-                                events=sres.events,
-                                saw_done=sres.saw_done,
-                                content_type=sres.content_type,
-                                status_code=sres.status_code,
-                            )
-                            stream_ok = sres.status_code == 200 and (
-                                sse_schema.valid or bool(sres.text) or len(sres.events) > 0
-                            )
-                            hyp_text = sres.text
-                            words = []
-                            asr_segments = []
-                            for ev in sres.events:
-                                if not isinstance(ev, dict):
-                                    continue
-                                if isinstance(ev.get("words"), list):
-                                    words.extend(ev["words"])
-                                if isinstance(ev.get("segments"), list):
-                                    asr_segments.extend(ev["segments"])
-                                elif ev.get("speaker") and ev.get("text"):
-                                    asr_segments.append({
-                                        "speaker": str(ev["speaker"]),
-                                        "start_sec": float(ev.get("start_sec", ev.get("start", 0.0)) or 0.0),
-                                        "end_sec": float(ev.get("end_sec", ev.get("end", 0.0)) or 0.0),
-                                        "text": str(ev["text"]),
-                                    })
-                            latency_ms = sres.latency_ms
-                            ttfp_ms = sres.ttft_ms
-                            err_msg = None if stream_ok else sse_schema.summary_message
-                            cache_hit = False
                             if stream_ok:
                                 eval_cache.put(
                                     stream_cache_key,
@@ -3476,6 +3697,46 @@ class LiveSTTTester(TesterPlugin):
                                         "error_message": None,
                                     },
                                 )
+
+                        if not stream_ok:
+                            stream_errored_cases += 1
+                            eval_msg = err_msg or "Streaming transcription error"
+                            result.add_case(
+                                case_id=case_id,
+                                suite="accuracy_streaming",
+                                status="error",
+                                metrics={
+                                    "audio_duration_sec": {"value": round(meeting.duration_sec, 3), "unit": "s"},
+                                },
+                                detail={
+                                    "endpoint": "StreamingASR.Transcribe" if proto == "grpc" else "/v1/audio/transcriptions?stream=true",
+                                    "path": f"streaming_{proto}",
+                                    "protocol": proto,
+                                    "model": m_info.id,
+                                    "engine": m_info.engine,
+                                    "meeting_id": meeting.meeting_id,
+                                    "split": meeting.split,
+                                    "device_alias": meeting.device_alias,
+                                    "audio_duration_sec": round(meeting.duration_sec, 3),
+                                    "expected_speakers": meeting.expected_speakers,
+                                    "cache_hit": cache_hit,
+                                    "status_code": stream_status_code,
+                                    "error_message": server_err or eval_msg,
+                                    "error": server_err or eval_msg,
+                                    "wer": None,
+                                    "cpwer": None,
+                                    "passed": False,
+                                    "eval_message": eval_msg,
+                                },
+                            )
+                            completed_cases += 1
+                            ctx.log(
+                                f"  {case_id} -> ERROR | {eval_msg} | "
+                                f"Latency={latency_ms:.2f}ms, Cache={'HIT' if cache_hit else 'MISS'}",
+                                level="error",
+                            )
+                            ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+                            continue
 
                         rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
                         all_latencies_ms.append(latency_ms)
@@ -3503,7 +3764,7 @@ class LiveSTTTester(TesterPlugin):
                             if cpwer_res is not None:
                                 stream_cpwer_list.append(cpwer_res)
 
-                        passed = stream_ok and (wer_res.wer <= wer_threshold)
+                        passed = wer_res.wer <= wer_threshold
                         case_status = "pass" if passed else "fail"
 
                         case_metrics = {
@@ -3529,8 +3790,6 @@ class LiveSTTTester(TesterPlugin):
                             f"({wer_res.edit_distance}/{wer_res.ref_word_count} words"
                             f"{f', cpWER={cpwer_res.cpwer_pct:.2f}%' if cpwer_res is not None else ''})"
                         )
-                        if not stream_ok and err_msg:
-                            eval_msg = f"{err_msg}; {eval_msg}"
 
                         result.add_case(
                             case_id=case_id,
@@ -3596,12 +3855,7 @@ class LiveSTTTester(TesterPlugin):
                     latency_ms = float(d_payload.get("latency_ms", 0.0))
                     body = d_payload.get("body", {})
                     cache_hit = bool(d_payload.get("cache_hit", False))
-
-                    rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
-                    all_latencies_ms.append(latency_ms)
-                    all_rtfs.append(rtf_val)
-                    acc_diar_latencies.append(latency_ms)
-                    acc_diar_rtfs.append(rtf_val)
+                    transport_error = d_payload.get("transport_error")
 
                     d_schema = validate_diarization_response(
                         body=body,
@@ -3612,8 +3866,69 @@ class LiveSTTTester(TesterPlugin):
                     diar_http_ok = (
                         status_code == 200
                         and isinstance(body, dict)
+                        and "error" not in body
                         and isinstance(body.get("segments"), list)
                     )
+                    is_valid_diar = (
+                        transport_error is None
+                        and status_code == 200
+                        and (d_schema.valid or diar_http_ok)
+                    )
+
+                    if not is_valid_diar:
+                        diar_errored_cases += 1
+                        server_err, eval_msg = self._format_http_error_message(
+                            status_code=status_code,
+                            body=body,
+                            schema_msg=d_schema.summary_message,
+                            transport_error=transport_error,
+                        )
+                        err_metrics = {
+                            "audio_duration_sec": {"value": round(meeting.duration_sec, 3), "unit": "s"},
+                        }
+                        if status_code > 0:
+                            err_metrics["http_status"] = {"value": status_code}
+
+                        result.add_case(
+                            case_id=case_id,
+                            suite="accuracy_diarization",
+                            status="error",
+                            metrics=err_metrics,
+                            detail={
+                                "endpoint": "/v1/audio/diarization",
+                                "path": "diarization_http",
+                                "model": d_info.id,
+                                "engine": d_info.engine,
+                                "meeting_id": meeting.meeting_id,
+                                "split": meeting.split,
+                                "device_alias": meeting.device_alias,
+                                "audio_duration_sec": round(meeting.duration_sec, 3),
+                                "expected_speakers": meeting.expected_speakers,
+                                "cache_hit": cache_hit,
+                                "http_status": status_code,
+                                "error_message": server_err,
+                                "error": server_err,
+                                "der": None,
+                                "cpwer": None,
+                                "passed": False,
+                                "eval_message": eval_msg,
+                            },
+                        )
+                        completed_cases += 1
+                        ctx.log(
+                            f"  {case_id} -> ERROR | {eval_msg} | "
+                            f"Latency={latency_ms:.2f}ms, Cache={'HIT' if cache_hit else 'MISS'}",
+                            level="error",
+                        )
+                        ctx.progress(completed_cases, planned_cases, f"Completed {case_id}")
+                        continue
+
+                    rtf_val = compute_rtf(latency_ms, meeting.duration_sec)
+                    all_latencies_ms.append(latency_ms)
+                    all_rtfs.append(rtf_val)
+                    acc_diar_latencies.append(latency_ms)
+                    acc_diar_rtfs.append(rtf_val)
+
                     pred_segments = (
                         body.get("segments", [])
                         if isinstance(body, dict) and isinstance(body.get("segments"), list)
@@ -3649,7 +3964,7 @@ class LiveSTTTester(TesterPlugin):
                         if cpwer_res is not None:
                             diar_cpwer_list.append(cpwer_res)
 
-                    passed = (d_schema.valid or diar_http_ok) and (der_res.der <= der_threshold)
+                    passed = der_res.der <= der_threshold
                     case_status = "pass" if passed else "fail"
 
                     case_metrics = {
@@ -3700,6 +4015,7 @@ class LiveSTTTester(TesterPlugin):
                             "speaker_count_delta": der_res.speaker_count_delta,
                             "speaker_count_exact": der_res.speaker_count_exact,
                             "cache_hit": cache_hit,
+                            "http_status": status_code,
                             "der": {
                                 "der": der_res.der,
                                 "der_pct": der_res.der_pct,
@@ -3728,6 +4044,16 @@ class LiveSTTTester(TesterPlugin):
         # -------------------------------------------------------------------
         # Aggregate Accuracy Metrics
         # -------------------------------------------------------------------
+        if "accuracy_wer" in suites_to_run:
+            result.set_metric("accuracy_wer_errored_cases", wer_errored_cases, unit="cases", better="lower")
+            result.set_metric("accuracy_wer_evaluated_cases", len(http_wer_list), unit="cases", better="higher")
+        if "accuracy_streaming" in suites_to_run:
+            result.set_metric("accuracy_streaming_errored_cases", stream_errored_cases, unit="cases", better="lower")
+            result.set_metric("accuracy_streaming_evaluated_cases", len(stream_wer_list), unit="cases", better="higher")
+        if "accuracy_diarization" in suites_to_run:
+            result.set_metric("accuracy_diarization_errored_cases", diar_errored_cases, unit="cases", better="lower")
+            result.set_metric("accuracy_diarization_evaluated_cases", len(der_list), unit="cases", better="higher")
+
         if http_wer_list:
             tot_ref = sum(w.ref_word_count for w in http_wer_list)
             tot_ed = sum(w.edit_distance for w in http_wer_list)
@@ -3805,6 +4131,7 @@ class LiveSTTTester(TesterPlugin):
             result.set_metric("wer_pct", round(corpus_wer * 100.0, 2), unit="%", better="lower")
             result.set_metric("wer_mean", mean_wer, unit="ratio", better="lower")
             result.set_metric("corpus_wer", corpus_wer, unit="ratio", better="lower")
+            result.set_metric("wer_evaluated_cases", len(all_wer_list), unit="cases", better="higher")
 
         all_cpwer_list = (http_cpwer_list + stream_cpwer_list) or diar_cpwer_list
         if all_cpwer_list:
@@ -3816,6 +4143,7 @@ class LiveSTTTester(TesterPlugin):
             result.set_metric("cpwer_pct", round(corpus_cpwer * 100.0, 2), unit="%", better="lower")
             result.set_metric("cpwer_mean", mean_cpwer, unit="ratio", better="lower")
             result.set_metric("corpus_cpwer", corpus_cpwer, unit="ratio", better="lower")
+            result.set_metric("cpwer_evaluated_cases", len(all_cpwer_list), unit="cases", better="higher")
 
         if der_list:
             tot_ref_sec = sum(d.total_ref_speech_sec for d in der_list)

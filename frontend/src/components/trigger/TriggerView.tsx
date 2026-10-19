@@ -10,6 +10,13 @@ import { useRouter } from '../../router/index.ts'
 import { Spinner } from '../common/Spinner.tsx'
 import { SchemaForm } from '../schema/SchemaForm.tsx'
 
+function stripSuitesFromConfig(cfg?: Record<string, unknown> | null): Record<string, unknown> {
+  if (!cfg) return {}
+  const next = { ...cfg }
+  delete next.suites
+  return next
+}
+
 export function TriggerView() {
   const { navigate } = useRouter()
 
@@ -81,8 +88,11 @@ export function TriggerView() {
       if (starter) {
         setSelectedTester(starter.tester)
         setSelectedTargetId('')
-        setSelectedSuites(starter.suites ? [...starter.suites] : [])
-        setConfigValues(starter.config ? { ...starter.config } : {})
+        const fallbackSuites = Array.isArray(starter.config?.suites)
+          ? (starter.config.suites as string[])
+          : []
+        setSelectedSuites(starter.suites ? [...starter.suites] : [...fallbackSuites])
+        setConfigValues(stripSuitesFromConfig(starter.config))
       }
       return
     }
@@ -91,8 +101,11 @@ export function TriggerView() {
     if (tpl) {
       setSelectedTester(tpl.tester)
       setSelectedTargetId(tpl.target_id ? String(tpl.target_id) : '')
-      setSelectedSuites(tpl.suites ? [...tpl.suites] : [])
-      setConfigValues(tpl.config ? { ...tpl.config } : {})
+      const fallbackSuites = Array.isArray(tpl.config?.suites)
+        ? (tpl.config.suites as string[])
+        : []
+      setSelectedSuites(tpl.suites ? [...tpl.suites] : [...fallbackSuites])
+      setConfigValues(stripSuitesFromConfig(tpl.config))
     }
   }
 
@@ -122,7 +135,7 @@ export function TriggerView() {
       const run = await api.runs.create({
         tester: selectedTester,
         suites: selectedSuites,
-        config: configValues,
+        config: stripSuitesFromConfig(configValues),
         target_id: targetIdNum,
         timeout: timeoutVal,
       })
@@ -303,6 +316,11 @@ export function TriggerView() {
                 values={configValues}
                 onChange={setConfigValues}
                 disabled={submitting}
+                omitFields={
+                  currentTesterInfo.suites && currentTesterInfo.suites.length > 0
+                    ? ['suites']
+                    : undefined
+                }
                 context={{
                   targetId: selectedTargetId ? parseInt(selectedTargetId, 10) : null,
                 }}

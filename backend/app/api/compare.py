@@ -840,6 +840,7 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
     suites = config_snap.get("suites")
     if not isinstance(suites, list):
         suites = inner_config.get("suites") if isinstance(inner_config.get("suites"), list) else []
+    inner_config.pop("suites", None)
 
     from backend.app.api.artifacts import format_artifact_metadata
 

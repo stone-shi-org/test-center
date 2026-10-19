@@ -816,3 +816,322 @@ def test_real_notsofar_meetings_accuracy_suites(tmp_path: Path):
     assert res.metrics["speaker_count_error"]["value"] == 0.0
     assert res.metrics["accuracy_meetings_evaluated"]["value"] == 2
 
+
+def test_accuracy_wer_server_error_excluded_from_aggregates_and_not_cached(tmp_path: Path):
+    """Verify HTTP 500 in accuracy_wer is recorded as status='error', excluded from aggregates, and not cached."""
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    cache_file = tmp_path / "wer_err_cache.sqlite3"
+
+    request_counts = {"MTG_90001": 0, "MTG_90002": 0}
+    # MTG_90001 has 14 reference words; change 1 word ("ready" -> "prepared") so WER = 1/14 = 0.0714
+    mtg1_words = [
+        {"word": "Hello", "start": 0.2, "end": 0.4},
+        {"word": "Bob", "start": 0.4, "end": 0.6},
+        {"word": "let's", "start": 0.6, "end": 0.8},
+        {"word": "start", "start": 0.8, "end": 1.0},
+        {"word": "the", "start": 1.0, "end": 1.1},
+        {"word": "quarterly", "start": 1.1, "end": 1.25},
+        {"word": "review", "start": 1.25, "end": 1.4},
+        {"word": "Sounds", "start": 1.6, "end": 1.8},
+        {"word": "good", "start": 1.8, "end": 2.0},
+        {"word": "I", "start": 2.0, "end": 2.1},
+        {"word": "have", "start": 2.1, "end": 2.3},
+        {"word": "the", "start": 2.3, "end": 2.4},
+        {"word": "metrics", "start": 2.4, "end": 2.6},
+        {"word": "prepared", "start": 2.6, "end": 2.8},
+    ]
+    mtg1_text = " ".join(w["word"] for w in mtg1_words)
+
+    def mock_http_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body_text = request.read().decode("latin-1", errors="ignore")
+        if path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "parakeet-tdt-0.6b-v3", "object": "model", "type": "asr", "engine": "parakeet"},
+                    ],
+                },
+            )
+        if path == "/v1/audio/transcriptions":
+            if "MTG_90002.wav" in body_text:
+                request_counts["MTG_90002"] += 1
+                return httpx.Response(
+                    500,
+                    json={
+                        "error": {
+                            "message": "engine error during transcription: CUDA out of memory",
+                            "type": "server_error",
+                        }
+                    },
+                )
+            request_counts["MTG_90001"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "text": mtg1_text,
+                    "language": "en",
+                    "duration": 3.0,
+                    "words": mtg1_words,
+                },
+            )
+        return httpx.Response(404, json={"error": {"message": "Not found"}})
+
+    transport = httpx.MockTransport(mock_http_handler)
+    tester = LiveSTTTester()
+
+    artifacts_dir_1 = tmp_path / "wer_err_run1"
+    artifacts_dir_1.mkdir(parents=True, exist_ok=True)
+    ctx1 = TestContext(run_id=101, artifacts_dir=artifacts_dir_1, emit_stdout=False)
+
+    cfg = {
+        "suites": ["accuracy_wer"],
+        "dataset_dir": str(ds_root),
+        "dataset_split": "eval_small",
+        "meetings": ["MTG_90001", "MTG_90002"],
+        "cache_path": str(cache_file),
+        "use_cache": True,
+        "_transport": transport,
+    }
+    target = {"name": "mock-live-stt", "base_url": "http://mockserver/v1"}
+
+    res1 = tester.run(cfg, target, ctx1)
+    assert len(res1.cases) == 2
+
+    case_ok = next(c for c in res1.cases if "MTG_90001" in c.case_id)
+    case_err = next(c for c in res1.cases if "MTG_90002" in c.case_id)
+
+    assert case_ok.status == "pass"
+    assert case_err.status == "error"
+    assert case_err.detail["http_status"] == 500
+    assert "HTTP 500" in case_err.detail["eval_message"]
+    assert "engine error during transcription: CUDA out of memory" in case_err.detail["eval_message"]
+    assert case_err.detail["wer"] is None
+    assert "wer" not in case_err.metrics
+    assert "latency_ms" not in case_err.metrics
+    assert "rtf" not in case_err.metrics
+
+    log_text = ctx1.log_file.read_text(encoding="utf-8")
+    assert "-> ERROR | HTTP 500: engine error during transcription: CUDA out of memory" in log_text
+
+    # Aggregates must equal MTG_90001 only (1/14 = 0.0714), NOT include MTG_90002 as 100% WER
+    expected_wer = round(1 / 14.0, 4)
+    assert res1.metrics["wer"]["value"] == expected_wer
+    assert res1.metrics["http_wer"]["value"] == expected_wer
+    assert res1.metrics["http_wer_mean"]["value"] == expected_wer
+    assert res1.metrics["wer_evaluated_cases"]["value"] == 1
+    assert res1.metrics["accuracy_wer_evaluated_cases"]["value"] == 1
+    assert res1.metrics["accuracy_wer_errored_cases"]["value"] == 1
+    assert res1.metrics["errored_cases"]["value"] == 1
+    assert res1.metrics["cases_errored"]["value"] == 1
+    assert res1.metrics["cases_failed"]["value"] == 0
+
+    # Latency and RTF aggregates must equal case_ok's latency and RTF only
+    ok_lat = case_ok.metrics["latency_ms"]["value"]
+    ok_rtf = case_ok.metrics["rtf"]["value"]
+    assert res1.metrics["latency_mean_ms"]["value"] == ok_lat
+    assert res1.metrics["accuracy_wer_latency_mean_ms"]["value"] == ok_lat
+    assert res1.metrics["rtf_mean"]["value"] == ok_rtf
+    assert res1.metrics["accuracy_wer_rtf_mean"]["value"] == ok_rtf
+    assert "1 cases errored; aggregates exclude them" in (res1.summary or "")
+
+    # Second run: MTG_90001 must hit cache, while MTG_90002 (500 error) must NOT be cached
+    assert request_counts == {"MTG_90001": 1, "MTG_90002": 1}
+    artifacts_dir_2 = tmp_path / "wer_err_run2"
+    artifacts_dir_2.mkdir(parents=True, exist_ok=True)
+    ctx2 = TestContext(run_id=102, artifacts_dir=artifacts_dir_2, emit_stdout=False)
+    res2 = tester.run(cfg, target, ctx2)
+    assert request_counts == {"MTG_90001": 1, "MTG_90002": 2}
+    case2_ok = next(c for c in res2.cases if "MTG_90001" in c.case_id)
+    case2_err = next(c for c in res2.cases if "MTG_90002" in c.case_id)
+    assert case2_ok.detail["cache_hit"] is True
+    assert case2_err.detail["cache_hit"] is False
+    assert res2.metrics["accuracy_cache_hits"]["value"] == 1
+    assert res2.metrics["accuracy_cache_misses"]["value"] == 1
+
+
+def test_accuracy_streaming_and_diarization_server_errors_excluded_and_not_cached(tmp_path: Path):
+    """Verify gRPC error, SSE error, and diarization HTTP 500 are recorded as status='error', excluded from totals, and not cached."""
+    import grpc
+    from backend.app.testers.live_stt.grpc_client import MockStreamingASRServicer, WordTimestamp
+
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    cache_file = tmp_path / "stream_diar_err_cache.sqlite3"
+
+    http_counts = {"sse_1": 0, "sse_2": 0, "diar_1": 0, "diar_2": 0}
+    mtg1_words = [
+        {"word": "Hello", "start": 0.2, "end": 0.4},
+        {"word": "Bob", "start": 0.4, "end": 0.6},
+        {"word": "let's", "start": 0.6, "end": 0.8},
+        {"word": "start", "start": 0.8, "end": 1.0},
+        {"word": "the", "start": 1.0, "end": 1.1},
+        {"word": "quarterly", "start": 1.1, "end": 1.25},
+        {"word": "review", "start": 1.25, "end": 1.4},
+        {"word": "Sounds", "start": 1.6, "end": 1.8},
+        {"word": "good", "start": 1.8, "end": 2.0},
+        {"word": "I", "start": 2.0, "end": 2.1},
+        {"word": "have", "start": 2.1, "end": 2.3},
+        {"word": "the", "start": 2.3, "end": 2.4},
+        {"word": "metrics", "start": 2.4, "end": 2.6},
+        {"word": "ready", "start": 2.6, "end": 2.8},
+    ]
+    mtg1_text = " ".join(w["word"] for w in mtg1_words)
+    mtg1_diar_segments = [
+        {"speaker": "SPEAKER_00", "start_sec": 0.2, "end_sec": 1.4},
+        {"speaker": "SPEAKER_01", "start_sec": 1.6, "end_sec": 2.8},
+    ]
+
+    def mock_http_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body_text = request.read().decode("latin-1", errors="ignore")
+        is_mtg2 = "MTG_90002.wav" in body_text
+
+        if path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "parakeet-tdt-0.6b-v2", "object": "model", "type": "asr", "engine": "parakeet"},
+                        {"id": "pyannote/speaker-diarization-3.1", "object": "model", "type": "diarization", "engine": "pyannote"},
+                    ],
+                },
+            )
+        if path == "/v1/audio/transcriptions":
+            if is_mtg2:
+                http_counts["sse_2"] += 1
+                err_sse = (
+                    f"data: {json.dumps({'type': 'error', 'error': {'message': 'SSE stream CUDA OOM crash'}})}\n\n"
+                )
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=err_sse.encode("utf-8"),
+                )
+            http_counts["sse_1"] += 1
+            ok_sse = (
+                f"data: {json.dumps({'text': mtg1_text, 'words': mtg1_words})}\n\n"
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=ok_sse.encode("utf-8"),
+            )
+        if path == "/v1/audio/diarization":
+            if is_mtg2:
+                http_counts["diar_2"] += 1
+                return httpx.Response(
+                    500,
+                    json={"error": {"message": "diarization worker crashed: CUDA OOM"}},
+                )
+            http_counts["diar_1"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "num_speakers": 2,
+                    "duration": 3.0,
+                    "segments": mtg1_diar_segments,
+                    "speakers": [
+                        {"speaker": "SPEAKER_00", "total_sec": 1.2, "segment_count": 1},
+                        {"speaker": "SPEAKER_01", "total_sec": 1.2, "segment_count": 1},
+                    ],
+                },
+            )
+        return httpx.Response(404, json={"error": {"message": "Not found"}})
+
+    class FailEverySecondCallServicer(MockStreamingASRServicer):
+        async def Transcribe(self, request_iterator: Any, context: grpc.aio.ServicerContext) -> Any:  # noqa: N802
+            # Call 1 is MTG_90001 (succeeds); subsequent calls are MTG_90002 (abort with INTERNAL)
+            if self.total_calls >= 1:
+                self.total_calls += 1
+                try:
+                    await request_iterator.__anext__()
+                except Exception:
+                    pass
+                await context.abort(grpc.StatusCode.INTERNAL, "gRPC worker crash: CUDA out of memory")
+                return
+            async for ev in super().Transcribe(request_iterator, context):
+                yield ev
+
+    grpc_words = [
+        WordTimestamp(text=w["word"], start_sec=w["start"], end_sec=w["end"])
+        for w in mtg1_words
+    ]
+    servicer = FailEverySecondCallServicer(
+        words_sequence=grpc_words,
+        allowed_models={"parakeet-tdt-0.6b-v2"},
+    )
+    transport = httpx.MockTransport(mock_http_handler)
+
+    with MockLiveSTTGRPCServer(servicer=servicer) as grpc_server:
+        tester = LiveSTTTester()
+        artifacts_dir_1 = tmp_path / "stream_diar_run1"
+        artifacts_dir_1.mkdir(parents=True, exist_ok=True)
+        ctx1 = TestContext(run_id=201, artifacts_dir=artifacts_dir_1, emit_stdout=False)
+
+        cfg = {
+            "suites": ["accuracy_streaming", "accuracy_diarization"],
+            "dataset_dir": str(ds_root),
+            "dataset_split": "eval_small",
+            "meetings": ["MTG_90001", "MTG_90002"],
+            "streaming_protocol": "both",
+            "grpc_target": grpc_server.target,
+            "cache_path": str(cache_file),
+            "use_cache": True,
+            "_transport": transport,
+        }
+        target = {"name": "mock-live-stt", "base_url": "http://mockserver/v1"}
+
+        res1 = tester.run(cfg, target, ctx1)
+        # 2 streaming protocols x 2 meetings + 1 diarization x 2 meetings = 6 cases
+        assert len(res1.cases) == 6
+
+        by_cid = {c.case_id: c for c in res1.cases}
+        grpc_ok = by_cid["accuracy_streaming:parakeet-tdt-0.6b-v2:grpc:MTG_90001"]
+        grpc_err = by_cid["accuracy_streaming:parakeet-tdt-0.6b-v2:grpc:MTG_90002"]
+        sse_ok = by_cid["accuracy_streaming:parakeet-tdt-0.6b-v2:sse:MTG_90001"]
+        sse_err = by_cid["accuracy_streaming:parakeet-tdt-0.6b-v2:sse:MTG_90002"]
+        diar_ok = by_cid["accuracy_diarization:pyannote/speaker-diarization-3.1:MTG_90001"]
+        diar_err = by_cid["accuracy_diarization:pyannote/speaker-diarization-3.1:MTG_90002"]
+
+        assert grpc_ok.status == "pass"
+        assert sse_ok.status == "pass"
+        assert diar_ok.status == "pass"
+
+        assert grpc_err.status == "error"
+        assert "gRPC INTERNAL" in grpc_err.detail["eval_message"]
+        assert "gRPC worker crash: CUDA out of memory" in grpc_err.detail["eval_message"]
+
+        assert sse_err.status == "error"
+        assert "SSE stream CUDA OOM crash" in sse_err.detail["eval_message"]
+
+        assert diar_err.status == "error"
+        assert "HTTP 500" in diar_err.detail["eval_message"]
+        assert "diarization worker crashed: CUDA OOM" in diar_err.detail["eval_message"]
+
+        # Aggregates cover only MTG_90001 (WER=0.0, DER=0.0)
+        assert res1.metrics["streaming_wer"]["value"] == 0.0
+        assert res1.metrics["der"]["value"] == 0.0
+        assert res1.metrics["accuracy_streaming_errored_cases"]["value"] == 2
+        assert res1.metrics["accuracy_streaming_evaluated_cases"]["value"] == 2
+        assert res1.metrics["accuracy_diarization_errored_cases"]["value"] == 1
+        assert res1.metrics["accuracy_diarization_evaluated_cases"]["value"] == 1
+        assert res1.metrics["errored_cases"]["value"] == 3
+
+        # Second run: MTG_90001 hits cache (3 hits), MTG_90002 is NOT cached (3 misses)
+        artifacts_dir_2 = tmp_path / "stream_diar_run2"
+        artifacts_dir_2.mkdir(parents=True, exist_ok=True)
+        ctx2 = TestContext(run_id=202, artifacts_dir=artifacts_dir_2, emit_stdout=False)
+        res2 = tester.run(cfg, target, ctx2)
+        assert res2.metrics["accuracy_cache_hits"]["value"] == 3
+        assert res2.metrics["accuracy_cache_misses"]["value"] == 3
+        assert http_counts["sse_1"] == 1
+        assert http_counts["sse_2"] == 2
+        assert http_counts["diar_1"] == 1
+        assert http_counts["diar_2"] == 2
+        assert servicer.total_calls == 3  # 1 ok + 1 fail on run1, + 1 fail on run2 (ok was cached)
+
+

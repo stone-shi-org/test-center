@@ -514,10 +514,13 @@ def create_run(
         suites = test_def.suites
 
     merged_config: dict[str, Any] = {}
-    if test_def:
+    if test_def and isinstance(test_def.config, dict):
         merged_config.update(test_def.config)
     if req.config:
         merged_config.update(req.config)
+    if suites is None and isinstance(merged_config.get("suites"), list):
+        suites = list(merged_config["suites"])
+    merged_config.pop("suites", None)
 
     judge_target_id = merged_config.get("judge_target_id")
     if judge_target_id is not None and not isinstance(target_snapshot.get("judge_target"), dict):

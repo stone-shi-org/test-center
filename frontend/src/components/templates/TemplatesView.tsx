@@ -31,6 +31,13 @@ function buildCopyName(baseName: string, existingNames: Set<string>): string {
   return `${baseName} (copy ${counter})`
 }
 
+function stripSuitesFromConfig(cfg?: Record<string, unknown> | null): Record<string, unknown> {
+  if (!cfg) return {}
+  const next = { ...cfg }
+  delete next.suites
+  return next
+}
+
 export function TemplatesView() {
   const [templates, setTemplates] = useState<TestDefinition[]>([])
   const [starters, setStarters] = useState<StarterTemplate[]>([])
@@ -126,7 +133,7 @@ export function TemplatesView() {
         name,
         tester: starter.tester,
         suites: starter.suites ? [...starter.suites] : [],
-        config: starter.config ? { ...starter.config } : {},
+        config: stripSuitesFromConfig(starter.config),
         target_id: null,
       })
       setSuccessMessage(`Created template "${created.name}" from starter.`)
@@ -156,8 +163,11 @@ export function TemplatesView() {
     setTemplateName(tpl.name)
     setSelectedTester(tpl.tester)
     setSelectedTargetId(tpl.target_id ? String(tpl.target_id) : '')
-    setSelectedSuites(tpl.suites ? [...tpl.suites] : [])
-    setConfigValues(tpl.config ? { ...tpl.config } : {})
+    const fallbackSuites = Array.isArray(tpl.config?.suites)
+      ? (tpl.config.suites as string[])
+      : []
+    setSelectedSuites(tpl.suites ? [...tpl.suites] : [...fallbackSuites])
+    setConfigValues(stripSuitesFromConfig(tpl.config))
     setIsModalOpen(true)
   }
 
@@ -202,7 +212,7 @@ export function TemplatesView() {
       name: templateName.trim(),
       tester: selectedTester,
       suites: selectedSuites,
-      config: configValues,
+      config: stripSuitesFromConfig(configValues),
       target_id: selectedTargetId ? parseInt(selectedTargetId, 10) : null,
     }
 
@@ -231,11 +241,14 @@ export function TemplatesView() {
       setDuplicatingId(tpl.id)
       const existingNames = new Set(templates.map((t) => t.name))
       const copyName = buildCopyName(tpl.name, existingNames)
+      const fallbackSuites = Array.isArray(tpl.config?.suites)
+        ? (tpl.config.suites as string[])
+        : []
       const created = await api.definitions.create({
         name: copyName,
         tester: tpl.tester,
-        suites: tpl.suites ? [...tpl.suites] : [],
-        config: tpl.config ? { ...tpl.config } : {},
+        suites: tpl.suites ? [...tpl.suites] : [...fallbackSuites],
+        config: stripSuitesFromConfig(tpl.config),
         target_id: tpl.target_id ?? null,
       })
       setSuccessMessage(`Duplicated template as "${created.name}".`)
@@ -647,6 +660,11 @@ export function TemplatesView() {
                 values={configValues}
                 onChange={setConfigValues}
                 disabled={saving}
+                omitFields={
+                  currentTesterInfo.suites && currentTesterInfo.suites.length > 0
+                    ? ['suites']
+                    : undefined
+                }
                 context={{
                   targetId: selectedTargetId ? parseInt(selectedTargetId, 10) : null,
                 }}

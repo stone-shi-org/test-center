@@ -1133,6 +1133,13 @@ def render_notsofar_accuracy_html_report(
             f'<div class="val">{float(spk_err):.2f}</div>'
             f'<div class="sub">|pred - ref| speakers</div></div>'
         )
+    errored_cnt = sum(1 for c in accuracy_cases if str(c.get("status", "")).lower() == "error")
+    if errored_cnt > 0:
+        cards_html.append(
+            f'<div class="card"><div class="label">Errored Cases</div>'
+            f'<div class="val">{errored_cnt}</div>'
+            f'<div class="sub">excluded from aggregates</div></div>'
+        )
     cards_html.append(
         f'<div class="card"><div class="label">Result Cache</div>'
         f'<div class="val">{cache_hits}H / {cache_misses}M</div>'
@@ -1159,7 +1166,7 @@ def render_notsofar_accuracy_html_report(
             if isinstance(cm.get("speaker_count_error"), Mapping)
             else None
         )
-        c_rtf = cm.get("rtf", {}).get("value") if isinstance(cm.get("rtf"), Mapping) else 0.0
+        c_rtf = cm.get("rtf", {}).get("value") if isinstance(cm.get("rtf"), Mapping) else None
 
         wer_str = f"{float(c_wer) * 100.0:.2f}%" if c_wer is not None else "—"
         cpwer_str = f"{float(c_cpwer) * 100.0:.2f}%" if c_cpwer is not None else "—"
@@ -1169,14 +1176,18 @@ def render_notsofar_accuracy_html_report(
             if c_spk_err is not None
             else "—"
         )
+        rtf_str = f"{float(c_rtf):.4f}x" if c_rtf is not None else "—"
 
         ref_preview = html.escape(str(cd.get("reference_preview", ""))[:320])
         hyp_preview = html.escape(str(cd.get("hypothesis_preview", ""))[:320])
         diag = cd.get("speaker_diagnostics") if isinstance(cd.get("speaker_diagnostics"), Mapping) else {}
         timeline_html = _render_timeline_bars_html(diag) if diag else ""
+        err_msg = html.escape(str(cd.get("error_message") or cd.get("eval_message") or "")) if status == "ERROR" else ""
 
         detail_block = ""
-        if ref_preview or hyp_preview or timeline_html:
+        if status == "ERROR" and err_msg:
+            detail_block = f'<span style="color:#dc2626;font-size:12px;">{err_msg}</span>'
+        elif ref_preview or hyp_preview or timeline_html:
             detail_block = (
                 f"<details><summary>Inspect {meeting_id}</summary>"
                 f'<div style="padding:6px 0;font-size:12px;">'
@@ -1197,7 +1208,7 @@ def render_notsofar_accuracy_html_report(
             f"<td>{cpwer_str}</td>"
             f"<td>{der_str}</td>"
             f"<td>{spk_str}</td>"
-            f"<td>{float(c_rtf or 0.0):.4f}x</td>"
+            f"<td>{rtf_str}</td>"
             f"<td>{'HIT' if cached else 'MISS'}</td>"
             f"<td>{detail_block}</td>"
             f"</tr>"

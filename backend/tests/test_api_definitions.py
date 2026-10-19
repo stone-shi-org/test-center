@@ -311,3 +311,51 @@ def test_all_starter_templates_valid():
         validated_cfg = plugin.validate_and_apply_config(dict(starter["config"]))
         assert isinstance(validated_cfg, dict)
 
+
+def test_definition_and_run_config_do_not_contain_stray_suites(app_and_client):
+    """Verify TestDefinition and Run config never retain stray 'suites' inside config."""
+    client, _, _ = app_and_client
+
+    # 1. Create a live-stt template with top-level suites=['accuracy_wer'] and conflicting config.suites
+    res_def = client.post(
+        "/api/test-definitions",
+        json={
+            "name": "Live-STT Accuracy WER Only",
+            "tester": "live-stt",
+            "suites": ["accuracy_wer"],
+            "config": {
+                "models": ["parakeet-tdt-0.6b-v3"],
+                "suites": ["transcriptions_json", "admin"],
+            },
+        },
+    )
+    assert res_def.status_code == 201
+    def_data = res_def.json()
+    assert def_data["suites"] == ["accuracy_wer"]
+    assert "suites" not in def_data["config"]
+
+    # 2. Trigger run via /api/test-definitions/{id}/run
+    res_def_run = client.post(f"/api/test-definitions/{def_data['id']}/run", json={})
+    assert res_def_run.status_code == 201
+    def_run_snap = res_def_run.json()["config_snapshot"]
+    assert def_run_snap["suites"] == ["accuracy_wer"]
+    assert "suites" not in def_run_snap["config"]
+
+    # 3. Trigger run directly via /api/runs (as TriggerView does)
+    res_direct_run = client.post(
+        "/api/runs",
+        json={
+            "tester": "live-stt",
+            "suites": ["accuracy_wer"],
+            "config": {
+                "models": ["parakeet-tdt-0.6b-v3"],
+                "suites": ["transcriptions_json"],
+            },
+        },
+    )
+    assert res_direct_run.status_code == 201
+    direct_snap = res_direct_run.json()["config_snapshot"]
+    assert direct_snap["suites"] == ["accuracy_wer"]
+    assert "suites" not in direct_snap["config"]
+
+

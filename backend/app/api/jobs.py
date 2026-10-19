@@ -359,6 +359,12 @@ def _format_job(job: Job, db: Session) -> dict[str, Any]:
         eff_config = dict(def_obj.config or {})
         if isinstance(step_ovr.get("config"), dict):
             eff_config.update(step_ovr["config"])
+        if not eff_suites and isinstance(eff_config.get("suites"), list):
+            eff_suites = list(eff_config["suites"])
+        eff_config.pop("suites", None)
+
+        base_config = dict(def_obj.config or {})
+        base_config.pop("suites", None)
 
         eff_target_id = (
             step_ovr["target_id"]
@@ -390,7 +396,7 @@ def _format_job(job: Job, db: Session) -> dict[str, Any]:
             "name": def_obj.name,
             "tester": def_obj.tester,
             "suites": list(def_obj.suites or []),
-            "config": dict(def_obj.config or {}),
+            "config": base_config,
             "target_id": def_obj.target_id,
             "target": base_target_dict,
             "overrides": step_ovr,

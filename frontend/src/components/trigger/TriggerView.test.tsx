@@ -217,5 +217,104 @@ describe('TriggerView', () => {
     const durationInput = screen.getByLabelText(/duration_seconds/i) as HTMLInputElement
     expect(durationInput.value).toBe('0.05')
   })
+
+  it('omits schema suites property from SchemaForm and strips stray suites from config when triggering a run', async () => {
+    const testersWithSchemaSuites: TesterInfo[] = [
+      {
+        name: 'live-stt',
+        description: 'live-stt HTTP and accuracy tester',
+        suites: ['transcriptions_json', 'accuracy_wer'],
+        config_schema: {
+          type: 'object',
+          properties: {
+            suites: {
+              type: 'array',
+              items: { type: 'string', enum: ['transcriptions_json', 'accuracy_wer'] },
+              default: ['transcriptions_json'],
+              description: 'Sub-suites to execute',
+            },
+            dataset_split: {
+              type: 'string',
+              default: 'eval_small',
+              description: 'NOTSOFAR split',
+            },
+          },
+        },
+      },
+    ]
+
+    const legacyTemplates: TestDefinition[] = [
+      {
+        id: 19,
+        name: 'legacy-accuracy-template',
+        tester: 'live-stt',
+        suites: ['accuracy_wer'],
+        config: {
+          suites: ['transcriptions_json'],
+          dataset_split: 'eval_small',
+        },
+        target_id: null,
+        created_at: '2026-10-18T00:00:00Z',
+        updated_at: '2026-10-18T00:00:00Z',
+      },
+    ]
+
+    vi.spyOn(api.testers, 'list').mockResolvedValue(testersWithSchemaSuites)
+    vi.spyOn(api.targets, 'list').mockResolvedValue([])
+    vi.spyOn(api.definitions, 'list').mockResolvedValue(legacyTemplates)
+    vi.spyOn(api.definitions, 'listStarters').mockResolvedValue([])
+
+    const createRunSpy = vi.spyOn(api.runs, 'create').mockResolvedValue({
+      id: 99,
+      job_id: null,
+      status: 'queued',
+      queued_at: '2026-10-18T12:00:00Z',
+      started_at: null,
+      finished_at: null,
+      config_snapshot: {
+        tester: 'live-stt',
+        suites: ['accuracy_wer'],
+        config: { dataset_split: 'eval_small' },
+      },
+      target_snapshot: {},
+      git_info: null,
+      results: [],
+    })
+
+    render(
+      <RouterProvider>
+        <TriggerView />
+      </RouterProvider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Load from template/i)).toBeTruthy()
+    })
+
+    // Load legacy template with stray config.suites
+    const templateSelect = screen.getByLabelText(/Load from template/i)
+    fireEvent.change(templateSelect, { target: { value: '19' } })
+
+    const werCheckbox = screen.getByRole('checkbox', { name: 'accuracy_wer' }) as HTMLInputElement
+    const jsonCheckbox = screen.getByRole('checkbox', { name: 'transcriptions_json' }) as HTMLInputElement
+    expect(werCheckbox.checked).toBe(true)
+    expect(jsonCheckbox.checked).toBe(false)
+
+    // Click Reset to Defaults in SchemaForm and verify it does not inject 'suites' into config
+    fireEvent.click(screen.getByRole('button', { name: /Reset to Defaults/i }))
+
+    // Click Start Run
+    fireEvent.click(screen.getByRole('button', { name: /^Start Run$/i }))
+
+    await waitFor(() => {
+      expect(createRunSpy).toHaveBeenCalledTimes(1)
+    })
+
+    const runPayload = createRunSpy.mock.calls[0][0]
+    expect(runPayload.suites).toEqual(['accuracy_wer'])
+    expect(runPayload.config).toEqual({ dataset_split: 'eval_small' })
+    expect('suites' in (runPayload.config ?? {})).toBe(false)
+  })
 })
+
 
