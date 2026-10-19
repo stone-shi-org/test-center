@@ -164,6 +164,28 @@ def normalize_live_stt_suites(raw_suites: list[str] | None, available: list[str]
     return valid if valid else expanded
 
 
+
+def _summarize_unexpected_burst_statuses(
+    responses: list[Any],
+    expected: tuple[int, ...] = (200, 503),
+    max_message_len: int = 200,
+) -> list[dict[str, Any]]:
+    """Group burst responses whose status is not in ``expected`` by status code, with a count and the
+    first error message seen for each (status 0 means no HTTP response, e.g. a timeout)."""
+    groups: dict[int, dict[str, Any]] = {}
+    for r in responses:
+        if r.status_code in expected:
+            continue
+        g = groups.setdefault(r.status_code, {"status_code": r.status_code, "count": 0, "sample_message": ""})
+        g["count"] += 1
+        if not g["sample_message"]:
+            msg = extract_error_message(r.body) if isinstance(r.body, dict) else None
+            if not msg:
+                msg = (r.raw_text or "").strip()
+            g["sample_message"] = str(msg)[:max_message_len]
+    return [groups[k] for k in sorted(groups)]
+
+
 class LiveSTTTester(TesterPlugin):
     """Tester for live-stt HTTP/gRPC endpoints, contract verification, gRPC streaming, and NOTSOFAR-1 accuracy:
 
@@ -2772,6 +2794,13 @@ class LiveSTTTester(TesterPlugin):
         burst_checks: list[dict[str, Any]] = []
         burst_errors: list[str] = []
 
+        status_counts = burst_res.status_counts()
+        unexpected_statuses = _summarize_unexpected_burst_statuses(burst_res.responses)
+        unexpected_text = ", ".join(
+            f"HTTP {u['status_code']} x{u['count']}"
+            + (f" ({u['sample_message']!r})" if u["sample_message"] else "")
+            for u in unexpected_statuses
+        )
         only_200_503 = burst_res.other_status_count == 0
         burst_checks.append({
             "name": "only_200_or_503_statuses",
@@ -2779,11 +2808,12 @@ class LiveSTTTester(TesterPlugin):
             "detail": (
                 f"200={burst_res.ok_200_count}, 503={burst_res.rejected_503_count}, "
                 f"other={burst_res.other_status_count}"
+                + (f": {unexpected_text}" if unexpected_text else "")
             ),
         })
         if not only_200_503:
             burst_errors.append(
-                f"only_200_or_503_statuses: got {burst_res.other_status_count} unexpected status code(s)"
+                f"only_200_or_503_statuses: got {burst_res.other_status_count} unexpected: {unexpected_text}"
             )
 
         has_admitted = burst_res.ok_200_count >= 1
@@ -2863,6 +2893,7 @@ class LiveSTTTester(TesterPlugin):
                 "burst_size": {"value": burst_res.total_requests, "unit": "requests"},
                 "admitted_200_count": {"value": burst_res.ok_200_count, "unit": "requests"},
                 "rejected_503_count": {"value": burst_res.rejected_503_count, "unit": "requests"},
+                "other_status_count": {"value": burst_res.other_status_count, "unit": "requests", "better": "lower"},
             },
             detail={
                 "endpoint": "/v1/audio/transcriptions",
@@ -2873,6 +2904,8 @@ class LiveSTTTester(TesterPlugin):
                 "ok_200_count": burst_res.ok_200_count,
                 "rejected_503_count": burst_res.rejected_503_count,
                 "other_status_count": burst_res.other_status_count,
+                "status_counts": {str(k): v for k, v in status_counts.items()},
+                "unexpected_statuses": unexpected_statuses,
                 "passed": burst_valid,
                 "eval_message": (
                     f"Burst {burst_res.total_requests} reqs -> {burst_res.ok_200_count} HTTP 200, "
@@ -2887,7 +2920,9 @@ class LiveSTTTester(TesterPlugin):
         completed_cases += 1
         ctx.log(
             f"  {case_burst} -> {burst_status.upper()} | "
-            f"200={burst_res.ok_200_count}, 503={burst_res.rejected_503_count}, Wall={burst_res.wall_ms:.2f}ms"
+            f"200={burst_res.ok_200_count}, 503={burst_res.rejected_503_count}"
+            + (f", other={burst_res.other_status_count} [{unexpected_text}]" if unexpected_text else "")
+            + f", Wall={burst_res.wall_ms:.2f}ms"
         )
         ctx.progress(completed_cases, planned_cases, f"Completed {case_burst}")
 

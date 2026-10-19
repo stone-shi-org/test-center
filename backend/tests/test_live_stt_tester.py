@@ -1796,6 +1796,68 @@ def test_live_stt_error_handling_suite_bad_audio_unknown_model_missing_fields(tm
     assert "error_handling_latency_mean_ms" in result.metrics
 
 
+
+def test_live_stt_concurrency_burst_reports_unexpected_statuses(tmp_path: Path):
+    """A burst with 507s and a transport error fails with per-status counts and sample messages."""
+    import threading
+
+    inner, _ = _create_mock_live_stt_transport(max_concurrent_calls=2, transcribe_hold_sec=0.06)
+    lock = threading.Lock()
+    injected = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/v1/audio/transcriptions"):
+            with lock:
+                injected["n"] += 1
+                n = injected["n"]
+            if n in (1, 2):
+                return httpx.Response(
+                    507,
+                    json={"error": {"message": "CUDA OOM allocating 167.8 MiB while starting model realtime_eou_120m-v1"}},
+                )
+            if n == 3:
+                raise httpx.ConnectError("connection reset by peer", request=request)
+        return inner.handler(request)
+
+    tester = LiveSTTTester()
+    ctx = TestContext(run_id=604, artifacts_dir=tmp_path / "artifacts_604", emit_stdout=False)
+    result = tester.run(
+        {
+            "_transport": httpx.MockTransport(handler),
+            "suites": ["concurrency"],
+            "discover_models": False,
+            "concurrency_burst_size": 6,
+        },
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+
+    burst_case = next(c for c in result.cases if c.case_id == "concurrency:over_budget_burst")
+    assert burst_case.status == "fail"
+    d = burst_case.detail
+    assert d["burst_size"] == 6
+    assert d["other_status_count"] == 3
+    assert d["status_counts"]["507"] == 2
+    assert d["status_counts"]["0"] == 1
+    assert d["ok_200_count"] + d["rejected_503_count"] == 3 and d["ok_200_count"] >= 1
+    assert burst_case.metrics["other_status_count"]["value"] == 3
+
+    unexpected = {u["status_code"]: u for u in d["unexpected_statuses"]}
+    assert set(unexpected) == {0, 507}
+    assert unexpected[507]["count"] == 2
+    assert unexpected[507]["sample_message"].startswith("CUDA OOM allocating 167.8 MiB")
+    assert unexpected[0]["count"] == 1
+    assert "transport error" in unexpected[0]["sample_message"]
+
+    only_check = next(c for c in d["checks"] if c["name"] == "only_200_or_503_statuses")
+    assert only_check["passed"] is False
+    assert "HTTP 507 x2 ('CUDA OOM allocating 167.8 MiB" in only_check["detail"]
+    assert any("HTTP 0 x1" in e and "HTTP 507 x2" in e for e in d["errors"])
+
+    # The rest of the suite still ran (the transport error did not abort it)
+    assert [c.case_id for c in result.cases][-1] == "concurrency:post_burst_recovery_and_stats"
+
+
 def test_live_stt_concurrency_suite_503_over_budget_and_recovery(tmp_path: Path):
     """Run the 'concurrency' suite and verify 503 when over max_concurrent_calls budget and slot release."""
     tester = LiveSTTTester()
@@ -1835,6 +1897,8 @@ def test_live_stt_concurrency_suite_503_over_budget_and_recovery(tmp_path: Path)
     assert burst_case.detail["ok_200_count"] == 2
     assert burst_case.detail["rejected_503_count"] == 3
     assert burst_case.detail["other_status_count"] == 0
+    assert burst_case.detail["status_counts"] == {"200": 2, "503": 3}
+    assert burst_case.detail["unexpected_statuses"] == []
 
     post_case = result.cases[2]
     assert post_case.detail["recovery_status_code"] == 200

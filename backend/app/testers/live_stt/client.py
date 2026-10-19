@@ -153,6 +153,13 @@ class ConcurrentBurstResult:
     wall_ms: float
     responses: list[TranscribeJsonResult] = field(default_factory=list)
 
+    def status_counts(self) -> dict[int, int]:
+        """Count of responses per HTTP status code (0 = transport error, no HTTP response)."""
+        counts: dict[int, int] = {}
+        for r in self.responses:
+            counts[r.status_code] = counts.get(r.status_code, 0) + 1
+        return dict(sorted(counts.items()))
+
 
 def build_multipart_body(
     fields: dict[str, str],
@@ -1033,13 +1040,25 @@ class LiveSTTHTTPClient:
                 barrier.wait(timeout=5.0)
             except threading.BrokenBarrierError:
                 pass
-            return self.transcribe_json(
-                wav_bytes=wav_bytes,
-                model=model,
-                response_format=response_format,
-                language=language,
-                filename=f"burst_{idx}.wav",
-            )
+            t_req = time.perf_counter()
+            try:
+                return self.transcribe_json(
+                    wav_bytes=wav_bytes,
+                    model=model,
+                    response_format=response_format,
+                    language=language,
+                    filename=f"burst_{idx}.wav",
+                )
+            except LiveSTTClientError as exc:
+                # One failed request (timeout, connection reset) must not abort the whole burst:
+                # record it as status 0 so the caller can report it with the others.
+                return TranscribeJsonResult(
+                    status_code=0,
+                    content_type="",
+                    body=None,
+                    raw_text=f"transport error: {exc}",
+                    latency_ms=round(max(0.01, (time.perf_counter() - t_req) * 1000.0), 2),
+                )
 
         t0 = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
