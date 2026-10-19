@@ -83,6 +83,10 @@ class DummyTester(TesterPlugin):
 
         ctx.log(f"Executing suites: {suites_to_run} across {total_steps} steps")
 
+        status = "fail" if fail_case else "pass"
+        result = TesterResult(status=status)
+        latency_val = float(config.get("latency_ms", 25.0))
+
         start_time = time.time()
         for step in range(1, total_steps + 1):
             ctx.check_cancelled()
@@ -98,6 +102,16 @@ class DummyTester(TesterPlugin):
                 slice_time = min(remaining, 0.05)
                 time.sleep(slice_time)
                 remaining -= slice_time
+
+            if step <= len(suites_to_run):
+                case_status = "fail" if (fail_case and suite == suites_to_run[-1]) else "pass"
+                result.add_case(
+                    case_id=f"case_{suite}_001",
+                    suite=suite,
+                    status=case_status,
+                    metrics={"latency_ms": {"value": latency_val, "unit": "ms", "better": "lower"}},
+                    detail={"suite": suite, "evaluated": True},
+                )
 
         elapsed = time.time() - start_time
         ctx.log(f"Dummy execution completed in {elapsed:.3f}s")
@@ -121,31 +135,14 @@ class DummyTester(TesterPlugin):
             ctx.add_artifact("metrics_summary.json", metrics_json_file, mime="application/json")
             ctx.log("Generated artifact 'metrics_summary.json'")
 
-        # Build result
-        status = "fail" if fail_case else "pass"
-        result = TesterResult(
-            status=status,
-            summary=f"Dummy tester completed ({len(suites_to_run)} suites, elapsed {elapsed:.2f}s)",
-        )
+        result.summary = f"Dummy tester completed ({len(suites_to_run)} suites, elapsed {elapsed:.2f}s)"
 
         # Set standard metrics
         duration_val = float(config.get("duration_ms", round(duration * 1000, 2)))
         throughput_val = float(config.get("throughput", 100.0))
-        latency_val = float(config.get("latency_ms", 25.0))
         result.set_metric("duration_ms", duration_val, unit="ms", better="lower")
         result.set_metric("throughput", throughput_val, unit="req/s", better="higher")
         result.set_metric("success_rate", 50.0 if fail_case else 100.0, unit="%", better="higher")
-
-        # Add cases
-        for s in suites_to_run:
-            case_status = "fail" if (fail_case and s == suites_to_run[-1]) else "pass"
-            result.add_case(
-                case_id=f"case_{s}_001",
-                suite=s,
-                status=case_status,
-                metrics={"latency_ms": {"value": latency_val, "unit": "ms", "better": "lower"}},
-                detail={"suite": s, "evaluated": True},
-            )
 
         # Include registered artifacts from context
         for art in ctx.artifacts:

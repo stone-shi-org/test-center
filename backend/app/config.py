@@ -31,6 +31,7 @@ class Settings(BaseModel):
     )
     RETENTION_ARTIFACTS_ONLY: bool = os.getenv("RETENTION_ARTIFACTS_ONLY", "false").lower() in ("1", "true", "yes")
     RETENTION_KEEP_FAILED: bool = os.getenv("RETENTION_KEEP_FAILED", "false").lower() in ("1", "true", "yes")
+    DEFAULT_RUN_TIMEOUT: float = float(os.getenv("DEFAULT_RUN_TIMEOUT", "5400.0"))
     WEBHOOK_TIMEOUT_SECONDS: float = float(os.getenv("WEBHOOK_TIMEOUT_SECONDS", "10.0"))
     SMTP_HOST: str = os.getenv("SMTP_HOST", "")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))

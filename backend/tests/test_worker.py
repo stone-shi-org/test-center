@@ -240,14 +240,19 @@ async def test_worker_cancel_queued(tmp_path: Path, test_db_session):
     assert executed is False
 
 
+def test_worker_default_timeout_is_90_minutes(tmp_path: Path, test_db_session):
+    worker = RunWorker(session_factory=test_db_session, artifacts_dir=tmp_path / "artifacts")
+    assert worker.default_timeout == 5400.0
+
+
 @pytest.mark.asyncio
 async def test_worker_timeout(tmp_path: Path, test_db_session):
     artifacts_dir = tmp_path / "artifacts"
-    # Set a very short default timeout (0.3s)
+    # Set a short default timeout (0.5s) so initial steps (0.05s each) finish and the 5s run times out
     worker = RunWorker(
         session_factory=test_db_session,
         artifacts_dir=artifacts_dir,
-        default_timeout=0.3,
+        default_timeout=0.5,
     )
 
     db: Session = test_db_session()
@@ -258,7 +263,7 @@ async def test_worker_timeout(tmp_path: Path, test_db_session):
             "tester": "dummy",
             "config": {
                 "duration_seconds": 5.0,
-                "step_delay": 0.2,
+                "step_delay": 0.05,
             },
         },
         target_snapshot={},
@@ -276,6 +281,11 @@ async def test_worker_timeout(tmp_path: Path, test_db_session):
     updated_run = db.get(Run, run_id)
     assert updated_run.status == "error"
     assert "timed out" in updated_run.results[0].summary.lower()
+    # Partial case(s) completed before timeout should be persisted
+    assert len(updated_run.results[0].cases) >= 1
+    assert updated_run.results[0].cases[0].case_id == "case_smoke_001"
+    artifact_names = [a.name for a in updated_run.results[0].artifacts]
+    assert "result.json" in artifact_names
     db.close()
 
 

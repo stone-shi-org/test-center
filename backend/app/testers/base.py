@@ -71,6 +71,17 @@ class ArtifactData:
         )
 
 
+_checkpoint_callback: Callable[["TesterResult"], None] | None = None
+
+
+def set_result_checkpoint_callback(
+    callback: Callable[["TesterResult"], None] | None,
+) -> None:
+    """Register or clear a callback invoked whenever a TesterResult is updated."""
+    global _checkpoint_callback
+    _checkpoint_callback = callback
+
+
 @dataclass
 class TesterResult:
     """Structured result returned by a tester plugin."""
@@ -81,6 +92,13 @@ class TesterResult:
     artifacts: list[ArtifactData] = field(default_factory=list)
     summary: str | None = None
 
+    def _notify_checkpoint(self) -> None:
+        if _checkpoint_callback is not None:
+            try:
+                _checkpoint_callback(self)
+            except Exception:
+                pass
+
     def set_metric(
         self,
         name: str,
@@ -90,6 +108,7 @@ class TesterResult:
     ) -> None:
         """Add or update a metric with unit and direction."""
         self.metrics[name] = format_metric(value=value, unit=unit, better=better)
+        self._notify_checkpoint()
 
     def add_case(
         self,
@@ -108,6 +127,7 @@ class TesterResult:
             detail=detail or {},
         )
         self.cases.append(case)
+        self._notify_checkpoint()
         return case
 
     def add_artifact(
@@ -131,6 +151,7 @@ class TesterResult:
             size_bytes=size_bytes,
         )
         self.artifacts.append(artifact)
+        self._notify_checkpoint()
         return artifact
 
     def to_dict(self) -> dict[str, Any]:

@@ -19,6 +19,7 @@ from backend.app.testers.base import (
     TesterResult,
     TesterCancelledError,
     TesterError,
+    set_result_checkpoint_callback,
 )
 from backend.app.testers.registry import get_tester, TesterNotFoundError
 
@@ -60,7 +61,21 @@ def run_executor(payload: dict[str, Any]) -> int:
 
     result: TesterResult
     exit_code: int = 0
+    last_result_ref: list[TesterResult] = []
 
+    def _write_checkpoint(res: TesterResult) -> None:
+        last_result_ref[:] = [res]
+        data = res.to_dict()
+        existing_paths = {a["path"] for a in data.get("artifacts", [])}
+        for art in ctx.artifacts:
+            if art.path not in existing_paths:
+                data.setdefault("artifacts", []).append(art.to_dict())
+                existing_paths.add(art.path)
+        tmp_file = result_file.with_suffix(".json.tmp")
+        tmp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp_file, result_file)
+
+    set_result_checkpoint_callback(_write_checkpoint)
     try:
         tester = get_tester(tester_name)
         # Check if run is coroutine or regular function
@@ -80,10 +95,13 @@ def run_executor(payload: dict[str, Any]) -> int:
 
     except TesterCancelledError:
         ctx.log("Tester cancelled via TesterCancelledError", level="warning")
+        prev = last_result_ref[0] if last_result_ref else None
         result = TesterResult(
             status="cancelled",
             summary="Execution cancelled by user or timeout",
-            artifacts=list(ctx.artifacts),
+            metrics=dict(prev.metrics) if prev else {},
+            cases=list(prev.cases) if prev else [],
+            artifacts=list(prev.artifacts) if prev else list(ctx.artifacts),
         )
         exit_code = 2
 
@@ -98,12 +116,17 @@ def run_executor(payload: dict[str, Any]) -> int:
 
     except Exception as e:
         ctx.log(f"Unhandled exception during execution: {traceback.format_exc()}", level="error")
+        prev = last_result_ref[0] if last_result_ref else None
         result = TesterResult(
             status="error",
             summary=f"Execution error: {e}",
-            artifacts=list(ctx.artifacts),
+            metrics=dict(prev.metrics) if prev else {},
+            cases=list(prev.cases) if prev else [],
+            artifacts=list(prev.artifacts) if prev else list(ctx.artifacts),
         )
         exit_code = 1
+    finally:
+        set_result_checkpoint_callback(None)
 
     # Ensure all registered context artifacts are in result
     existing_paths = {a.path for a in result.artifacts}

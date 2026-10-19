@@ -33,13 +33,15 @@ class RunWorker:
         session_factory: sessionmaker[Session] = SessionLocal,
         artifacts_dir: Path | None = None,
         poll_interval: float = 1.0,
-        default_timeout: float = 300.0,
+        default_timeout: float | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = get_settings()
         self.artifacts_dir = Path(artifacts_dir or self.settings.ARTIFACTS_DIR)
         self.poll_interval = poll_interval
-        self.default_timeout = default_timeout
+        self.default_timeout = float(
+            default_timeout if default_timeout is not None else self.settings.DEFAULT_RUN_TIMEOUT
+        )
 
         self._stop_event = asyncio.Event()
         self._wake_event = asyncio.Event()
@@ -621,21 +623,30 @@ class RunWorker:
                 tester_name = step["tester"]
                 test_def_id = step.get("test_definition_id")
 
+                partial_data: dict[str, Any] = {}
+                if step_result_file.exists():
+                    try:
+                        loaded = json.loads(step_result_file.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict):
+                            partial_data = loaded
+                    except Exception:
+                        partial_data = {}
+
                 if outcome["cancelled"]:
                     res_data = {
                         "status": "cancelled",
                         "summary": "Run was cancelled",
-                        "metrics": {},
-                        "cases": [],
-                        "artifacts": [],
+                        "metrics": partial_data.get("metrics", {}),
+                        "cases": partial_data.get("cases", []),
+                        "artifacts": partial_data.get("artifacts", []),
                     }
                 elif outcome["timed_out"]:
                     res_data = {
                         "status": "error",
                         "summary": f"Execution timed out after {step['timeout']} seconds",
-                        "metrics": {},
-                        "cases": [],
-                        "artifacts": [],
+                        "metrics": partial_data.get("metrics", {}),
+                        "cases": partial_data.get("cases", []),
+                        "artifacts": partial_data.get("artifacts", []),
                     }
                 elif (outcome["exit_code"] or 0) == 0 and step_result_file.exists():
                     try:
@@ -822,7 +833,7 @@ class RunWorker:
                 return
 
     async def _finalize_run(self, run_id: int, status: str, summary: str) -> None:
-        """Mark run finished with given status and summary."""
+        """Mark run finished with given status and summary, preserving any partial results."""
         db: Session = self.session_factory()
         now = utc_now()
         try:
@@ -835,11 +846,21 @@ class RunWorker:
 
             run_dir = self.artifacts_dir / str(run_id)
             log_file = run_dir / "run.log"
+            result_file = run_dir / "result.json"
             try:
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(f"[{now.isoformat()}] [{status.upper()}] {summary}\n")
             except OSError:
                 pass
+
+            partial_data: dict[str, Any] = {}
+            if result_file.exists():
+                try:
+                    loaded = json.loads(result_file.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        partial_data = loaded
+                except Exception:
+                    partial_data = {}
 
             # Create or update Result record
             result = None
@@ -847,6 +868,8 @@ class RunWorker:
                 result = run.results[0]
                 result.status = "cancelled" if status == "cancelled" else "error"
                 result.summary = summary
+                if partial_data.get("metrics") and not result.metrics:
+                    result.metrics = partial_data.get("metrics", {})
             else:
                 tester_name = "unknown"
                 test_def_id = None
@@ -865,13 +888,41 @@ class RunWorker:
                     tester=tester_name,
                     status="cancelled" if status == "cancelled" else "error",
                     summary=summary,
-                    metrics={},
+                    metrics=partial_data.get("metrics", {}),
                 )
                 db.add(result)
                 db.flush()
 
+            if not result.cases and partial_data.get("cases"):
+                for c in partial_data.get("cases", []):
+                    db.add(
+                        CaseResult(
+                            result_id=result.id,
+                            suite=c.get("suite", "default"),
+                            case_id=c.get("case_id", "unknown"),
+                            status=c.get("status", "pass"),
+                            metrics=c.get("metrics", {}),
+                            detail=c.get("detail", {}),
+                        )
+                    )
+
+            known_paths = {a.path for a in (result.artifacts or [])}
+            for a in partial_data.get("artifacts", []):
+                p = Path(a["path"])
+                if str(p) not in known_paths:
+                    known_paths.add(str(p))
+                    db.add(
+                        Artifact(
+                            result_id=result.id,
+                            name=a.get("name", p.name),
+                            path=str(p),
+                            mime=a.get("mime", "application/octet-stream"),
+                            size_bytes=a.get("size_bytes"),
+                        )
+                    )
+
             # Ensure run.log is linked as an artifact
-            if log_file.exists():
+            if log_file.exists() and str(log_file) not in known_paths:
                 size = None
                 try:
                     size = log_file.stat().st_size
@@ -883,6 +934,22 @@ class RunWorker:
                         name="run.log",
                         path=str(log_file),
                         mime="text/plain",
+                        size_bytes=size,
+                    )
+                )
+
+            if result_file.exists() and str(result_file) not in known_paths:
+                size = None
+                try:
+                    size = result_file.stat().st_size
+                except OSError:
+                    pass
+                db.add(
+                    Artifact(
+                        result_id=result.id,
+                        name="result.json",
+                        path=str(result_file),
+                        mime="application/json",
                         size_bytes=size,
                     )
                 )
