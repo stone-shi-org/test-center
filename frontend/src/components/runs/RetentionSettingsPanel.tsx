@@ -174,6 +174,9 @@ export function RetentionSettingsPanel({
           <span className="retention-stat-item">
             <strong>{stats.eligible_runs_count}</strong> runs eligible under saved policy
           </span>
+          <span className="retention-stat-item" data-testid="retention-baselines-protected">
+            {stats.baseline_runs_protected ?? 0} baseline runs protected
+          </span>
           {lastCleanupAt && (
             <span className="retention-stat-item text-muted">
               Last cleanup: {new Date(lastCleanupAt).toLocaleString()}

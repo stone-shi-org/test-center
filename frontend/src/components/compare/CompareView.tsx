@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   api,
+  type BaselineItem,
   type CompareResponse,
   type Run,
 } from '../../api/index.ts'
@@ -49,15 +50,27 @@ export function CompareView() {
   const [baselineRunId, setBaselineRunId] = useState<number | null>(
     initial.baselineRunId ?? (initial.runIds.length > 0 ? initial.runIds[0] : null)
   )
+  const [hasExplicitReference, setHasExplicitReference] = useState<boolean>(
+    initial.baselineRunId !== null || Boolean(initial.baselines && initial.baselines.length > 0)
+  )
   const [threshold, setThreshold] = useState<number>(initial.threshold)
   const [filterMode, setFilterMode] = useState<CompareFilterMode>(initial.filterMode)
   const [suiteFilter, setSuiteFilter] = useState<string>(initial.suite)
   const [allowDifferentTesters, setAllowDifferentTesters] = useState<boolean>(false)
 
+  // Baselines state (independent of 100-run history limit)
+  const [savedBaselines, setSavedBaselines] = useState<BaselineItem[]>([])
+  const [loadingBaselines, setLoadingBaselines] = useState<boolean>(true)
+  const [baselineSearch, setBaselineSearch] = useState<string>('')
+  const [baselineTesterFilter, setBaselineTesterFilter] = useState<string>('all')
+  const [unknownBaselines, setUnknownBaselines] = useState<string[]>([])
+
   // Run Picker state
   const [historyRuns, setHistoryRuns] = useState<Run[]>([])
   const [loadingRuns, setLoadingRuns] = useState<boolean>(true)
-  const [pickerExpanded, setPickerExpanded] = useState<boolean>(initial.runIds.length < 2)
+  const [pickerExpanded, setPickerExpanded] = useState<boolean>(
+    initial.runIds.length + (initial.baselines?.length || 0) < 2
+  )
   const [pickerSearch, setPickerSearch] = useState<string>('')
   const [pickerTesterFilter, setPickerTesterFilter] = useState<string>('all')
 
@@ -70,6 +83,61 @@ export function CompareView() {
 
   // Shareable URL copy state
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false)
+
+  // Load saved baselines for the Baselines Picker and resolve ?baselines= URL param
+  useEffect(() => {
+    let ignore = false
+    const urlBaselines = parseCompareUrlParams(route.params).baselines || []
+    const urlBaseRunId = parseCompareUrlParams(route.params).baselineRunId
+    api.baselines
+      .list()
+      .then((data) => {
+        if (ignore) return
+        setSavedBaselines(data)
+        if (urlBaselines.length > 0) {
+          const resolvedIds: number[] = []
+          const missing: string[] = []
+          for (const rawName of urlBaselines) {
+            const match = data.find(
+              (b) => b.name.toLowerCase() === rawName.toLowerCase()
+            )
+            if (match) {
+              if (!resolvedIds.includes(match.run_id)) {
+                resolvedIds.push(match.run_id)
+              }
+            } else {
+              missing.push(rawName)
+            }
+          }
+          setUnknownBaselines(missing)
+          if (resolvedIds.length > 0) {
+            setSelectedRunIds((prev) => {
+              const merged = [...resolvedIds]
+              for (const id of prev) {
+                if (!merged.includes(id)) {
+                  merged.push(id)
+                }
+              }
+              return merged
+            })
+            if (urlBaseRunId === null) {
+              setBaselineRunId(resolvedIds[0])
+              setHasExplicitReference(true)
+            }
+          }
+        }
+        setLoadingBaselines(false)
+      })
+      .catch(() => {
+        if (!ignore) {
+          setLoadingBaselines(false)
+        }
+      })
+    return () => {
+      ignore = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Load runs history for the Run Picker
   useEffect(() => {
@@ -92,6 +160,25 @@ export function CompareView() {
     }
   }, [])
 
+  const getRunBaselineNames = (runId: number): string[] => {
+    const names: string[] = []
+    const addName = (n: string) => {
+      if (n && !names.includes(n)) names.push(n)
+    }
+    for (const b of savedBaselines) {
+      if (b.run_id === runId) addName(b.name)
+    }
+    const histRun = historyRuns.find((r) => r.id === runId)
+    if (histRun?.baselines) {
+      for (const b of histRun.baselines) addName(b.name)
+    }
+    const cmpRun = compareState?.data?.runs.find((r) => r.run_id === runId)
+    if (cmpRun?.baselines) {
+      for (const b of cmpRun.baselines) addName(b.name)
+    }
+    return names
+  }
+
   const effectiveBaselineId =
     baselineRunId !== null && selectedRunIds.includes(baselineRunId)
       ? baselineRunId
@@ -99,9 +186,24 @@ export function CompareView() {
         ? selectedRunIds[0]
         : null
 
+  // Partition selected runs into baseline names (for runs that are baselines) and regular run_ids
+  const selectedBaselineNames: string[] = []
+  const nonBaselineRunIds: number[] = []
+  for (const id of selectedRunIds) {
+    const bNames = getRunBaselineNames(id)
+    if (bNames.length > 0) {
+      if (!selectedBaselineNames.includes(bNames[0])) {
+        selectedBaselineNames.push(bNames[0])
+      }
+    } else {
+      nonBaselineRunIds.push(id)
+    }
+  }
+
   // Sync state changes to shareable URL
   const shareablePath = buildCompareUrlPath({
-    runIds: selectedRunIds,
+    baselines: selectedBaselineNames.length > 0 ? selectedBaselineNames : undefined,
+    runIds: nonBaselineRunIds,
     baselineRunId: effectiveBaselineId,
     threshold,
     filterMode,
@@ -109,11 +211,14 @@ export function CompareView() {
   })
 
   useEffect(() => {
+    if (loadingBaselines && initial.baselines && initial.baselines.length > 0) {
+      return
+    }
     const currentFullPath = buildCompareUrlPath(parseCompareUrlParams(route.params))
     if (currentFullPath !== shareablePath) {
       navigate(shareablePath, { replace: true })
     }
-  }, [shareablePath, route.params, navigate])
+  }, [shareablePath, route.params, navigate, loadingBaselines, initial.baselines])
 
   const requestKey =
     selectedRunIds.length >= 2
@@ -161,17 +266,22 @@ export function CompareView() {
   const compareError =
     requestKey !== null && compareState?.key === requestKey ? compareState.error : null
 
-  const handleToggleRun = (runId: number) => {
+  const handleToggleRun = (runId: number, isFromBaselineSection = false) => {
     setSelectedRunIds((prev) => {
       if (prev.includes(runId)) {
         const next = prev.filter((id) => id !== runId)
         if (baselineRunId === runId) {
           setBaselineRunId(next.length > 0 ? next[0] : null)
+          setHasExplicitReference(false)
         }
         return next
       } else {
         const next = [...prev, runId]
-        if (next.length === 1) {
+        const isBaselineRun = isFromBaselineSection || getRunBaselineNames(runId).length > 0
+        if (isBaselineRun && (!hasExplicitReference || baselineRunId === null)) {
+          setBaselineRunId(runId)
+          setHasExplicitReference(true)
+        } else if (next.length === 1) {
           setBaselineRunId(runId)
         }
         return next
@@ -184,6 +294,7 @@ export function CompareView() {
       setSelectedRunIds((prev) => [runId, ...prev])
     }
     setBaselineRunId(runId)
+    setHasExplicitReference(true)
   }
 
   const handleCopyShareableUrl = async () => {
@@ -207,9 +318,41 @@ export function CompareView() {
     selectedRunIds.length > 0
       ? historyRuns.find((r) => r.id === selectedRunIds[0])
       : undefined
-  const activeTester = firstSelectedRun ? getRunTester(firstSelectedRun) : null
+  const firstSelectedBaseline =
+    selectedRunIds.length > 0
+      ? savedBaselines.find((b) => b.run_id === selectedRunIds[0])
+      : undefined
+  const activeTester = firstSelectedRun
+    ? getRunTester(firstSelectedRun)
+    : firstSelectedBaseline?.tester || null
 
   const uniqueTesters = Array.from(new Set(historyRuns.map((r) => getRunTester(r))))
+  const uniqueBaselineTesters = Array.from(
+    new Set(
+      savedBaselines
+        .map((b) => b.tester)
+        .filter((t): t is string => Boolean(t))
+    )
+  )
+
+  const filteredSavedBaselines = savedBaselines.filter((b) => {
+    if (baselineTesterFilter !== 'all' && b.tester !== baselineTesterFilter) {
+      return false
+    }
+    if (baselineSearch.trim()) {
+      const q = baselineSearch.toLowerCase()
+      return (
+        b.name.toLowerCase().includes(q) ||
+        (b.description || '').toLowerCase().includes(q) ||
+        (b.tester || '').toLowerCase().includes(q) ||
+        (b.target || '').toLowerCase().includes(q) ||
+        (b.model || '').toLowerCase().includes(q) ||
+        `#${b.run_id}`.includes(q) ||
+        String(b.run_id).includes(q)
+      )
+    }
+    return true
+  })
 
   const filteredPickerRuns = historyRuns.filter((r) => {
     const tester = getRunTester(r)
@@ -221,8 +364,12 @@ export function CompareView() {
       const targetName = ((r.target_snapshot?.name as string) || '').toLowerCase()
       const modelName = (getRunModel(r) || '').toLowerCase()
       const matchesId = `#${r.id}`.includes(q) || String(r.id).includes(q)
+      const matchesBaseline = getRunBaselineNames(r.id).some((n) =>
+        n.toLowerCase().includes(q)
+      )
       return (
         matchesId ||
+        matchesBaseline ||
         tester.toLowerCase().includes(q) ||
         targetName.includes(q) ||
         modelName.includes(q)
@@ -281,6 +428,17 @@ export function CompareView() {
         </div>
       </div>
 
+      {unknownBaselines.length > 0 && (
+        <div
+          className="banner error-banner"
+          style={{ marginBottom: '12px' }}
+          data-testid="unknown-baselines-banner"
+        >
+          Unknown baseline{unknownBaselines.length === 1 ? '' : 's'}:{' '}
+          <strong>{unknownBaselines.join(', ')}</strong>. Check the name or pick from saved baselines below.
+        </div>
+      )}
+
       {/* Shareable URL & Controls Bar */}
       <div className="card compare-toolbar-card">
         <div className="compare-toolbar-row">
@@ -294,7 +452,9 @@ export function CompareView() {
                 {selectedRunIds.map((id) => {
                   const isBase = id === effectiveBaselineId
                   const runObj = historyRuns.find((r) => r.id === id)
-                  const model = runObj ? getRunModel(runObj) : null
+                  const baseObj = savedBaselines.find((b) => b.run_id === id)
+                  const model = (runObj ? getRunModel(runObj) : null) || baseObj?.model || null
+                  const baselineNames = getRunBaselineNames(id)
                   return (
                     <span
                       key={id}
@@ -304,17 +464,31 @@ export function CompareView() {
                       <Link href={`/runs/${id}`} className="pill-run-link">
                         #{id}
                       </Link>
+                      {baselineNames.map((bName) => (
+                        <span
+                          key={bName}
+                          className="pill-baseline-name"
+                          data-testid={`pill-baseline-name-${id}`}
+                          style={{
+                            color: '#fbbf24',
+                            fontWeight: 600,
+                            marginLeft: '4px',
+                          }}
+                        >
+                          ★ {bName}
+                        </span>
+                      ))}
                       {model && <span className="pill-model-text">({model})</span>}
                       {isBase ? (
-                        <span className="baseline-mini-tag">Baseline</span>
+                        <span className="baseline-mini-tag">Reference run</span>
                       ) : (
                         <button
                           type="button"
                           className="pill-base-btn"
                           onClick={() => handleSelectBaseline(id)}
-                          title={`Set Run #${id} as Baseline`}
+                          title={`Set Run #${id} as Reference run`}
                         >
-                          Set Base
+                          Set Reference
                         </button>
                       )}
                       <button
@@ -339,15 +513,15 @@ export function CompareView() {
           </div>
         </div>
 
-        {/* Controls Row: Baseline Picker, Threshold, Filter Mode */}
+        {/* Controls Row: Reference Run Picker, Threshold, Filter Mode */}
         <div className="compare-controls-row">
           <div className="filter-group">
             <label htmlFor="compare-baseline-select" className="filter-label">
-              Baseline Run:
+              Reference run:
             </label>
             <select
               id="compare-baseline-select"
-              aria-label="Baseline Run"
+              aria-label="Reference run"
               className="filter-select font-mono"
               value={effectiveBaselineId ?? ''}
               disabled={selectedRunIds.length === 0}
@@ -360,13 +534,21 @@ export function CompareView() {
               {selectedRunIds.length === 0 && <option value="">—</option>}
               {selectedRunIds.map((id) => {
                 const r = historyRuns.find((item) => item.id === id)
+                const bObj = savedBaselines.find((item) => item.run_id === id)
                 const meta = compareData?.runs.find((item) => item.run_id === id)
-                const labelTarget = meta?.target_name || (r?.target_snapshot?.name as string) || ''
-                const labelModel = meta?.model || (r ? getRunModel(r) : '') || ''
+                const labelTarget =
+                  meta?.target_name ||
+                  (r?.target_snapshot?.name as string) ||
+                  bObj?.target ||
+                  ''
+                const labelModel =
+                  meta?.model || (r ? getRunModel(r) : '') || bObj?.model || ''
                 const details = [labelTarget, labelModel].filter(Boolean).join(' • ')
+                const bNames = getRunBaselineNames(id)
                 return (
                   <option key={id} value={id}>
                     Run #{id}
+                    {bNames.length > 0 ? ` ★ ${bNames.join(', ')}` : ''}
                     {details ? ` (${details})` : ''}
                   </option>
                 )
@@ -433,6 +615,167 @@ export function CompareView() {
       {/* Run Picker Panel */}
       {(pickerExpanded || selectedRunIds.length < 2) && (
         <div className="card run-picker-card" data-testid="run-picker-panel">
+          {/* Baselines Section (independent of 100-run limit) */}
+          <div
+            className="picker-baselines-section"
+            data-testid="picker-baselines-section"
+            style={{
+              marginBottom: '20px',
+              paddingBottom: '16px',
+              borderBottom: '1px solid var(--border-subtle, #334155)',
+            }}
+          >
+            <div className="compare-section-header" style={{ marginBottom: '8px' }}>
+              <div>
+                <h3 className="section-title" style={{ marginBottom: '2px' }}>
+                  ★ Baselines
+                </h3>
+                <span className="section-desc">
+                  Named baselines preserved across all runs (independent of recent run history limit). Picking a baseline sets it as the Reference run by default.
+                </span>
+              </div>
+            </div>
+
+            <div className="filter-bar" style={{ marginBottom: '10px' }}>
+              <div className="search-input-wrapper">
+                <span className="search-icon">🔍</span>
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="Search baselines by name..."
+                  aria-label="Search baselines by name"
+                  value={baselineSearch}
+                  onChange={(e) => setBaselineSearch(e.target.value)}
+                  data-testid="baseline-picker-search"
+                />
+              </div>
+
+              <div className="filter-group">
+                <label htmlFor="baseline-picker-tester" className="filter-label">
+                  Tester:
+                </label>
+                <select
+                  id="baseline-picker-tester"
+                  aria-label="Filter baselines by tester"
+                  className="filter-select"
+                  value={baselineTesterFilter}
+                  onChange={(e) => setBaselineTesterFilter(e.target.value)}
+                  data-testid="baseline-picker-tester"
+                >
+                  <option value="all">All Testers ({uniqueBaselineTesters.length})</option>
+                  {uniqueBaselineTesters.map((t) => (
+                    <option key={t} value={t}>
+                      {t.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {loadingBaselines ? (
+              <div className="text-muted empty-inline-msg">Loading baselines...</div>
+            ) : filteredSavedBaselines.length === 0 ? (
+              <div className="text-muted empty-inline-msg" data-testid="no-baselines-msg">
+                No saved baselines match the filter criteria.
+              </div>
+            ) : (
+              <div className="table-responsive run-picker-table-wrapper">
+                <table className="data-table" data-testid="baselines-picker-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '44px' }}>Pick</th>
+                      <th>Baseline</th>
+                      <th>Run</th>
+                      <th>Result</th>
+                      <th>Tester</th>
+                      <th>Target</th>
+                      <th>Model</th>
+                      <th>Reference run</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredSavedBaselines.map((b) => {
+                      const isChecked = selectedRunIds.includes(b.run_id)
+                      const isBase = b.run_id === effectiveBaselineId
+                      const tester = b.tester || 'unknown'
+                      const isTesterMismatch =
+                        !allowDifferentTesters &&
+                        activeTester !== null &&
+                        !isChecked &&
+                        tester !== activeTester
+
+                      return (
+                        <tr
+                          key={b.id}
+                          className={`${isChecked ? 'row-selected' : ''} ${isTesterMismatch ? 'row-disabled' : ''}`}
+                          data-testid={`picker-baseline-row-${b.name}`}
+                        >
+                          <td>
+                            <input
+                              type="checkbox"
+                              aria-label={`Select baseline ${b.name}`}
+                              checked={isChecked}
+                              disabled={isTesterMismatch}
+                              onChange={() => handleToggleRun(b.run_id, true)}
+                              data-testid={`pick-baseline-checkbox-${b.id}`}
+                            />
+                          </td>
+                          <td>
+                            <span
+                              className="font-semibold"
+                              style={{ color: '#fbbf24' }}
+                            >
+                              ★ {b.name}
+                            </span>
+                            {b.description && (
+                              <div className="text-muted" style={{ fontSize: '11px' }}>
+                                {b.description}
+                              </div>
+                            )}
+                          </td>
+                          <td className="font-mono font-bold">#{b.run_id}</td>
+                          <td>
+                            <Badge status={b.status || 'completed'} size="sm" />
+                          </td>
+                          <td>
+                            <span className="kind-badge">{tester}</span>
+                          </td>
+                          <td className="font-mono">{b.target || 'None'}</td>
+                          <td className="font-mono text-muted">{b.model || '—'}</td>
+                          <td>
+                            {isChecked ? (
+                              isBase ? (
+                                <span className="baseline-badge">REFERENCE RUN</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn-sm btn-secondary"
+                                  onClick={() => handleSelectBaseline(b.run_id)}
+                                >
+                                  Set Reference run
+                                </button>
+                              )
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-sm btn-secondary"
+                                disabled={isTesterMismatch}
+                                onClick={() => handleToggleRun(b.run_id, true)}
+                                data-testid={`pick-baseline-btn-${b.name}`}
+                              >
+                                + Pick Baseline
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
           <div className="compare-section-header">
             <div>
               <h3 className="section-title" style={{ marginBottom: '2px' }}>
@@ -452,6 +795,7 @@ export function CompareView() {
                 onClick={() => {
                   setSelectedRunIds([])
                   setBaselineRunId(null)
+                  setHasExplicitReference(false)
                 }}
               >
                 Clear Selection
@@ -519,7 +863,7 @@ export function CompareView() {
                     <th>Target</th>
                     <th>Model</th>
                     <th>Executed</th>
-                    <th>Baseline</th>
+                    <th>Reference run</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -535,6 +879,7 @@ export function CompareView() {
                       activeTester !== null &&
                       !isChecked &&
                       tester !== activeTester
+                    const runBaselineNames = getRunBaselineNames(r.id)
 
                     return (
                       <tr
@@ -551,7 +896,22 @@ export function CompareView() {
                             onChange={() => handleToggleRun(r.id)}
                           />
                         </td>
-                        <td className="font-mono font-bold">#{r.id}</td>
+                        <td className="font-mono font-bold">
+                          #{r.id}
+                          {runBaselineNames.map((bName) => (
+                            <span
+                              key={bName}
+                              style={{
+                                marginLeft: '6px',
+                                color: '#fbbf24',
+                                fontSize: '11px',
+                                fontWeight: 600,
+                              }}
+                            >
+                              ★ {bName}
+                            </span>
+                          ))}
+                        </td>
                         <td>
                           <Badge
                             status={primaryRes ? primaryRes.status : r.status}
@@ -573,14 +933,14 @@ export function CompareView() {
                         <td>
                           {isChecked ? (
                             isBase ? (
-                              <span className="baseline-badge">BASELINE</span>
+                              <span className="baseline-badge">REFERENCE RUN</span>
                             ) : (
                               <button
                                 type="button"
                                 className="btn btn-sm btn-secondary"
                                 onClick={() => handleSelectBaseline(r.id)}
                               >
-                                Set Baseline
+                                Set Reference run
                               </button>
                             )
                           ) : (
@@ -614,7 +974,7 @@ export function CompareView() {
               : `Run #${selectedRunIds[0]} selected — pick at least 1 more run`}
           </h3>
           <p>
-            Choose runs from the history table above to view aligned metric deltas, regression flags, per-case diffs, and side-by-side artifacts.
+            Choose runs from the baselines or history table above to view aligned metric deltas, regression flags, per-case diffs, and side-by-side artifacts.
           </p>
         </div>
       ) : loadingCompare ? (
@@ -649,7 +1009,7 @@ export function CompareView() {
                 <span className="text-muted" style={{ fontSize: '12px' }}>
                   Comparing {compareData.runs.length} runs for tester{' '}
                   <strong className="font-mono">{compareData.tester.toUpperCase()}</strong> against
-                  Baseline <strong>Run #{compareData.baseline_run_id}</strong>
+                  Reference run <strong>Run #{compareData.baseline_run_id}</strong>
                   {compareData.threshold > 0
                     ? ` (threshold: ±${compareData.threshold}%)`
                     : ''}

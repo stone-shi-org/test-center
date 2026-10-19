@@ -661,6 +661,13 @@ describe('CompareView and Compare UI components', () => {
   it('picks runs from history in CompareView and renders full comparison', async () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.startsWith('/api/baselines')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+        } as Response
+      }
       if (url.startsWith('/api/runs?')) {
         return {
           ok: true,
@@ -712,6 +719,13 @@ describe('CompareView and Compare UI components', () => {
   it('renders config diff header, metric delta table, charts, per-case diff, and side-by-side artifacts', async () => {
     vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input)
+      if (url.startsWith('/api/baselines')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+        } as Response
+      }
       if (url.startsWith('/api/runs?')) {
         return {
           ok: true,
@@ -767,6 +781,7 @@ describe('CompareView and Compare UI components', () => {
     expect(configHeader.textContent).toContain('vllm-h100')
     expect(configHeader.textContent).toContain('Qwen2.5-7B-Instruct')
     expect(configHeader.textContent).toContain('Qwen2.5-32B-Instruct')
+    expect(configHeader.textContent).toContain('REFERENCE RUN')
     expect(screen.getByTestId('config-diff-table').textContent).toContain('config.max_tokens')
 
     // 2. Bar and Line Charts for Key Metrics
@@ -831,7 +846,7 @@ describe('CompareView and Compare UI components', () => {
       expect(sbsDrawer.textContent).toContain('Run 2 Report')
     })
 
-    // 7. Switching baseline re-queries /api/compare with new baseline_run_id
+    // 7. Switching reference run re-queries /api/compare with new baseline_run_id
     const baselineSelect = screen.getByTestId('baseline-select')
     fireEvent.change(baselineSelect, { target: { value: '2' } })
 
@@ -903,5 +918,238 @@ describe('CompareView and Compare UI components', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /Compare/i }))
     expect(navigate).toHaveBeenCalledWith('/compare?run_ids=1&baseline_run_id=1')
+  })
+
+  it('supports Baselines section in CompareView, resolves ?baselines= URL param, shows unknown baseline message, and emits baselines= in shareable URL', async () => {
+    const mockSavedBaselines = [
+      {
+        id: 11,
+        name: 'prod-qwen-v1',
+        run_id: 1,
+        description: 'Golden Qwen 7B baseline',
+        history: [],
+        created_at: '2026-10-01T10:00:00Z',
+        updated_at: '2026-10-01T10:00:00Z',
+        status: 'completed',
+        tester: 'llm',
+        target: 'vllm-a100',
+        model: 'Qwen2.5-7B-Instruct',
+        finished_at: '2026-10-01T10:00:05Z',
+        headline_metrics: {},
+        metrics: {},
+      },
+    ]
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith('/api/baselines')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => mockSavedBaselines,
+        } as Response
+      }
+      if (url.startsWith('/api/runs?')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => mockHistoryRuns,
+        } as Response
+      }
+      if (url.startsWith('/api/compare')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...mockCompareResponse,
+            runs: [
+              {
+                ...mockCompareResponse.runs[0],
+                baselines: [{ id: 11, name: 'prod-qwen-v1' }],
+              },
+              mockCompareResponse.runs[1],
+            ],
+          }),
+        } as Response
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    })
+
+    const navigate = vi.fn()
+    render(
+      <RouterContext.Provider
+        value={{
+          route: matchRoute('/compare?baselines=prod-qwen-v1,missing-base&run_ids=2'),
+          navigate,
+        }}
+      >
+        <CompareView />
+      </RouterContext.Provider>
+    )
+
+    // Unknown baseline banner is shown for missing-base
+    await waitFor(() => {
+      expect(screen.getByTestId('unknown-baselines-banner').textContent).toContain(
+        'missing-base'
+      )
+    })
+
+    // Comparison loads with Run #1 (resolved from prod-qwen-v1) as Reference run and Run #2
+    await waitFor(() => {
+      expect(screen.getByTestId('compare-results')).toBeDefined()
+    })
+
+    // Pill and card show the baseline name next to Run #1
+    expect(screen.getByTestId('pill-baseline-name-1').textContent).toContain(
+      '★ prod-qwen-v1'
+    )
+    expect(screen.getByTestId('card-named-baseline-1-prod-qwen-v1').textContent).toContain(
+      '★ prod-qwen-v1'
+    )
+
+    // Shareable URL uses baselines=prod-qwen-v1 for Run #1 and run_ids=2 for Run #2
+    const urlBox = screen.getByTestId('shareable-url-box')
+    expect(urlBox.textContent).toContain('baselines=prod-qwen-v1')
+    expect(urlBox.textContent).toContain('run_ids=2')
+  })
+
+  it('saves, moves on 409 conflict, renames, and removes a baseline in RunDetailView', async () => {
+    let currentRun: Run = {
+      ...mockHistoryRuns[0],
+      baselines: [],
+      previous_baselines: [{ id: 99, name: 'old-baseline', from: '2026-09-01', to: '2026-09-10' }],
+    }
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('/api/runs/1/logs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ run_id: 1, status: 'completed', lines: [], raw: '' }),
+        } as Response
+      }
+      if (url === '/api/runs/1/baseline' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}'))
+        if (!body.move) {
+          return {
+            ok: false,
+            status: 409,
+            json: async () => ({
+              detail: {
+                message: `Baseline '${body.name}' already exists on Run #5`,
+                baseline_id: 50,
+                name: body.name,
+                run_id: 5,
+                current_run_id: 5,
+              },
+            }),
+          } as Response
+        }
+        currentRun = {
+          ...currentRun,
+          baselines: [{ id: 50, name: body.name, description: body.description }],
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: 50,
+            name: body.name,
+            run_id: 1,
+            description: body.description,
+            history: [{ run_id: 5, from: '2026-09-01', to: '2026-10-01' }],
+          }),
+        } as Response
+      }
+      if (url === '/api/baselines/50' && init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body || '{}'))
+        currentRun = {
+          ...currentRun,
+          baselines: [{ id: 50, name: body.name, description: body.description }],
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: 50, name: body.name, run_id: 1 }),
+        } as Response
+      }
+      if (url === '/api/baselines/50' && init?.method === 'DELETE') {
+        currentRun = {
+          ...currentRun,
+          baselines: [],
+        }
+        return {
+          ok: true,
+          status: 204,
+          text: async () => '',
+        } as Response
+      }
+      if (url === '/api/runs/1') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => currentRun,
+        } as Response
+      }
+      throw new Error(`Unexpected URL: ${url}`)
+    })
+
+    const navigate = vi.fn()
+    render(
+      <RouterContext.Provider value={{ route: matchRoute('/runs/1'), navigate }}>
+        <RunDetailView runId={1} />
+      </RouterContext.Provider>
+    )
+
+    // Shows "previously baseline 'old-baseline'"
+    await waitFor(() => {
+      expect(screen.getByTestId('previous-baseline-tag-99').textContent).toContain(
+        "previously baseline 'old-baseline'"
+      )
+    })
+
+    // Click "★ Save as baseline"
+    fireEvent.click(screen.getByTestId('save-baseline-btn'))
+    const dialog = screen.getByTestId('save-baseline-dialog')
+    expect(dialog).toBeDefined()
+
+    // Name input is pre-filled with tester · model · date
+    const nameInput = screen.getByTestId('baseline-name-input') as HTMLInputElement
+    expect(nameInput.value).toContain('llm · Qwen2.5-7B-Instruct')
+    fireEvent.change(nameInput, { target: { value: 'shared-baseline' } })
+
+    // Submit -> triggers 409 conflict showing Run #5 and "Move 'shared-baseline' to this run"
+    fireEvent.click(screen.getByTestId('confirm-save-baseline-btn'))
+    await waitFor(() => {
+      expect(screen.getByTestId('baseline-conflict-banner').textContent).toContain(
+        'Run #5'
+      )
+    })
+
+    // Click Move to this run -> succeeds and shows badge
+    fireEvent.click(screen.getByTestId('move-baseline-btn'))
+    await waitFor(() => {
+      expect(screen.getByTestId('run-baseline-badge-50').textContent).toContain(
+        '★ shared-baseline'
+      )
+    })
+
+    // Rename baseline
+    fireEvent.click(screen.getByTestId('rename-baseline-btn-50'))
+    const editInput = screen.getByTestId('rename-baseline-input') as HTMLInputElement
+    fireEvent.change(editInput, { target: { value: 'renamed-baseline' } })
+    fireEvent.click(screen.getByTestId('confirm-rename-baseline-btn'))
+    await waitFor(() => {
+      expect(screen.getByTestId('run-baseline-badge-50').textContent).toContain(
+        '★ renamed-baseline'
+      )
+    })
+
+    // Remove baseline
+    fireEvent.click(screen.getByTestId('remove-baseline-btn-50'))
+    await waitFor(() => {
+      expect(screen.queryByTestId('run-baseline-badge-50')).toBeNull()
+    })
   })
 })

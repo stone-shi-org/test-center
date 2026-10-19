@@ -384,6 +384,85 @@ export interface RunResult {
   artifacts: Artifact[]
 }
 
+export interface RunBaselineBadge {
+  id: number
+  name: string
+  description?: string | null
+}
+
+export interface PreviousBaselineRef {
+  id: number
+  name: string
+  current_run_id?: number
+  from?: string | null
+  to?: string | null
+}
+
+export interface BaselineHistoryEntry {
+  run_id: number
+  from?: string | null
+  to?: string | null
+}
+
+export interface Baseline {
+  id: number
+  name: string
+  run_id: number
+  description?: string | null
+  history: BaselineHistoryEntry[]
+  created_at?: string | null
+  updated_at?: string | null
+  status?: RunStatus | string | null
+  run_status?: RunStatus | string | null
+  tester?: string | null
+  testers?: string[]
+  target?: string | null
+  target_name?: string | null
+  target_id?: number | null
+  model?: string | null
+  models?: string[]
+  finished_at?: string | null
+  started_at?: string | null
+  queued_at?: string | null
+  headline_metrics?: Record<string, unknown>
+  metrics?: Record<string, unknown>
+  run?: {
+    id: number
+    status?: RunStatus | string | null
+    tester?: string | null
+    testers?: string[]
+    target?: string | null
+    target_name?: string | null
+    target_id?: number | null
+    model?: string | null
+    models?: string[]
+    finished_at?: string | null
+    started_at?: string | null
+    queued_at?: string | null
+    metrics?: Record<string, unknown>
+  }
+}
+
+export type BaselineItem = Baseline
+
+export interface CreateBaselineRequest {
+  name: string
+  description?: string | null
+  move?: boolean
+}
+
+export interface UpdateBaselineRequest {
+  name?: string
+  description?: string | null
+}
+
+export interface BaselinesFilterParams {
+  q?: string
+  tester?: string
+  target?: string
+  model?: string
+}
+
 export interface Run {
   id: number
   job_id: number | null
@@ -426,6 +505,8 @@ export interface Run {
   bamboo?: BambooBuildMetadata | null
   bamboo_report?: BambooReportSummary | null
   junit_url?: string
+  baselines?: RunBaselineBadge[]
+  previous_baselines?: PreviousBaselineRef[]
   results: RunResult[]
 }
 
@@ -580,6 +661,7 @@ export interface ComparedRunMeta {
   job_id: number | null
   test_definition_id: number | null
   is_baseline: boolean
+  baselines?: RunBaselineBadge[]
   tester: string
   status: ResultStatus | string
   result_status: ResultStatus | string
@@ -686,6 +768,7 @@ export interface CompareResponse {
 
 export interface CompareParams {
   run_ids?: number[]
+  baselines?: string[]
   result_ids?: number[]
   baseline_run_id?: number | null
   baseline_result_id?: number | null
@@ -706,6 +789,7 @@ export interface RunsFilterParams {
   model?: string
   job_id?: number
   job?: string
+  baseline?: boolean
   date_from?: string
   date_to?: string
   date?: string
@@ -789,6 +873,7 @@ export interface RetentionStats {
   artifacts_size_bytes: number
   eligible_runs_count: number
   eligible_run_ids: number[]
+  baseline_runs_protected?: number
 }
 
 export interface RetentionSettings {

@@ -6,6 +6,7 @@ export interface ParsedCompareParams {
   threshold: number
   filterMode: CompareFilterMode
   suite: string
+  baselines?: string[]
 }
 
 export function parseCompareUrlParams(
@@ -19,6 +20,15 @@ export function parseCompareUrlParams(
     const num = parseInt(trimmed, 10)
     if (!Number.isNaN(num) && !runIds.includes(num)) {
       runIds.push(num)
+    }
+  }
+
+  const rawBaselines = params.baselines || ''
+  const baselines: string[] = []
+  for (const part of rawBaselines.split(',')) {
+    const trimmed = part.trim()
+    if (trimmed && !baselines.includes(trimmed)) {
+      baselines.push(trimmed)
     }
   }
 
@@ -45,6 +55,7 @@ export function parseCompareUrlParams(
     threshold,
     filterMode,
     suite,
+    ...(baselines.length > 0 ? { baselines } : {}),
   }
 }
 
@@ -54,8 +65,12 @@ export function buildCompareUrlPath(opts: {
   threshold?: number
   filterMode?: CompareFilterMode
   suite?: string
+  baselines?: string[]
 }): string {
   const query = new URLSearchParams()
+  if (opts.baselines && opts.baselines.length > 0) {
+    query.set('baselines', opts.baselines.join(','))
+  }
   if (opts.runIds.length > 0) {
     query.set('run_ids', opts.runIds.join(','))
   }

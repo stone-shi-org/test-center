@@ -10,6 +10,7 @@ from backend.app.db.models import (
     Result,
     CaseResult,
     Artifact,
+    Baseline,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "Result",
     "CaseResult",
     "Artifact",
+    "Baseline",
 ]

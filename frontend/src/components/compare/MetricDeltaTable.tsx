@@ -54,7 +54,7 @@ export function MetricDeltaTable({
             {visibleMetrics.length !== totalMetricsCount ? ` of ${totalMetricsCount}` : ''})
           </h3>
           <span className="section-desc">
-            Top-level metrics aligned across runs with absolute &amp; percentage deltas vs baseline
+            Top-level metrics aligned across runs with absolute &amp; percentage deltas vs reference run
           </span>
         </div>
 
@@ -86,7 +86,11 @@ export function MetricDeltaTable({
                   <th key={`${r.run_id}-${r.result_id}`}>
                     <div className="th-run-header">
                       <span>
-                        Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                        Run #{r.run_id}
+                        {r.baselines && r.baselines.length > 0
+                          ? ` ★ ${r.baselines.map((b) => b.name).join(', ')}`
+                          : ''}
+                        {r.is_baseline ? ' (Reference run)' : ''}
                       </span>
                       {(r.model || r.target_name) && (
                         <span className="th-run-sub font-mono">
@@ -156,7 +160,7 @@ export function MetricDeltaTable({
                               {formatMetricNumber(cell.value)}
                               {m.unit ? <span className="text-muted"> {m.unit}</span> : null}
                             </div>
-                            <div className="metric-cell-sub text-muted">Baseline</div>
+                            <div className="metric-cell-sub text-muted">Reference run</div>
                           </td>
                         )
                       }

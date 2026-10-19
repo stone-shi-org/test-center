@@ -120,6 +120,7 @@ export function RunsListView() {
   const [jobFilter, setJobFilter] = useState<string>(route.params.job || 'all')
   const [dateFrom, setDateFrom] = useState<string>(route.params.date_from || '')
   const [dateTo, setDateTo] = useState<string>(route.params.date_to || '')
+  const [baselinesOnly, setBaselinesOnly] = useState<boolean>(route.params.baseline === 'true')
 
   const [selectedRunIds, setSelectedRunIds] = useState<number[]>([])
   const [showTrendChart, setShowTrendChart] = useState(true)
@@ -219,6 +220,11 @@ export function RunsListView() {
     : null
 
   const filteredRuns = runs.filter((r) => {
+    // 0. Baselines only filter
+    if (baselinesOnly && (!r.baselines || r.baselines.length === 0)) {
+      return false
+    }
+
     // 1. Status filter
     let matchesStatus = true
     if (statusFilter !== 'all') {
@@ -278,7 +284,8 @@ export function RunsListView() {
     targetFilter !== 'all' ||
     jobFilter !== 'all' ||
     dateFrom !== '' ||
-    dateTo !== ''
+    dateTo !== '' ||
+    baselinesOnly
 
   const clearFilters = () => {
     setStatusFilter('all')
@@ -287,6 +294,7 @@ export function RunsListView() {
     setJobFilter('all')
     setDateFrom('')
     setDateTo('')
+    setBaselinesOnly(false)
   }
 
   const formatDuration = (r: Run): string => {
@@ -488,6 +496,19 @@ export function RunsListView() {
           />
         </div>
 
+        <div className="filter-group" style={{ display: 'flex', alignItems: 'center' }}>
+          <label className="checkbox-label" style={{ cursor: 'pointer', userSelect: 'none' }}>
+            <input
+              type="checkbox"
+              data-testid="runs-baselines-only-toggle"
+              aria-label="Baselines only"
+              checked={baselinesOnly}
+              onChange={(e) => setBaselinesOnly(e.target.checked)}
+            />
+            <span>★ Baselines only</span>
+          </label>
+        </div>
+
         {hasActiveFilters && (
           <button
             type="button"
@@ -568,9 +589,21 @@ export function RunsListView() {
                     </td>
                     <td>
                       <div>
-                        <Link href={`/runs/${r.id}`} className="font-mono font-bold table-link">
-                          #{r.id}
-                        </Link>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <Link href={`/runs/${r.id}`} className="font-mono font-bold table-link">
+                            #{r.id}
+                          </Link>
+                          {r.baselines &&
+                            r.baselines.map((b) => (
+                              <span
+                                key={b.id}
+                                className="baseline-mini-tag"
+                                data-testid={`runs-list-baseline-badge-${b.id}`}
+                              >
+                                ★ {b.name}
+                              </span>
+                            ))}
+                        </div>
                         {r.job_id && (
                           <div className="text-muted text-sm">
                             Job: {r.job_name || (r.config_snapshot?.job_name as string) || `#${r.job_id}`}

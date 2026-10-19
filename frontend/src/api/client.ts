@@ -4,9 +4,12 @@ import type {
   Artifact,
   ArtifactContentResponse,
   BambooIntegrationInfo,
+  Baseline,
+  BaselinesFilterParams,
   CaseResult,
   CompareParams,
   CompareResponse,
+  CreateBaselineRequest,
   CreateRunRequest,
   CronValidationResult,
   HealthResponse,
@@ -38,6 +41,7 @@ import type {
   TrendResponse,
   TriggerDefinitionRunRequest,
   TriggerJobRunRequest,
+  UpdateBaselineRequest,
 } from './types.ts'
 
 export class ApiError extends Error {
@@ -283,6 +287,7 @@ export const api = {
       if (params?.model) query.set('model', params.model)
       if (params?.job_id !== undefined) query.set('job_id', String(params.job_id))
       if (params?.job) query.set('job', params.job)
+      if (params?.baseline !== undefined) query.set('baseline', String(params.baseline))
       if (params?.date_from) query.set('date_from', params.date_from)
       if (params?.date_to) query.set('date_to', params.date_to)
       if (params?.date) query.set('date', params.date)
@@ -294,6 +299,11 @@ export const api = {
     get: (id: number) => request<Run>(`/runs/${id}`),
     create: (data: CreateRunRequest) =>
       request<Run>('/runs', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    saveBaseline: (id: number, data: CreateBaselineRequest) =>
+      request<Baseline>(`/runs/${id}/baseline`, {
         method: 'POST',
         body: JSON.stringify(data),
       }),
@@ -374,6 +384,28 @@ export const api = {
     },
   },
 
+  baselines: {
+    list: (params?: BaselinesFilterParams) => {
+      const query = new URLSearchParams()
+      if (params?.q) query.set('q', params.q)
+      if (params?.tester) query.set('tester', params.tester)
+      if (params?.target) query.set('target', params.target)
+      if (params?.model) query.set('model', params.model)
+      const qs = query.toString()
+      return request<Baseline[]>(`/baselines${qs ? `?${qs}` : ''}`)
+    },
+    get: (id: number) => request<Baseline>(`/baselines/${id}`),
+    update: (id: number, data: UpdateBaselineRequest) =>
+      request<Baseline>(`/baselines/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    delete: (id: number) =>
+      request<void>(`/baselines/${id}`, {
+        method: 'DELETE',
+      }),
+  },
+
   results: {
     getCases: (resultId: number, params?: { suite?: string; status?: string }) => {
       const query = new URLSearchParams()
@@ -395,6 +427,9 @@ export const api = {
       const query = new URLSearchParams()
       if (params.run_ids && params.run_ids.length > 0) {
         query.set('run_ids', params.run_ids.join(','))
+      }
+      if (params.baselines && params.baselines.length > 0) {
+        query.set('baselines', params.baselines.join(','))
       }
       if (params.result_ids && params.result_ids.length > 0) {
         query.set('result_ids', params.result_ids.join(','))

@@ -171,7 +171,11 @@ export function CaseDiffTable({
                   <th key={`${r.run_id}-${r.result_id}`}>
                     <div className="th-run-header">
                       <span>
-                        Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                        Run #{r.run_id}
+                        {r.baselines && r.baselines.length > 0
+                          ? ` ★ ${r.baselines.map((b) => b.name).join(', ')}`
+                          : ''}
+                        {r.is_baseline ? ' (Reference run)' : ''}
                       </span>
                       {(r.model || r.target_name) && (
                         <span className="th-run-sub font-mono">
@@ -379,7 +383,7 @@ export function CaseDiffTable({
                                         <th>Metric</th>
                                         {runs.map((r) => (
                                           <th key={`${r.run_id}-cm`}>
-                                            Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                                            Run #{r.run_id} {r.is_baseline ? '(Reference run)' : ''}
                                           </th>
                                         ))}
                                       </tr>
@@ -451,7 +455,7 @@ export function CaseDiffTable({
                                         <th>Diff</th>
                                         {runs.map((r) => (
                                           <th key={`${r.run_id}-dk`}>
-                                            Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                                            Run #{r.run_id} {r.is_baseline ? '(Reference run)' : ''}
                                           </th>
                                         ))}
                                       </tr>
@@ -511,7 +515,7 @@ export function CaseDiffTable({
                                 return (
                                   <div key={`${r.run_id}-raw`} className="drawer-col">
                                     <h5>
-                                      Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''} Detail JSON
+                                      Run #{r.run_id} {r.is_baseline ? '(Reference run)' : ''} Detail JSON
                                     </h5>
                                     <pre className="json-block font-mono">
                                       {cell?.present

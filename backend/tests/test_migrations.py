@@ -33,6 +33,7 @@ def test_alembic_migrations_lifecycle(tmp_path):
         "results",
         "case_results",
         "artifacts",
+        "baselines",
     }
     assert expected_tables.issubset(tables), f"Missing tables in migration: {expected_tables - tables}"
 
@@ -55,6 +56,9 @@ def test_alembic_migrations_lifecycle(tmp_path):
     assert "metrics" in result_columns
     assert "tester" in result_columns
 
+    baseline_columns = {col["name"] for col in inspector.get_columns("baselines")}
+    assert {"id", "name", "run_id", "description", "history", "created_at", "updated_at"}.issubset(baseline_columns)
+
     engine.dispose()
 
     # 2. Downgrade back to base
@@ -69,6 +73,7 @@ def test_alembic_migrations_lifecycle(tmp_path):
     assert "results" not in tables_after_downgrade
     assert "case_results" not in tables_after_downgrade
     assert "artifacts" not in tables_after_downgrade
+    assert "baselines" not in tables_after_downgrade
     engine.dispose()
 
     # 3. Upgrade to head again

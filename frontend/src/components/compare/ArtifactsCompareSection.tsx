@@ -108,7 +108,11 @@ export function ArtifactsCompareSection({
                   <th>Artifact Name</th>
                   {runs.map((r) => (
                     <th key={`${r.run_id}-${r.result_id}`}>
-                      Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                      Run #{r.run_id}
+                      {r.baselines && r.baselines.length > 0
+                        ? ` ★ ${r.baselines.map((b) => b.name).join(', ')}`
+                        : ''}
+                      {r.is_baseline ? ' (Reference run)' : ''}
                     </th>
                   ))}
                   <th>Side-by-Side</th>
@@ -245,7 +249,7 @@ export function ArtifactsCompareSection({
                             >
                               <div className="artifact-col-header">
                                 <span className="font-mono font-bold">
-                                  Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                                  Run #{r.run_id} {r.is_baseline ? '(Reference run)' : ''}
                                 </span>
                               </div>
                               <div className="json-block font-mono text-muted">
@@ -272,7 +276,7 @@ export function ArtifactsCompareSection({
                             <div className="artifact-col-header">
                               <div>
                                 <span className="font-mono font-bold">
-                                  Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                                  Run #{r.run_id} {r.is_baseline ? '(Reference run)' : ''}
                                 </span>
                                 {r.model && (
                                   <span className="text-muted font-mono"> • {r.model}</span>

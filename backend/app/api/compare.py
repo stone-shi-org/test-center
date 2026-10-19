@@ -56,6 +56,10 @@ class CompareRequest(BaseModel):
         default=None,
         description="List of Run IDs to compare (2+ items when combined with result_ids)",
     )
+    baselines: list[str] | None = Field(
+        default=None,
+        description="List of baseline names to resolve to Run IDs for comparison",
+    )
     result_ids: list[int] | None = Field(
         default=None,
         description="List of Result IDs to compare (2+ items when combined with run_ids)",
@@ -849,12 +853,18 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
         for a in result.artifacts
     ]
 
+    baselines_list = [
+        {"id": b.id, "name": b.name}
+        for b in sorted(run.baselines or [], key=lambda x: x.id)
+    ]
+
     return {
         "run_id": run.id,
         "result_id": result.id,
         "job_id": run.job_id,
         "test_definition_id": result.test_definition_id or config_snap.get("test_definition_id"),
         "is_baseline": is_baseline,
+        "baselines": baselines_list,
         "tester": result.tester,
         "status": result.status,
         "result_status": result.status,
@@ -945,10 +955,25 @@ def json_canonical(val: Any) -> str:
         return repr(val)
 
 
+def _parse_str_list_param(raw_values: list[str] | None) -> list[str]:
+    if not raw_values:
+        return []
+    parsed: list[str] = []
+    for item in raw_values:
+        if not item:
+            continue
+        for part in str(item).split(","):
+            part_str = part.strip()
+            if part_str:
+                parsed.append(part_str)
+    return parsed
+
+
 def compare_runs_and_results(
     db: Session,
     run_ids: list[int] | None = None,
     result_ids: list[int] | None = None,
+    baselines: list[str] | None = None,
     baseline_run_id: int | None = None,
     baseline_result_id: int | None = None,
     baseline_id: int | None = None,
@@ -961,8 +986,43 @@ def compare_runs_and_results(
     allow_different_testers: bool = False,
 ) -> dict[str, Any]:
     """Resolve runs/results from DB, align metrics and cases, and compute deltas."""
-    req_run_ids = list(run_ids or [])
+    from sqlalchemy import func
+    from backend.app.db.models.baseline import Baseline
+
+    resolved_baseline_run_ids: list[int] = []
+    if baselines:
+        for b_name in baselines:
+            clean_name = b_name.strip()
+            if not clean_name:
+                continue
+            b_obj = (
+                db.execute(
+                    select(Baseline).where(func.lower(Baseline.name) == clean_name.lower())
+                )
+                .scalars()
+                .first()
+            )
+            if not b_obj:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Baseline '{clean_name}' not found",
+                )
+            if b_obj.run_id not in resolved_baseline_run_ids:
+                resolved_baseline_run_ids.append(b_obj.run_id)
+
+    req_run_ids = list(resolved_baseline_run_ids)
+    for rid in (run_ids or []):
+        if rid not in req_run_ids:
+            req_run_ids.append(rid)
     req_result_ids = list(result_ids or [])
+
+    if (
+        resolved_baseline_run_ids
+        and baseline_id is None
+        and baseline_run_id is None
+        and baseline_result_id is None
+    ):
+        baseline_run_id = resolved_baseline_run_ids[0]
 
     if baseline_id is not None and baseline_run_id is None and baseline_result_id is None:
         if req_result_ids and not req_run_ids:
@@ -989,6 +1049,7 @@ def compare_runs_and_results(
         stmt_runs = (
             select(Run)
             .options(
+                selectinload(Run.baselines),
                 selectinload(Run.results).selectinload(Result.cases),
                 selectinload(Run.results).selectinload(Result.artifacts),
             )
@@ -1010,7 +1071,7 @@ def compare_runs_and_results(
         stmt_results = (
             select(Result)
             .options(
-                selectinload(Result.run),
+                selectinload(Result.run).selectinload(Run.baselines),
                 selectinload(Result.cases),
                 selectinload(Result.artifacts),
             )
@@ -1254,6 +1315,10 @@ def get_compare(
         None,
         description="Alias for run_ids",
     ),
+    baselines: list[str] | None = Query(
+        None,
+        description="Baseline names to resolve to their current Run IDs (comma-separated or repeated, e.g. ?baselines=prod-v1,prod-v2)",
+    ),
     result_ids: list[str] | None = Query(
         None,
         description="Result IDs to compare (comma-separated or repeated, e.g. ?result_ids=1,2 or ?result_ids=1&result_ids=2)",
@@ -1309,12 +1374,14 @@ def get_compare(
     """Compare 2+ runs or results via GET query parameters."""
     parsed_run_ids = _parse_id_list_param(run_ids, "run_ids") + _parse_id_list_param(runs, "runs")
     parsed_result_ids = _parse_id_list_param(result_ids, "result_ids") + _parse_id_list_param(results, "results")
+    parsed_baselines = _parse_str_list_param(baselines)
     eff_threshold = threshold_pct if threshold_pct is not None else threshold
 
     return compare_runs_and_results(
         db=db,
         run_ids=parsed_run_ids,
         result_ids=parsed_result_ids,
+        baselines=parsed_baselines,
         baseline_run_id=baseline_run_id,
         baseline_result_id=baseline_result_id,
         baseline_id=baseline_id,
@@ -1339,6 +1406,7 @@ def post_compare(
         db=db,
         run_ids=req.run_ids,
         result_ids=req.result_ids,
+        baselines=req.baselines,
         baseline_run_id=req.baseline_run_id,
         baseline_result_id=req.baseline_result_id,
         baseline_id=req.baseline_id,

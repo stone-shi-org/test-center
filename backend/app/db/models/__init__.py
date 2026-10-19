@@ -5,6 +5,7 @@ from backend.app.db.models.run import Run
 from backend.app.db.models.result import Result
 from backend.app.db.models.case_result import CaseResult
 from backend.app.db.models.artifact import Artifact
+from backend.app.db.models.baseline import Baseline
 
 __all__ = [
     "Target",
@@ -14,4 +15,5 @@ __all__ = [
     "Result",
     "CaseResult",
     "Artifact",
+    "Baseline",
 ]

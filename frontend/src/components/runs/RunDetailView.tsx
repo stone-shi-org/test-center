@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, type Artifact, type Run } from '../../api/index.ts'
+import { ApiError, api, type Artifact, type Run, type RunBaselineBadge } from '../../api/index.ts'
 import { useRouter } from '../../router/index.ts'
 import { Badge } from '../common/Badge.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
@@ -8,6 +8,25 @@ import { RunArtifactsSection } from './ArtifactViewer.tsx'
 import { CasesTable } from './CasesTable.tsx'
 import { LiveLogViewer } from './LiveLogViewer.tsx'
 import { MetricsTable } from './MetricsTable.tsx'
+
+function suggestBaselineName(run: Run): string {
+  const tester =
+    (run.config_snapshot?.tester as string) ||
+    run.results?.[0]?.tester ||
+    'run'
+  const cfgObj = (run.config_snapshot?.config as Record<string, unknown> | undefined) || {}
+  const tgtExtra = (run.target_snapshot?.extra as Record<string, unknown> | undefined) || {}
+  const model =
+    (cfgObj.model as string) ||
+    (cfgObj.transcription_model as string) ||
+    (tgtExtra.model as string) ||
+    run.results?.[0]?.model ||
+    (run.target_snapshot?.name as string) ||
+    'default'
+  const rawDate = run.finished_at || run.started_at || run.queued_at || '2026-01-01'
+  const datePart = rawDate.slice(0, 10)
+  return `${tester} · ${model} · ${datePart}`
+}
 
 export function RunDetailView({ runId }: { runId: number }) {
   const { navigate } = useRouter()
@@ -21,6 +40,22 @@ export function RunDetailView({ runId }: { runId: number }) {
   // Modals
   const [showCancelDialog, setShowCancelDialog] = useState(false)
   const [actionInProgress, setActionInProgress] = useState(false)
+
+  // Baseline dialog state
+  const [showBaselineDialog, setShowBaselineDialog] = useState(false)
+  const [baselineName, setBaselineName] = useState('')
+  const [baselineDescription, setBaselineDescription] = useState('')
+  const [baselineError, setBaselineError] = useState<string | null>(null)
+  const [baselineConflict, setBaselineConflict] = useState<{
+    name: string
+    runId: number
+  } | null>(null)
+  const [savingBaseline, setSavingBaseline] = useState(false)
+
+  // Rename baseline state
+  const [renamingBaseline, setRenamingBaseline] = useState<RunBaselineBadge | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [renameError, setRenameError] = useState<string | null>(null)
 
   const loadRun = useCallback(async (silent = false) => {
     try {
@@ -104,6 +139,102 @@ export function RunDetailView({ runId }: { runId: number }) {
     }
   }
 
+  const openSaveBaselineDialog = () => {
+    if (!run) return
+    setBaselineName(suggestBaselineName(run))
+    setBaselineDescription('')
+    setBaselineError(null)
+    setBaselineConflict(null)
+    setShowBaselineDialog(true)
+  }
+
+  const handleSaveBaseline = async (move = false) => {
+    if (!run) return
+    const trimmedName = baselineName.trim()
+    if (!trimmedName) {
+      setBaselineError('Baseline name is required.')
+      return
+    }
+    try {
+      setSavingBaseline(true)
+      setBaselineError(null)
+      if (!move) setBaselineConflict(null)
+      await api.runs.saveBaseline(run.id, {
+        name: trimmedName,
+        description: baselineDescription.trim() || null,
+        move,
+      })
+      setShowBaselineDialog(false)
+      setBaselineConflict(null)
+      await loadRun(true)
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        const rawObj = (err.detail as Record<string, unknown> | null) || {}
+        const nestedObj =
+          rawObj.detail && typeof rawObj.detail === 'object'
+            ? (rawObj.detail as Record<string, unknown>)
+            : {}
+        const detailObj = { ...nestedObj, ...rawObj }
+        const existingRunId =
+          typeof detailObj.run_id === 'number'
+            ? detailObj.run_id
+            : typeof detailObj.current_run_id === 'number'
+              ? detailObj.current_run_id
+              : 0
+        const existingName =
+          typeof detailObj.name === 'string' && detailObj.name
+            ? detailObj.name
+            : trimmedName
+        setBaselineConflict({
+          name: existingName,
+          runId: existingRunId,
+        })
+      } else {
+        setBaselineError(err instanceof Error ? err.message : String(err))
+      }
+    } finally {
+      setSavingBaseline(false)
+    }
+  }
+
+  const handleStartRename = (b: RunBaselineBadge) => {
+    setRenamingBaseline(b)
+    setRenameValue(b.name)
+    setRenameError(null)
+  }
+
+  const handleConfirmRename = async () => {
+    if (!renamingBaseline) return
+    const trimmed = renameValue.trim()
+    if (!trimmed) {
+      setRenameError('Baseline name cannot be empty.')
+      return
+    }
+    try {
+      setActionInProgress(true)
+      setRenameError(null)
+      await api.baselines.update(renamingBaseline.id, { name: trimmed })
+      setRenamingBaseline(null)
+      await loadRun(true)
+    } catch (err: unknown) {
+      setRenameError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setActionInProgress(false)
+    }
+  }
+
+  const handleRemoveBaseline = async (baselineId: number) => {
+    try {
+      setActionInProgress(true)
+      await api.baselines.delete(baselineId)
+      await loadRun(true)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setActionInProgress(false)
+    }
+  }
+
   if (loading) {
     return <Spinner message={`Loading details for Run #${runId}...`} />
   }
@@ -122,6 +253,15 @@ export function RunDetailView({ runId }: { runId: number }) {
   }
 
   const isOngoing = run.status === 'queued' || run.status === 'running'
+  const isFinished =
+    run.status === 'completed' ||
+    run.status === 'failed' ||
+    run.status === 'error' ||
+    run.status === 'cancelled'
+  const isNonPassingFinished =
+    run.status === 'failed' || run.status === 'error' || run.status === 'cancelled'
+  const runBaselines = run.baselines || []
+  const previousBaselines = run.previous_baselines || []
   const testersList = Array.isArray(run.config_snapshot?.testers)
     ? (run.config_snapshot.testers as string[])
     : []
@@ -160,12 +300,51 @@ export function RunDetailView({ runId }: { runId: number }) {
       {/* Header Bar */}
       <div className="detail-header-card card">
         <div className="detail-header-top">
-          <div className="detail-title-group">
+          <div className="detail-title-group" style={{ flexWrap: 'wrap' }}>
             <button className="back-link-btn" onClick={() => navigate('/runs')}>
               ← Runs
             </button>
             <h2>Run #{run.id}</h2>
             <Badge status={run.status} size="lg" />
+            {runBaselines.map((b) => (
+              <span
+                key={b.id}
+                className="job-run-tag"
+                data-testid={`run-baseline-badge-${b.id}`}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <span>★ {b.name}</span>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-secondary"
+                  style={{ padding: '1px 6px', fontSize: '0.75rem' }}
+                  data-testid={`rename-baseline-btn-${b.id}`}
+                  onClick={() => handleStartRename(b)}
+                  disabled={actionInProgress}
+                >
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-sm btn-secondary"
+                  style={{ padding: '1px 6px', fontSize: '0.75rem' }}
+                  data-testid={`remove-baseline-btn-${b.id}`}
+                  onClick={() => handleRemoveBaseline(b.id)}
+                  disabled={actionInProgress}
+                >
+                  Remove
+                </button>
+              </span>
+            ))}
+            {previousBaselines.map((pb) => (
+              <span
+                key={pb.id}
+                className="job-run-tag text-muted"
+                data-testid={`previous-baseline-tag-${pb.id}`}
+              >
+                previously baseline '{pb.name}'
+              </span>
+            ))}
             {run.job_id && (
               <span className="job-run-tag">
                 Job: {jobName || `#${run.job_id}`}
@@ -196,6 +375,18 @@ export function RunDetailView({ runId }: { runId: number }) {
                 Cancel Run
               </button>
             )}
+            {isFinished && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                data-testid="save-baseline-btn"
+                onClick={openSaveBaselineDialog}
+                disabled={actionInProgress}
+                title="Save this finished run as a named baseline protected from retention"
+              >
+                ★ Save as baseline
+              </button>
+            )}
             <a
               href={junitUrl}
               download={`run-${run.id}-junit.xml`}
@@ -207,7 +398,13 @@ export function RunDetailView({ runId }: { runId: number }) {
             </a>
             <button
               className="btn btn-secondary"
-              onClick={() => navigate(`/compare?run_ids=${run.id}&baseline_run_id=${run.id}`)}
+              onClick={() =>
+                navigate(
+                  runBaselines.length > 0
+                    ? `/compare?baselines=${encodeURIComponent(runBaselines[0].name)}`
+                    : `/compare?run_ids=${run.id}&baseline_run_id=${run.id}`
+                )
+              }
               disabled={actionInProgress}
               title="Compare this run against other runs"
             >
@@ -480,6 +677,167 @@ export function RunDetailView({ runId }: { runId: number }) {
         onConfirm={handleCancelRun}
         onCancel={() => setShowCancelDialog(false)}
       />
+
+      {/* Save as Baseline Dialog */}
+      {showBaselineDialog && (
+        <div className="modal-backdrop" onClick={() => setShowBaselineDialog(false)}>
+          <div
+            className="modal-content"
+            data-testid="save-baseline-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3>★ Save Run #{run.id} as Baseline</h3>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {isNonPassingFinished && (
+                <div
+                  className="banner warning-banner"
+                  data-testid="baseline-warning-banner"
+                >
+                  ⚠️ Warning: This run finished with status <strong>{run.status}</strong>. Please confirm before saving a {run.status} run as a baseline.
+                </div>
+              )}
+
+              {baselineError && (
+                <div className="banner error-banner" data-testid="baseline-error-banner">
+                  {baselineError}
+                </div>
+              )}
+
+              {baselineConflict && (
+                <div
+                  className="banner warning-banner"
+                  data-testid="baseline-conflict-banner"
+                  style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
+                >
+                  <div>
+                    Baseline <strong>'{baselineConflict.name}'</strong> already exists and points to{' '}
+                    <strong>Run #{baselineConflict.runId}</strong>. Choose a different name below, or move it to this run:
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-primary"
+                      data-testid="move-baseline-btn"
+                      disabled={savingBaseline}
+                      onClick={() => handleSaveBaseline(true)}
+                    >
+                      Move '{baselineConflict.name}' to this run
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="form-group">
+                <label htmlFor="baseline-name-input" className="form-label">
+                  Baseline Name *
+                </label>
+                <input
+                  id="baseline-name-input"
+                  data-testid="baseline-name-input"
+                  type="text"
+                  className="form-input"
+                  value={baselineName}
+                  onChange={(e) => {
+                    setBaselineName(e.target.value)
+                    if (baselineConflict) setBaselineConflict(null)
+                  }}
+                  placeholder="e.g. llm · Qwen2.5-72B · 2026-10-18"
+                />
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="baseline-description-input" className="form-label">
+                  Description (optional)
+                </label>
+                <textarea
+                  id="baseline-description-input"
+                  data-testid="baseline-description-input"
+                  className="form-input"
+                  rows={2}
+                  value={baselineDescription}
+                  onChange={(e) => setBaselineDescription(e.target.value)}
+                  placeholder="Optional notes about why this run is a reference baseline"
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setShowBaselineDialog(false)}
+                disabled={savingBaseline}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="confirm-save-baseline-btn"
+                onClick={() => handleSaveBaseline(false)}
+                disabled={savingBaseline || !baselineName.trim()}
+              >
+                {savingBaseline ? 'Saving...' : 'Save Baseline'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rename Baseline Dialog */}
+      {renamingBaseline && (
+        <div className="modal-backdrop" onClick={() => setRenamingBaseline(null)}>
+          <div
+            className="modal-content"
+            data-testid="rename-baseline-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h3>Rename Baseline '{renamingBaseline.name}'</h3>
+            </div>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {renameError && (
+                <div className="banner error-banner" data-testid="rename-baseline-error">
+                  {renameError}
+                </div>
+              )}
+              <div className="form-group">
+                <label htmlFor="rename-baseline-input" className="form-label">
+                  New Baseline Name *
+                </label>
+                <input
+                  id="rename-baseline-input"
+                  data-testid="rename-baseline-input"
+                  type="text"
+                  className="form-input"
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setRenamingBaseline(null)}
+                disabled={actionInProgress}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="confirm-rename-baseline-btn"
+                onClick={handleConfirmRename}
+                disabled={actionInProgress || !renameValue.trim()}
+              >
+                Save Name
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

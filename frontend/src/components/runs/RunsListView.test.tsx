@@ -388,4 +388,68 @@ describe('RunsListView — Filterable Run History, Per-Metric Trend Charts & Ret
       )
     })
   })
+
+  it('displays baseline badges on runs, filters by Baselines only, and shows N baseline runs protected in retention', async () => {
+    const runsWithBaselines: Run[] = [
+      {
+        ...mockRuns[0],
+        baselines: [{ id: 10, name: 'qwen-7b-golden' }],
+      },
+      mockRuns[1],
+      mockRuns[2],
+    ]
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/runs/retention') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...mockRetentionSettings,
+            stats: {
+              ...mockRetentionSettings.stats,
+              baseline_runs_protected: 2,
+            },
+          }),
+        } as Response
+      }
+      if (url.startsWith('/api/runs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => runsWithBaselines,
+        } as Response
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    })
+
+    const navigate = vi.fn()
+    render(
+      <RouterContext.Provider value={{ route: matchRoute('/runs'), navigate }}>
+        <RunsListView />
+      </RouterContext.Provider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('runs-list-baseline-badge-10')).toBeTruthy()
+    })
+    expect(screen.getByTestId('runs-list-baseline-badge-10').textContent).toContain(
+      '★ qwen-7b-golden'
+    )
+
+    // Toggle "Baselines only" filter
+    fireEvent.click(screen.getByTestId('runs-baselines-only-toggle'))
+    expect(screen.getByText('#201')).toBeTruthy()
+    expect(screen.queryByText('#202')).toBeNull()
+    expect(screen.queryByText('#203')).toBeNull()
+
+    // Open Retention panel and check "2 baseline runs protected"
+    fireEvent.click(screen.getByTestId('toggle-retention-btn'))
+    await waitFor(() => {
+      expect(screen.getByTestId('retention-baselines-protected').textContent).toContain(
+        '2 baseline runs protected'
+      )
+    })
+  })
 })

@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 from backend.app.config import get_settings
 from backend.app.db.base import utc_now
 from backend.app.db.models.artifact import Artifact
+from backend.app.db.models.baseline import Baseline
 from backend.app.db.models.result import Result
 from backend.app.db.models.run import Run
 
@@ -264,11 +265,14 @@ def find_eligible_runs_for_retention(
         .order_by(Run.id.desc())
     )
     terminal_runs = list(db.execute(stmt).scalars().all())
+    protected_run_ids = set(db.execute(select(Baseline.run_id)).scalars().all())
 
     eligible: list[Run] = []
     eff_artifacts_dir = Path(artifacts_dir) if artifacts_dir is not None else get_settings().ARTIFACTS_DIR
 
     for idx, run in enumerate(terminal_runs):
+        if run.id in protected_run_ids:
+            continue
         if keep_failed and _is_failed_run(run):
             continue
 
@@ -313,6 +317,9 @@ def get_retention_status(
         db.scalar(select(func.count(Run.id)).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0
     )
     total_artifacts = db.scalar(select(func.count(Artifact.id))) or 0
+    baseline_runs_protected = (
+        db.scalar(select(func.count(func.distinct(Baseline.run_id)))) or 0
+    )
     disk_bytes = _compute_dir_size_bytes(eff_artifacts_dir)
 
     eligible_runs, cutoff = find_eligible_runs_for_retention(
@@ -336,6 +343,7 @@ def get_retention_status(
             "artifacts_size_bytes": disk_bytes,
             "eligible_runs_count": len(eligible_runs),
             "eligible_run_ids": [r.id for r in eligible_runs],
+            "baseline_runs_protected": baseline_runs_protected,
         },
     }
 

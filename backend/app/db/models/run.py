@@ -6,6 +6,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
+    from backend.app.db.models.baseline import Baseline
     from backend.app.db.models.job import Job
     from backend.app.db.models.result import Result
     from backend.app.db.models.target import Target
@@ -42,6 +43,11 @@ class Run(Base, TimestampMixin):
         back_populates="run",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+    baselines: Mapped[list["Baseline"]] = relationship(
+        "Baseline",
+        back_populates="run",
+        passive_deletes="all",
     )
 
     def snapshot_target(self, target: "Target | None") -> None:

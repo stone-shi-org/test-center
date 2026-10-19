@@ -286,8 +286,14 @@ def _matches_run_filters(
     job: str | None = None,
     dt_from: datetime | None = None,
     dt_to: datetime | None = None,
+    baseline: bool | None = None,
 ) -> bool:
     """Evaluate whether a Run matches all provided history filter criteria."""
+    if baseline is True and not (run.baselines and len(run.baselines) > 0):
+        return False
+    if baseline is False and (run.baselines and len(run.baselines) > 0):
+        return False
+
     if status_filter:
         sf = status_filter.strip().lower()
         if sf == "pass":
@@ -369,7 +375,10 @@ def _matches_run_filters(
     return True
 
 
-def _format_run_detail(run: Run) -> dict[str, Any]:
+def _format_run_detail(
+    run: Run,
+    previous_baselines: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Helper to serialize a Run with its nested results, cases, and artifacts."""
     def_names_by_id: dict[int, str] = {}
     job_id, job_name = _extract_run_job_info(run)
@@ -445,6 +454,10 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
         if isinstance(run.config_snapshot, dict) and isinstance(run.config_snapshot.get("bamboo_report"), dict)
         else None
     )
+    baselines_list = [
+        {"id": b.id, "name": b.name}
+        for b in sorted(run.baselines or [], key=lambda x: x.id)
+    ]
 
     return {
         "id": run.id,
@@ -462,6 +475,8 @@ def _format_run_detail(run: Run) -> dict[str, Any]:
         "junit_url": f"/api/runs/{run.id}/junit.xml",
         "notification_report": notif_report,
         "notifications_sent": notifs_sent,
+        "baselines": baselines_list,
+        "previous_baselines": previous_baselines or [],
         "results": results_list,
     }
 
@@ -566,6 +581,7 @@ def list_runs(
     model: str | None = Query(None, description="Filter by model name"),
     job_id: int | None = Query(None, description="Filter by job ID"),
     job: str | None = Query(None, description="Filter by job ID, job name, or 'manual'/'none'"),
+    baseline: bool | None = Query(None, description="Filter by whether the run is a named baseline"),
     date_from: str | None = Query(None, description="Filter runs on or after date/datetime (YYYY-MM-DD or ISO-8601)"),
     date_to: str | None = Query(None, description="Filter runs on or before date/datetime (YYYY-MM-DD or ISO-8601)"),
     start_date: str | None = Query(None, description="Alias for date_from"),
@@ -575,7 +591,9 @@ def list_runs(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
-    """List runs ordered by creation time descending, with optional filtering by tester, target, job, status, and date."""
+    """List runs ordered by creation time descending, with optional filtering by tester, target, job, status, baseline, and date."""
+    from backend.app.api.baselines import get_previous_baselines_by_run_id
+
     eff_from_raw = date_from or start_date or date
     eff_to_raw = date_to or end_date or date
     dt_from = _parse_date_bound(eff_from_raw, is_end=False, param_name="date_from")
@@ -596,6 +614,7 @@ def list_runs(
         select(Run)
         .options(
             selectinload(Run.job),
+            selectinload(Run.baselines),
             selectinload(Run.results).selectinload(Result.cases),
             selectinload(Run.results).selectinload(Result.artifacts),
             selectinload(Run.results).selectinload(Result.test_definition),
@@ -603,15 +622,22 @@ def list_runs(
         .order_by(Run.id.desc())
     )
 
+    if baseline is True:
+        stmt = stmt.where(Run.baselines.any())
+    elif baseline is False:
+        stmt = stmt.where(~Run.baselines.any())
+
     if status and not has_memory_filters:
         stmt = stmt.where(Run.status == status)
     if job_id is not None and not has_memory_filters:
         stmt = stmt.where(Run.job_id == job_id)
 
+    prev_by_run = get_previous_baselines_by_run_id(db)
+
     if not has_memory_filters:
         stmt = stmt.offset(offset).limit(limit)
         runs = db.execute(stmt).scalars().all()
-        return [_format_run_detail(r) for r in runs]
+        return [_format_run_detail(r, previous_baselines=prev_by_run.get(r.id)) for r in runs]
 
     all_runs = db.execute(stmt).scalars().all()
     filtered = [
@@ -628,10 +654,11 @@ def list_runs(
             job=job,
             dt_from=dt_from,
             dt_to=dt_to,
+            baseline=baseline,
         )
     ]
     sliced = filtered[offset : offset + limit]
-    return [_format_run_detail(r) for r in sliced]
+    return [_format_run_detail(r, previous_baselines=prev_by_run.get(r.id)) for r in sliced]
 
 
 @router.get("/trends")
@@ -909,6 +936,14 @@ def trigger_runs_retention_cleanup(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
 
 
+from backend.app.api.baselines import (
+    CreateBaselineRequest,
+    format_baseline,
+    get_previous_baselines_by_run_id,
+    save_or_move_run_baseline,
+)
+
+
 @router.get("/{run_id}")
 def get_run(
     run_id: int,
@@ -919,7 +954,34 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     sync_run_disk_artifacts(db, run)
-    return _format_run_detail(run)
+    prev_by_run = get_previous_baselines_by_run_id(db)
+    return _format_run_detail(run, previous_baselines=prev_by_run.get(run.id))
+
+
+@router.post("/{run_id}/baseline", status_code=status.HTTP_201_CREATED)
+def create_run_baseline(
+    run_id: int,
+    req: CreateBaselineRequest,
+    db: Session = Depends(get_db),
+):
+    """Save a finished run as a named baseline, or move an existing baseline name to this run."""
+    stmt = (
+        select(Run)
+        .options(
+            selectinload(Run.baselines),
+            selectinload(Run.results).selectinload(Result.cases),
+        )
+        .where(Run.id == run_id)
+    )
+    run = db.execute(stmt).scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    result = save_or_move_run_baseline(db, run, req)
+    from fastapi.responses import JSONResponse
+    if isinstance(result, JSONResponse):
+        return result
+    return format_baseline(result, run)
 
 
 @router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -935,6 +997,12 @@ def delete_run(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot delete active run {run_id} in state '{run.status}'. Cancel it first.",
+        )
+    if run.baselines:
+        first_baseline = sorted(run.baselines, key=lambda b: b.id)[0]
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"run is baseline '{first_baseline.name}'; remove the baseline first",
         )
 
     settings = get_settings()

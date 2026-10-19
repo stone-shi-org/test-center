@@ -114,9 +114,31 @@ export function ConfigDiffHeader({
                 <Link href={`/runs/${r.run_id}`} className="font-mono font-bold table-link">
                   Run #{r.run_id}
                 </Link>
+                {r.baselines &&
+                  r.baselines.map((b) => (
+                    <span
+                      key={b.id}
+                      className="baseline-name-badge"
+                      data-testid={`card-named-baseline-${r.run_id}-${b.name}`}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '3px',
+                        padding: '1px 6px',
+                        borderRadius: '999px',
+                        background: 'rgba(245, 158, 11, 0.15)',
+                        border: '1px solid rgba(245, 158, 11, 0.4)',
+                        color: '#fbbf24',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                      }}
+                    >
+                      ★ {b.name}
+                    </span>
+                  ))}
                 {r.is_baseline && (
                   <span className="baseline-badge" data-testid={`baseline-badge-${r.run_id}`}>
-                    BASELINE
+                    REFERENCE RUN
                   </span>
                 )}
                 <Badge status={r.status} size="sm" />
@@ -128,9 +150,9 @@ export function ConfigDiffHeader({
                     type="button"
                     className="btn btn-sm btn-secondary"
                     onClick={() => onSelectBaseline(r.run_id)}
-                    title={`Set Run #${r.run_id} as baseline`}
+                    title={`Set Run #${r.run_id} as Reference run`}
                   >
-                    Set Baseline
+                    Set Reference run
                   </button>
                 )}
                 {onRemoveRun && runs.length > 2 && (
@@ -200,7 +222,11 @@ export function ConfigDiffHeader({
                 <th>Diff</th>
                 {runs.map((r) => (
                   <th key={`${r.run_id}-${r.result_id}`}>
-                    Run #{r.run_id} {r.is_baseline ? '(Baseline)' : ''}
+                    Run #{r.run_id}
+                    {r.baselines && r.baselines.length > 0
+                      ? ` ★ ${r.baselines.map((b) => b.name).join(', ')}`
+                      : ''}
+                    {r.is_baseline ? ' (Reference run)' : ''}
                   </th>
                 ))}
               </tr>
