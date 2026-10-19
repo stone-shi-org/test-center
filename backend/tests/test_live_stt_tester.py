@@ -2314,3 +2314,121 @@ def test_live_stt_diarization_fixture_modes(tmp_path: Path):
     # Invalid mode is rejected by schema validation
     with pytest.raises(TesterConfigError):
         LiveSTTTester().validate_and_apply_config({"diarization_fixture": "tones"})
+
+
+# ===========================================================================
+# Real-speech ASR fixtures (speech_fixture) and the loose WER sanity check
+# ===========================================================================
+
+
+def test_build_notsofar_speech_fixture_rebases_words(tmp_path: Path):
+    from backend.app.testers.live_stt.dataset import build_notsofar_speech_fixture
+    from backend.tests.test_live_stt_accuracy import _create_long_synthetic_notsofar_split
+
+    ds_root = _create_long_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+
+    short = build_notsofar_speech_fixture("short_speech", dataset_dir=ds_root)
+    assert short is not None
+    assert short.id == "notsofar:MTG_91001:0.7-6.7s"  # starts 0.3s before the first word
+    assert short.duration_sec == pytest.approx(6.0, abs=0.01)
+    assert len(short.words) >= 8
+    assert short.words[0].text == "good" and short.words[0].start_sec == pytest.approx(0.3, abs=0.01)
+    assert all(0.0 <= w.start_sec < w.end_sec <= short.duration_sec for w in short.words)
+    assert short.reference_text.split()[:3] == ["good", "morning", "everyone"]
+    assert len(short.reference_text.split()) == len(short.words)
+    with wave.open(io.BytesIO(short.wav_bytes), "rb") as wf:
+        assert wf.getframerate() == 16000 and wf.getnchannels() == 1
+        assert wf.getnframes() == 6 * 16000
+
+    medium = build_notsofar_speech_fixture("medium_speech", dataset_dir=ds_root)
+    assert medium is not None and medium.duration_sec == pytest.approx(15.0, abs=0.01)
+    assert len(medium.words) >= 20 and medium.expected_speakers == 2
+
+    # Too few words in the window -> no fixture; missing dataset -> None
+    assert build_notsofar_speech_fixture("short_speech", dataset_dir=ds_root, min_words=500) is None
+    assert build_notsofar_speech_fixture("short_speech", dataset_dir=tmp_path / "missing") is None
+
+
+def test_speech_accuracy_check_thresholds():
+    from backend.app.testers.live_stt.accuracy import speech_accuracy_check
+
+    ok, check, err, metrics, detail = speech_accuracy_check("hello there my friends", "hello there my friend", 0.75)
+    assert ok is True and err is None and check["passed"] is True
+    assert metrics["wer"]["value"] == pytest.approx(0.25)
+
+    ok_empty, check_empty, err_empty, metrics_empty, _ = speech_accuracy_check("hello there my friends", "", 0.75)
+    assert ok_empty is False and metrics_empty["wer"]["value"] == pytest.approx(1.0)
+    assert err_empty.startswith("speech_wer_within_threshold: WER=100.0%")
+
+
+def test_live_stt_http_transcription_uses_real_speech_and_wer_check(tmp_path: Path):
+    from backend.tests.test_live_stt_accuracy import _create_long_synthetic_notsofar_split
+
+    ds_root = _create_long_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+    tester = LiveSTTTester()
+
+    def run(run_id: int, extra: dict[str, Any]):
+        transport, requests = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+        ctx = TestContext(run_id=run_id, artifacts_dir=tmp_path / f"a{run_id}", emit_stdout=False)
+        res = tester.run(
+            {"_transport": transport, "suites": ["transcriptions_json", "transcriptions_sse"],
+             "dataset_dir": str(ds_root), **extra},
+            {"base_url": "http://localhost:8000"},
+            ctx,
+        )
+        return res, requests
+
+    # The mock server returns canned text unrelated to the excerpt -> the WER sanity check fails
+    result, requests = run(530, {})
+    cases = [c for c in result.cases if c.suite in ("transcriptions_json", "transcriptions_sse")]
+    assert cases
+    for c in cases:
+        assert c.detail["fixture_source"] == "notsofar"
+        assert c.detail["fixture_id"].startswith("notsofar:MTG_91001:")
+        assert "wer" in c.metrics and "reference_text" in c.detail
+        check = next(ch for ch in c.detail["checks"] if ch["name"] == "speech_wer_within_threshold")
+        assert check["passed"] is False
+        assert c.status == "fail"
+    # Uploaded audio is the 6s / 15s excerpt
+    durations = set()
+    for req in requests:
+        if req.method == "POST" and req.url.path.endswith("/v1/audio/transcriptions"):
+            _, files = _parse_multipart_form(req.content, req.headers.get("content-type", ""))
+            with wave.open(io.BytesIO(files["file"]), "rb") as wf:
+                durations.add(round(wf.getnframes() / wf.getframerate(), 1))
+    assert durations == {6.0, 15.0}
+
+    # A generous threshold passes (the check is a sanity limit, configurable)
+    result_ok, _ = run(531, {"speech_wer_threshold": 5.0})
+    ok_cases = [c for c in result_ok.cases if c.suite in ("transcriptions_json", "transcriptions_sse")]
+    assert ok_cases and all(c.status == "pass" for c in ok_cases)
+
+    # synthetic mode: old fixtures, no WER check
+    result_syn, _ = run(532, {"speech_fixture": "synthetic"})
+    syn_cases = [c for c in result_syn.cases if c.suite in ("transcriptions_json", "transcriptions_sse")]
+    assert syn_cases and all(c.detail["fixture_source"] == "synthetic" for c in syn_cases)
+    assert all("wer" not in c.metrics for c in syn_cases)
+    assert all(c.status == "pass" for c in syn_cases)
+
+
+def test_live_stt_speech_fixture_modes_without_dataset(tmp_path: Path):
+    tester = LiveSTTTester()
+    transport, _ = _create_mock_live_stt_transport(transcribe_hold_sec=0.0)
+
+    # auto without a dataset falls back to synthetic and keeps passing
+    ctx = TestContext(run_id=533, artifacts_dir=tmp_path / "a533", emit_stdout=False)
+    res = tester.run(
+        {"_transport": transport, "suites": ["transcriptions_json"], "dataset_dir": str(tmp_path / "none")},
+        {"base_url": "http://localhost:8000"},
+        ctx,
+    )
+    assert all(c.detail["fixture_source"] == "synthetic" for c in res.cases if c.suite == "transcriptions_json")
+
+    # notsofar without a dataset is a config error
+    with pytest.raises(TesterConfigError, match="speech_fixture='notsofar'"):
+        tester.run(
+            {"_transport": transport, "suites": ["transcriptions_json"], "speech_fixture": "notsofar",
+             "dataset_dir": str(tmp_path / "none")},
+            {"base_url": "http://localhost:8000"},
+            TestContext(run_id=534, artifacts_dir=tmp_path / "a534", emit_stdout=False),
+        )

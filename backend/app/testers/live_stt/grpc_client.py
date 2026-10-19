@@ -1862,6 +1862,7 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         decode_delay_sec: float = 0.0,
         final_delay_sec: float = 0.0,
         draining: bool = False,
+        vram_capacity_calls: int | None = None,
     ) -> None:
         self.default_model = default_model
         self.allowed_models = allowed_models or {
@@ -1901,6 +1902,9 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
         self.decode_delay_sec = decode_delay_sec
         self.final_delay_sec = final_delay_sec
         self.draining = draining
+        # Simulates live-stt's VRAM admission (LS-17): streams beyond this many concurrent calls are
+        # rejected with RESOURCE_EXHAUSTED "insufficient VRAM ..." even below max_concurrent_calls.
+        self.vram_capacity_calls = vram_capacity_calls
 
         self.active_calls = 0
         self.peak_active_calls = 0
@@ -1955,6 +1959,17 @@ class MockStreamingASRServicer(asr_pb2_grpc.StreamingASRServicer):
             await context.abort(
                 grpc.StatusCode.RESOURCE_EXHAUSTED,
                 "at capacity, try again shortly",
+            )
+            return
+
+        if self.vram_capacity_calls is not None and self.active_calls >= self.vram_capacity_calls:
+            try:
+                await asyncio.wait_for(request_iterator.__anext__(), timeout=0.05)
+            except Exception:
+                pass
+            await context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"insufficient VRAM for {self.default_model}: 120MB free, 250MB required",
             )
             return
 

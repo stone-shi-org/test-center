@@ -172,6 +172,67 @@ def _create_synthetic_notsofar_split(root_dir: Path) -> Path:
     return root_dir
 
 
+LONG_MEETING_WORDS = (
+    "good morning everyone thanks for joining the weekly planning call today we will review "
+    "the release schedule the open bugs and the staffing plan for next quarter so let us start "
+    "with the release schedule because that is the most urgent item on the agenda this week"
+).split()
+
+
+def _create_long_synthetic_notsofar_split(root_dir: Path) -> Path:
+    """Hermetic NOTSOFAR-1 split with one 20s, two-speaker meeting (MTG_91001) whose speech starts at
+    1.0s: long enough for the 6s/15s ASR speech excerpts and the 30s-capped dialog excerpt."""
+    split_dir = root_dir / "eval_set" / "240629.1_eval_small_with_GT" / "MTG"
+    m_dir = split_dir / "MTG_91001"
+    sc_dir = m_dir / "sc_meetup_0"
+    sc_dir.mkdir(parents=True, exist_ok=True)
+    (sc_dir / "ch0.wav").write_bytes(make_pcm_wav_bytes(duration_sec=20.0, sample_rate=16000))
+
+    segments = []
+    t = 1.0
+    words = list(LONG_MEETING_WORDS)
+    speakers = ["Alice", "Bob"]
+    seg_idx = 0
+    while words and t < 19.0:
+        chunk, words = words[:9], words[9:]
+        timing = []
+        for w in chunk:
+            timing.append([w, round(t, 2), round(t + 0.35, 2)])
+            t += 0.4
+        segments.append(
+            {
+                "speaker_id": speakers[seg_idx % 2],
+                "start_time": timing[0][1],
+                "end_time": timing[-1][2],
+                "text": " ".join(chunk),
+                "word_timing": timing,
+            }
+        )
+        seg_idx += 1
+        t += 0.3
+
+    metadata = {
+        "meeting_id": "MTG_91001",
+        "Topic": "Planning",
+        "MeetingDurationSec": 20.0,
+        "NumParticipants": 2,
+        "ParticipantAliases": speakers,
+    }
+    (m_dir / "gt_meeting_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (m_dir / "gt_transcription.json").write_text(json.dumps(segments), encoding="utf-8")
+    devices = [
+        {
+            "device_name": "sc_meetup_0",
+            "is_mc": False,
+            "is_close_talk": False,
+            "channels_num": 1,
+            "wav_file_names": "sc_meetup_0/ch0.wav",
+        }
+    ]
+    (m_dir / "devices.json").write_text(json.dumps(devices), encoding="utf-8")
+    return root_dir
+
+
 # ===========================================================================
 # 1. NOTSOFAR-1 Dataset Loader & Text Normalization Tests
 # ===========================================================================

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from backend.app.testers.base import TestContext
 from backend.app.testers.live_stt import (
     DEFAULT_GRPC_STREAMING_MODEL,
@@ -385,3 +387,96 @@ def test_live_stt_tester_grpc_long_call_opt_in_suite_end_to_end(tmp_path: Path):
 
         report_txt = (ctx.artifacts_dir / "live_stt_report.txt").read_text(encoding="utf-8")
         assert "gRPC Long-Call" in report_txt
+
+
+# ===========================================================================
+# Real-speech fixtures and VRAM-limited within-budget concurrency
+# ===========================================================================
+
+
+def test_classify_within_budget_rejections():
+    from backend.app.testers.live_stt.streaming import classify_within_budget_rejections
+
+    def sess(ok: bool, code: str, msg: str | None = None):
+        return type("S", (), {"ok": ok, "grpc_status_code": code, "error_message": msg})()
+
+    out = classify_within_budget_rejections(
+        [
+            sess(True, "OK"),
+            sess(False, "RESOURCE_EXHAUSTED", "insufficient VRAM for m: 120MB free, 250MB required"),
+            sess(False, "RESOURCE_EXHAUSTED", "insufficient VRAM for m: 100MB free, 250MB required"),
+            sess(False, "RESOURCE_EXHAUSTED", "at capacity, try again shortly"),
+            sess(False, "UNAVAILABLE", "connection refused"),
+        ]
+    )
+    assert (out["vram_limited"], out["capacity_rejected"], out["other_failed"]) == (2, 1, 1)
+    vram_group = next(g for g in out["groups"] if g["kind"] == "vram_limited")
+    assert vram_group["count"] == 2 and vram_group["sample_message"].startswith("insufficient VRAM")
+
+
+def test_grpc_concurrent_within_budget_accepts_vram_limited_rejections(tmp_path: Path):
+    """Run 31: 20 streams <= max_concurrent_calls=20, GPU fits 14 -> clean VRAM rejections are not a failure."""
+    with MockLiveSTTGRPCServer(max_concurrent_calls=4, vram_capacity_calls=2, final_delay_sec=0.005) as grpc_server:
+        result = LiveSTTTester().run(
+            config={
+                "suites": ["grpc_streaming"],
+                "grpc_target": grpc_server.target,
+                "discover_models": False,
+                "grpc_speed": 8.0,
+                "repetitions": 1,
+                "speech_fixture": "synthetic",
+            },
+            target={"name": "mock-grpc-vram", "grpc_target": grpc_server.target},
+            ctx=_make_ctx(tmp_path, run_id=3110),
+        )
+
+    within = next(c for c in result.cases if c.case_id == "grpc_streaming:concurrent_within_budget")
+    assert within.status == "pass", within.detail.get("errors")
+    d = within.detail
+    assert d["concurrency"] == 4 and d["ok_count"] == 2
+    assert d["vram_limited_count"] == 2 and d["capacity_rejected_count"] == 0 and d["other_failed_count"] == 0
+    assert within.metrics["vram_limited_sessions"]["value"] == 2
+    assert any(ch["name"] == "vram_limited_sessions_rejected_cleanly" for ch in d["checks"])
+    assert "limited by VRAM" in d["eval_message"]
+
+
+def test_grpc_streaming_uses_real_speech_fixtures_with_wer(tmp_path: Path):
+    from backend.app.testers.live_stt.dataset import build_notsofar_speech_fixture
+    from backend.tests.test_live_stt_accuracy import _create_long_synthetic_notsofar_split
+
+    ds_root = _create_long_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+    short = build_notsofar_speech_fixture("short_speech", dataset_dir=ds_root)
+    assert short is not None
+
+    # The mock servicer "recognizes" exactly the short excerpt's words
+    with MockLiveSTTGRPCServer(
+        max_concurrent_calls=2, final_delay_sec=0.005, words_sequence=list(short.words),
+        repeat_words_for_long_audio=False,
+    ) as grpc_server:
+        result = LiveSTTTester().run(
+            config={
+                "suites": ["grpc_streaming"],
+                "grpc_target": grpc_server.target,
+                "discover_models": False,
+                "grpc_speed": 8.0,
+                "grpc_burst_speed": 20.0,
+                "repetitions": 1,
+                "dataset_dir": str(ds_root),
+                "speech_wer_threshold": 5.0,
+            },
+            target={"name": "mock-grpc-real-speech", "grpc_target": grpc_server.target},
+            ctx=_make_ctx(tmp_path, run_id=3111),
+        )
+
+    per_model = {
+        c.case_id.rsplit(":", 1)[-1]: c
+        for c in result.cases
+        if c.case_id.startswith(f"grpc_streaming:{DEFAULT_GRPC_STREAMING_MODEL}:")
+    }
+    assert set(per_model) == {"short_speech", "medium_speech", "fast_paced_burst"}
+    for c in per_model.values():
+        assert c.detail["fixture_source"] == "notsofar"
+        assert c.detail["fixture_id"].startswith("notsofar:MTG_91001:")
+        assert any(ch["name"] == "speech_wer_within_threshold" for ch in c.detail["checks"])
+    assert per_model["short_speech"].metrics["wer"]["value"] == pytest.approx(0.0, abs=1e-9)
+    assert per_model["short_speech"].status == "pass"

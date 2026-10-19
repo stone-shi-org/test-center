@@ -1262,3 +1262,33 @@ def render_notsofar_accuracy_html_report(
 </body>
 </html>
 """
+
+
+DEFAULT_SPEECH_WER_THRESHOLD = 0.75
+
+
+def speech_accuracy_check(
+    reference_text: str,
+    hypothesis_text: str | None,
+    threshold: float = DEFAULT_SPEECH_WER_THRESHOLD,
+) -> tuple[bool, dict[str, Any], str | None, dict[str, Any], dict[str, Any]]:
+    """Loose accuracy sanity check for real-speech functional fixtures.
+
+    Catches a server that returns empty or garbage transcripts (WER near 100%) without failing on
+    normal model-to-model accuracy differences. Returns
+    ``(passed, check, error_or_None, extra_metrics, extra_detail)``.
+    """
+    wer_res = compute_wer(reference_text, hypothesis_text or "")
+    passed = wer_res.wer <= float(threshold)
+    detail_text = (
+        f"WER={wer_res.wer_pct:.1f}% ({wer_res.edit_distance}/{wer_res.ref_word_count} words), "
+        f"threshold={float(threshold) * 100.0:.0f}%"
+    )
+    check = {"name": "speech_wer_within_threshold", "passed": passed, "detail": detail_text}
+    error = None if passed else f"speech_wer_within_threshold: {detail_text}"
+    metrics = {
+        "wer": {"value": wer_res.wer, "unit": "ratio", "better": "lower"},
+        "wer_pct": {"value": wer_res.wer_pct, "unit": "%", "better": "lower"},
+    }
+    detail = {"wer": wer_res.to_dict(), "reference_text": reference_text[:500]}
+    return passed, check, error, metrics, detail

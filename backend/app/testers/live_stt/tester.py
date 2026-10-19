@@ -25,6 +25,8 @@ from backend.app.testers.live_stt.accuracy import (
     compute_cpwer,
     compute_der_and_speaker_error,
     compute_wer,
+    DEFAULT_SPEECH_WER_THRESHOLD,
+    speech_accuracy_check,
     extract_speaker_transcripts_from_segments,
     render_notsofar_accuracy_html_report,
 )
@@ -44,6 +46,7 @@ from backend.app.testers.live_stt.dataset import (
     DEFAULT_NOTSOFAR_SPLIT,
     NotsofarMeeting,
     build_notsofar_dialog_fixture,
+    build_notsofar_speech_fixture,
     load_notsofar_meetings,
 )
 from backend.app.testers.live_stt.fixtures import (
@@ -346,6 +349,28 @@ class LiveSTTTester(TesterPlugin):
             "dataset_dir": {
                 "type": "string",
                 "description": "Optional path override to NOTSOFAR-1 dataset root or split directory",
+                "x-advanced": True,
+            },
+            "speech_fixture": {
+                "type": "string",
+                "enum": ["auto", "notsofar", "synthetic"],
+                "default": "auto",
+                "description": (
+                    "Audio for the HTTP transcription and gRPC streaming suites: 'notsofar' uses real speech "
+                    "excerpts from NOTSOFAR-1, 'synthetic' uses the generated tone fixtures (ASR models "
+                    "return no words for them), 'auto' uses NOTSOFAR-1 when available and falls back to synthetic"
+                ),
+                "x-advanced": True,
+            },
+            "speech_wer_threshold": {
+                "type": "number",
+                "default": DEFAULT_SPEECH_WER_THRESHOLD,
+                "minimum": 0.0,
+                "maximum": 5.0,
+                "description": (
+                    "Loose WER sanity limit for transcription and streaming cases on real speech; catches "
+                    "empty or garbage transcripts, not model accuracy (use the accuracy suites for that)"
+                ),
                 "x-advanced": True,
             },
             "diarization_fixture": {
@@ -683,6 +708,51 @@ class LiveSTTTester(TesterPlugin):
             timeout=timeout,
             transport=transport,
         )
+
+    def _resolve_speech_fixtures(
+        self,
+        cfg: dict[str, Any],
+        ctx: Any,
+    ) -> tuple[dict[str, AudioFixture], str]:
+        """Pick the audio for the HTTP transcription and gRPC streaming suites.
+
+        Returns fixtures for 'short_speech', 'medium_speech' and 'dialog' (multi-speaker, used by the
+        gRPC fast-paced burst) and their source. The generated fixtures are tones: ASR models return no
+        words for them, so prefer real NOTSOFAR-1 speech when the dataset is available.
+        """
+        synthetic = {
+            "short_speech": get_audio_fixture("short_speech"),
+            "medium_speech": get_audio_fixture("medium_speech"),
+            "dialog": get_audio_fixture("two_speaker_dialog"),
+        }
+        mode = str(cfg.get("speech_fixture", "auto") or "auto").strip().lower()
+        if mode == "synthetic":
+            return synthetic, "synthetic"
+
+        ds_dir = cfg.get("dataset_dir")
+        ds_split = cfg.get("dataset_split")
+        real = {
+            "short_speech": build_notsofar_speech_fixture("short_speech", dataset_dir=ds_dir, split=ds_split),
+            "medium_speech": build_notsofar_speech_fixture("medium_speech", dataset_dir=ds_dir, split=ds_split),
+            "dialog": build_notsofar_dialog_fixture(dataset_dir=ds_dir, split=ds_split),
+        }
+        if all(real.values()):
+            ctx.log(
+                "Speech fixtures: "
+                + ", ".join(f"{role}={fx.id} ({fx.duration_sec}s, {len(fx.words)} words)" for role, fx in real.items())
+            )
+            return real, "notsofar"  # type: ignore[return-value]
+        if mode == "notsofar":
+            raise TesterConfigError(
+                "speech_fixture='notsofar' but no suitable NOTSOFAR-1 speech excerpts were found "
+                f"(dataset_dir={ds_dir!r}, dataset_split={ds_split!r})"
+            )
+        ctx.log(
+            "Speech fixtures: NOTSOFAR-1 dataset not available, falling back to the synthetic tone fixtures "
+            "(ASR models return no words for them, so streaming partial/word checks will fail)",
+            level="warning",
+        )
+        return synthetic, "synthetic"
 
     def _resolve_diarization_fixture(
         self,
@@ -1039,12 +1109,38 @@ class LiveSTTTester(TesterPlugin):
 
         t_run_start = time.perf_counter()
 
+        speech_suites = ("transcriptions_json", "transcriptions_sse", "grpc_streaming")
+        if any(sname in suites_to_run for sname in speech_suites):
+            speech_fixtures, speech_source = self._resolve_speech_fixtures(cfg, ctx)
+        else:
+            speech_fixtures = {
+                "short_speech": get_audio_fixture("short_speech"),
+                "medium_speech": get_audio_fixture("medium_speech"),
+                "dialog": get_audio_fixture("two_speaker_dialog"),
+            }
+            speech_source = "synthetic"
+        speech_wer_threshold = float(cfg.get("speech_wer_threshold", DEFAULT_SPEECH_WER_THRESHOLD))
+
+        def _with_speech_accuracy(schema: Any, fix: AudioFixture, hyp_text: str) -> tuple[Any, dict, dict]:
+            """Add the loose WER check to a schema result when the fixture is real speech."""
+            if speech_source != "notsofar" or not fix.reference_text:
+                return schema, {}, {"fixture_source": speech_source}
+            ok, chk, err, acc_metrics, acc_detail = speech_accuracy_check(
+                fix.reference_text, hyp_text, speech_wer_threshold
+            )
+            merged = SchemaCheckResult(
+                valid=bool(schema.valid) and ok,
+                checks=[*schema.checks, chk],
+                errors=[*schema.errors, *([err] if err else [])],
+            )
+            return merged, acc_metrics, {"fixture_source": speech_source, **acc_detail}
+
         # -------------------------------------------------------------------
         # Suite 1: POST /v1/audio/transcriptions (JSON and verbose_json)
         # -------------------------------------------------------------------
         if "transcriptions_json" in suites_to_run:
-            short_fix = get_audio_fixture("short_speech")
-            medium_fix = get_audio_fixture("medium_speech")
+            short_fix = speech_fixtures["short_speech"]
+            medium_fix = speech_fixtures["medium_speech"]
 
             for m_info in asr_models:
                 tested_engines.add(m_info.engine)
@@ -1099,6 +1195,8 @@ class LiveSTTTester(TesterPlugin):
                     else ""
                 )
                 word_cnt = len(transcript_text.split()) if transcript_text.strip() else 0
+                schema_res, acc_metrics, acc_detail = _with_speech_accuracy(schema_res, short_fix, transcript_text)
+                case_status = "pass" if schema_res.valid else "fail"
 
                 result.add_case(
                     case_id=case_id_json,
@@ -1109,6 +1207,7 @@ class LiveSTTTester(TesterPlugin):
                         "rtf": {"value": mean_rtf, "unit": "x", "better": "lower"},
                         "audio_duration_sec": {"value": short_fix.duration_sec, "unit": "s"},
                         "word_count": {"value": word_cnt, "unit": "words"},
+                        **acc_metrics,
                     },
                     detail={
                         "endpoint": "/v1/audio/transcriptions",
@@ -1117,6 +1216,7 @@ class LiveSTTTester(TesterPlugin):
                         "response_format": "json",
                         "stream": False,
                         "fixture_id": short_fix.id,
+                        **acc_detail,
                         "audio_duration_sec": short_fix.duration_sec,
                         "status_code": last_res.status_code,
                         "content_type": last_res.content_type,
@@ -1182,6 +1282,8 @@ class LiveSTTTester(TesterPlugin):
                 v_text = v_body.get("text", "") if isinstance(v_body.get("text"), str) else ""
                 v_words = v_body.get("words", []) if isinstance(v_body.get("words"), list) else []
                 v_reported_dur = float(v_body.get("duration", 0.0) or 0.0) if isinstance(v_body.get("duration"), (int, float)) else 0.0
+                v_schema, v_acc_metrics, v_acc_detail = _with_speech_accuracy(v_schema, medium_fix, v_text)
+                v_status = "pass" if v_schema.valid else "fail"
 
                 result.add_case(
                     case_id=case_id_vjson,
@@ -1193,6 +1295,7 @@ class LiveSTTTester(TesterPlugin):
                         "audio_duration_sec": {"value": medium_fix.duration_sec, "unit": "s"},
                         "reported_duration_sec": {"value": round(v_reported_dur, 3), "unit": "s"},
                         "word_count": {"value": len(v_words), "unit": "words"},
+                        **v_acc_metrics,
                     },
                     detail={
                         "endpoint": "/v1/audio/transcriptions",
@@ -1201,6 +1304,7 @@ class LiveSTTTester(TesterPlugin):
                         "response_format": "verbose_json",
                         "stream": False,
                         "fixture_id": medium_fix.id,
+                        **v_acc_detail,
                         "audio_duration_sec": medium_fix.duration_sec,
                         "status_code": last_vres.status_code,
                         "content_type": last_vres.content_type,
@@ -1224,7 +1328,7 @@ class LiveSTTTester(TesterPlugin):
         # Suite 2: POST /v1/audio/transcriptions (stream=true SSE)
         # -------------------------------------------------------------------
         if "transcriptions_sse" in suites_to_run:
-            sse_fix = get_audio_fixture("short_speech")
+            sse_fix = speech_fixtures["short_speech"]
 
             for m_info in asr_models:
                 tested_engines.add(m_info.engine)
@@ -1273,6 +1377,9 @@ class LiveSTTTester(TesterPlugin):
                     content_type=last_sres.content_type,
                     status_code=last_sres.status_code,
                 )
+                sse_schema, s_acc_metrics, s_acc_detail = _with_speech_accuracy(
+                    sse_schema, sse_fix, last_sres.text or ""
+                )
                 sse_status = "pass" if sse_schema.valid else "fail"
                 s_mean_lat = round(float(statistics.mean(s_lats)), 2)
                 s_mean_ttft = round(float(statistics.mean(s_ttfts)), 2)
@@ -1288,6 +1395,7 @@ class LiveSTTTester(TesterPlugin):
                         "rtf": {"value": s_mean_rtf, "unit": "x", "better": "lower"},
                         "audio_duration_sec": {"value": sse_fix.duration_sec, "unit": "s"},
                         "sse_events": {"value": len(last_sres.events), "unit": "events"},
+                        **s_acc_metrics,
                     },
                     detail={
                         "endpoint": "/v1/audio/transcriptions",
@@ -1295,6 +1403,7 @@ class LiveSTTTester(TesterPlugin):
                         "engine": m_info.engine,
                         "stream": True,
                         "fixture_id": sse_fix.id,
+                        **s_acc_detail,
                         "audio_duration_sec": sse_fix.duration_sec,
                         "status_code": last_sres.status_code,
                         "content_type": last_sres.content_type,
@@ -1802,6 +1911,9 @@ class LiveSTTTester(TesterPlugin):
                 all_rtfs=all_rtfs,
                 completed_cases=completed_cases,
                 planned_cases=planned_cases,
+                speech_fixtures=speech_fixtures,
+                speech_source=speech_source,
+                speech_wer_threshold=speech_wer_threshold,
             )
 
         # -------------------------------------------------------------------

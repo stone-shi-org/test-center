@@ -900,3 +900,120 @@ def build_notsofar_dialog_fixture(
         # Only cache hits, so a dataset mounted later is still picked up.
         _DIALOG_FIXTURE_CACHE[cache_key] = fixture
     return fixture
+
+
+# ---------------------------------------------------------------------------
+# Real-speech ASR fixtures (speech-dense NOTSOFAR-1 excerpts with reference text)
+# ---------------------------------------------------------------------------
+
+SPEECH_FIXTURE_SPECS: dict[str, tuple[float, int]] = {
+    # role: (clip length in seconds, minimum reference words inside the clip)
+    "short_speech": (6.0, 8),
+    "medium_speech": (15.0, 20),
+}
+
+_SPEECH_FIXTURE_CACHE: dict[tuple[str, str, str, float, int], Any] = {}
+
+
+def _cut_wav_window(wav_bytes: bytes, start_sec: float, end_sec: float) -> tuple[bytes, float]:
+    """Cut [start_sec, end_sec) out of a 16kHz mono 16-bit WAV; returns (wav_bytes, duration_sec)."""
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        sr = int(wf.getframerate())
+        params = wf.getparams()
+        total = int(wf.getnframes())
+        start_f = max(0, min(total, int(round(start_sec * sr))))
+        end_f = max(start_f, min(total, int(round(end_sec * sr))))
+        wf.setpos(start_f)
+        frames = wf.readframes(end_f - start_f)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as dst:
+        dst.setparams(params)
+        dst.writeframes(frames)
+    return out.getvalue(), round((end_f - start_f) / float(sr), 4) if sr else 0.0
+
+
+def build_notsofar_speech_fixture(
+    role: str = "short_speech",
+    *,
+    dataset_dir: str | Path | None = None,
+    split: str | None = None,
+    clip_sec: float | None = None,
+    min_words: int | None = None,
+    max_candidates: int = 20,
+) -> Any | None:
+    """Build a real-speech AudioFixture for ASR tests from a NOTSOFAR-1 meeting.
+
+    The clip starts just before the first ground-truth word of the meeting (so it is speech, not the
+    silence many meetings open with) and lasts ``clip_sec``. Reference text and word timestamps are
+    the ground-truth words that lie entirely inside the clip, rebased to the clip start. Meetings are
+    tried in sorted ID order (deterministic). Returns None if the dataset is unavailable or no meeting
+    has ``min_words`` words in such a window. Found fixtures are cached.
+    """
+    from backend.app.testers.live_stt.fixtures import AudioFixture, WordTimestamp
+
+    default_clip, default_min_words = SPEECH_FIXTURE_SPECS.get(role, SPEECH_FIXTURE_SPECS["short_speech"])
+    clip = float(clip_sec if clip_sec is not None else default_clip)
+    need_words = int(min_words if min_words is not None else default_min_words)
+
+    cache_key = (role, str(dataset_dir or ""), str(split or DEFAULT_NOTSOFAR_SPLIT), clip, need_words)
+    if cache_key in _SPEECH_FIXTURE_CACHE:
+        return _SPEECH_FIXTURE_CACHE[cache_key]
+
+    try:
+        meeting_ids = sorted(discover_notsofar_meetings(dataset_dir=dataset_dir, split=split))
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+    for mid in meeting_ids[: max(1, int(max_candidates))]:
+        try:
+            meeting = load_notsofar_meeting(mid, dataset_dir=dataset_dir, split=split)
+        except (FileNotFoundError, ValueError, OSError):
+            continue
+        timed = sorted(
+            (wt for seg in meeting.segments for wt in seg.word_timings if wt.word.strip() and wt.end_sec > wt.start_sec),
+            key=lambda w: (w.start_sec, w.end_sec),
+        )
+        if not timed:
+            continue
+        start = max(0.0, timed[0].start_sec - 0.3)
+        end = start + clip
+        inside = [w for w in timed if w.start_sec >= start and w.end_sec <= end]
+        if len(inside) < need_words:
+            continue
+        try:
+            full_wav, full_dur = meeting.read_wav_bytes(max_duration_sec=end)
+            if full_dur < end - 0.05:
+                continue
+            wav_bytes, duration = _cut_wav_window(full_wav, start, end)
+        except (FileNotFoundError, ValueError, OSError, wave.Error):
+            continue
+
+        words = tuple(
+            WordTimestamp(w.word.strip(), round(w.start_sec - start, 3), round(w.end_sec - start, 3))
+            for w in inside
+        )
+        reference_text = " ".join(tokenize_for_scoring(" ".join(w.text for w in words)))
+        speakers = {
+            seg.speaker_id
+            for seg in meeting.segments
+            if seg.speaker_id and seg.start_time < end and seg.end_time > start
+        }
+        fixture = AudioFixture(
+            id=f"notsofar:{meeting.meeting_id}:{start:.1f}-{end:.1f}s",
+            name=f"NOTSOFAR-1 {meeting.meeting_id} speech excerpt ({duration:.1f}s, {len(words)} words)",
+            description=(
+                f"Real speech from NOTSOFAR-1 meeting {meeting.meeting_id} ({meeting.split}, device "
+                f"{meeting.device_name}), {start:.1f}s-{end:.1f}s, used as the '{role}' ASR fixture"
+            ),
+            duration_sec=round(float(duration), 3),
+            sample_rate=16000,
+            channels=1,
+            sample_width=2,
+            wav_bytes=wav_bytes,
+            expected_speakers=max(1, len(speakers)),
+            reference_text=reference_text,
+            words=words,
+        )
+        _SPEECH_FIXTURE_CACHE[cache_key] = fixture
+        return fixture
+    return None

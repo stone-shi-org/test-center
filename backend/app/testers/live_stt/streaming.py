@@ -48,6 +48,10 @@ from backend.app.testers.live_stt.grpc_client import (
     _run_coro_sync,
     extract_pcm16_audio,
 )
+from backend.app.testers.live_stt.accuracy import (
+    DEFAULT_SPEECH_WER_THRESHOLD,
+    speech_accuracy_check,
+)
 from backend.app.testers.live_stt.metrics import (
     compute_percentiles,
     compute_rtf,
@@ -1046,6 +1050,35 @@ def run_protocol_and_drain_contract_check(
     )
 
 
+def classify_within_budget_rejections(sessions: Sequence[StreamingSessionResult]) -> dict[str, Any]:
+    """Split failed sessions of a within-budget burst into VRAM-limited rejections (acceptable),
+    call-limit rejections and other failures, grouped by status and message for reporting."""
+    vram_limited = capacity_rejected = other_failed = 0
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for sess in sessions:
+        if sess.ok:
+            continue
+        code = str(sess.grpc_status_code or "UNKNOWN")
+        msg = str(sess.error_message or "").strip()
+        if code == "RESOURCE_EXHAUSTED" and "vram" in msg.lower():
+            kind = "vram_limited"
+            vram_limited += 1
+        elif code == "RESOURCE_EXHAUSTED":
+            kind = "capacity_rejected"
+            capacity_rejected += 1
+        else:
+            kind = "other_failed"
+            other_failed += 1
+        g = groups.setdefault((code, kind), {"grpc_status_code": code, "kind": kind, "count": 0, "sample_message": msg[:200]})
+        g["count"] += 1
+    return {
+        "vram_limited": vram_limited,
+        "capacity_rejected": capacity_rejected,
+        "other_failed": other_failed,
+        "groups": sorted(groups.values(), key=lambda g: (g["kind"], g["grpc_status_code"])),
+    }
+
+
 def execute_grpc_streaming_suites(
     *,
     ctx: TestContext,
@@ -1063,8 +1096,16 @@ def execute_grpc_streaming_suites(
     completed_cases: int,
     planned_cases: int,
     api_key: str | None = None,
+    speech_fixtures: dict[str, AudioFixture] | None = None,
+    speech_source: str = "synthetic",
+    speech_wer_threshold: float = DEFAULT_SPEECH_WER_THRESHOLD,
 ) -> int:
-    """Execute `grpc_streaming` and/or `grpc_long_call` suites using `LiveSTTStreamingHarness`."""
+    """Execute `grpc_streaming` and/or `grpc_long_call` suites using `LiveSTTStreamingHarness`.
+
+    ``speech_fixtures`` ('short_speech', 'medium_speech', 'dialog') replace the generated tone fixtures
+    when real speech is available (``speech_source='notsofar'``); a loose WER check is then added to the
+    per-model Transcribe cases.
+    """
     run_streaming = "grpc_streaming" in suites_to_run
     run_long_call = ("grpc_long_call" in suites_to_run) or (
         run_streaming and bool(cfg.get("include_long_call", False))
@@ -1168,9 +1209,10 @@ def execute_grpc_streaming_suites(
         # -------------------------------------------------------------------
         # Case 2: Per-model paced & burst Transcribe sessions (TTFP, Final Latency, RTF)
         # -------------------------------------------------------------------
-        short_fix = get_audio_fixture("short_speech")
-        medium_fix = get_audio_fixture("medium_speech")
-        dialog_fix = get_audio_fixture("two_speaker_dialog")
+        fx = speech_fixtures or {}
+        short_fix = fx.get("short_speech") or get_audio_fixture("short_speech")
+        medium_fix = fx.get("medium_speech") or get_audio_fixture("medium_speech")
+        dialog_fix = fx.get("dialog") or get_audio_fixture("two_speaker_dialog")
 
         fixture_specs = [
             ("short_speech", short_fix, speed if realtime else 0.0, realtime),
@@ -1220,6 +1262,18 @@ def execute_grpc_streaming_suites(
                     require_partials=True,
                     require_word_timestamps=True,
                 )
+                acc_metrics: dict[str, Any] = {}
+                acc_detail: dict[str, Any] = {"fixture_source": speech_source}
+                if speech_source == "notsofar" and fix.reference_text:
+                    acc_ok, acc_check, acc_err, acc_metrics, acc_extra = speech_accuracy_check(
+                        fix.reference_text, last_sess.text, speech_wer_threshold
+                    )
+                    acc_detail.update(acc_extra)
+                    checks = [*checks, acc_check]
+                    if acc_err:
+                        errors = [*errors, acc_err]
+                        eval_msg = f"{eval_msg}; {acc_err}" if not passed else acc_err
+                    passed = passed and acc_ok
                 case_status = "pass" if passed else "fail"
 
                 rep_summary = compute_grpc_streaming_summary(rep_sessions)
@@ -1266,6 +1320,7 @@ def execute_grpc_streaming_suites(
                         "value": fix.duration_sec,
                         "unit": "s",
                     },
+                    **acc_metrics,
                 }
                 if last_sess.inter_partial_latencies_ms:
                     case_metrics["inter_partial_latency_mean_ms"] = {
@@ -1286,6 +1341,7 @@ def execute_grpc_streaming_suites(
                         "resolved_model": last_sess.resolved_model,
                         "engine": m_info.engine,
                         "fixture_id": fix.id,
+                        **acc_detail,
                         "audio_duration_sec": fix.duration_sec,
                         "chunk_ms": chunk_ms,
                         "speed": case_speed,
@@ -1334,26 +1390,51 @@ def execute_grpc_streaming_suites(
         all_latencies_ms.append(conc_within.wall_ms)
 
         within_summary = compute_grpc_streaming_summary([s for s in conc_within.sessions if s.ok])
+        within_breakdown = classify_within_budget_rejections(conc_within.sessions)
+        vram_limited = within_breakdown["vram_limited"]
+        capacity_rejected = within_breakdown["capacity_rejected"]
+        other_failed = within_breakdown["other_failed"]
+        rejection_text = ", ".join(
+            f"{g['grpc_status_code']} x{g['count']} ({g['sample_message']!r})"
+            for g in within_breakdown["groups"]
+        )
+        # Below max_concurrent_calls, a clean RESOURCE_EXHAUSTED for insufficient VRAM is correct
+        # behaviour (LS-17): the GPU, not the call limit, is the real budget. Only call-limit
+        # rejections and other errors are failures.
         within_passed = (
-            conc_within.ok_count == within_n
-            and conc_within.resource_exhausted_count == 0
-            and conc_within.other_error_count == 0
+            conc_within.ok_count >= 1
+            and capacity_rejected == 0
+            and other_failed == 0
+            and conc_within.ok_count + vram_limited == within_n
+        )
+        within_detail_text = (
+            f"ok={conc_within.ok_count}/{within_n}, vram_limited={vram_limited}, "
+            f"capacity_rejected={capacity_rejected}, other_errors={other_failed}"
+            + (f": {rejection_text}" if rejection_text else "")
         )
         within_checks = [
             {
-                "name": "all_within_budget_sessions_ok",
+                "name": "within_budget_sessions_ok_or_vram_limited",
                 "passed": within_passed,
-                "detail": (
-                    f"ok={conc_within.ok_count}/{within_n}, "
-                    f"resource_exhausted={conc_within.resource_exhausted_count}, "
-                    f"other_errors={conc_within.other_error_count}"
-                ),
+                "detail": within_detail_text,
             }
         ]
+        if vram_limited:
+            within_checks.append(
+                {
+                    "name": "vram_limited_sessions_rejected_cleanly",
+                    "passed": True,
+                    "detail": (
+                        f"{vram_limited} session(s) rejected with RESOURCE_EXHAUSTED for insufficient VRAM "
+                        f"below max_concurrent_calls={max_concurrent}; effective GPU capacity is about "
+                        f"{conc_within.ok_count} concurrent {primary_model} stream(s)"
+                    ),
+                }
+            )
         within_errors = (
             []
             if within_passed
-            else [f"all_within_budget_sessions_ok: {within_checks[0]['detail']}"]
+            else [f"within_budget_sessions_ok_or_vram_limited: {within_detail_text}"]
         )
 
         result.add_case(
@@ -1371,6 +1452,7 @@ def execute_grpc_streaming_suites(
                 "rtf": {"value": within_summary["rtf_mean"], "unit": "x", "better": "lower"},
                 "concurrent_sessions": {"value": within_n, "unit": "sessions"},
                 "sessions_ok": {"value": conc_within.ok_count, "unit": "sessions", "better": "higher"},
+                "vram_limited_sessions": {"value": vram_limited, "unit": "sessions"},
             },
             detail={
                 "endpoint": "StreamingASR.Transcribe",
@@ -1379,10 +1461,16 @@ def execute_grpc_streaming_suites(
                 "max_concurrent_calls": max_concurrent,
                 "ok_count": conc_within.ok_count,
                 "resource_exhausted_count": conc_within.resource_exhausted_count,
+                "vram_limited_count": vram_limited,
+                "capacity_rejected_count": capacity_rejected,
+                "other_failed_count": other_failed,
+                "rejections": within_breakdown["groups"],
                 "wall_ms": conc_within.wall_ms,
                 "passed": within_passed,
                 "eval_message": (
-                    f"Concurrent within-budget ({conc_within.ok_count}/{within_n} OK): "
+                    f"Concurrent within-budget ({conc_within.ok_count}/{within_n} OK"
+                    + (f", {vram_limited} limited by VRAM" if vram_limited else "")
+                    + "): "
                     f"TTFP={within_summary['ttfp_mean_ms']}ms, "
                     f"FinalLat={within_summary['final_latency_mean_ms']}ms, "
                     f"RTF={within_summary['rtf_mean']:.4f}x"
