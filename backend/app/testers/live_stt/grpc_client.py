@@ -470,8 +470,13 @@ def resolve_grpc_target(
     Precedence:
     1. ``config["grpc_target"]`` or ``config["grpc_url"]``
     2. ``target["grpc_target"]``, ``target["grpc_url"]``, ``target["extra"]["grpc_target"]``, or ``target["extra"]["grpc_url"]``
-    3. ``grpc_host`` + ``grpc_port`` in ``config`` / ``target`` / ``target["extra"]``
-    4. Host from ``base_url`` (or raw string) combined with explicit ``grpc_port``, URL port, or ``default_grpc_port`` (50051).
+    3. ``grpc_host`` + port in ``config`` / ``target`` / ``target["extra"]``
+    4. Host from ``base_url`` (or raw string) combined with the port, the URL's port, or ``default_grpc_port`` (50051).
+
+    Port precedence: the target's ``grpc_port`` (``target`` / ``target["extra"]``, the target form's
+    gRPC Port field) wins over ``config["grpc_port"]``, which only applies when the target sets none.
+    Saved run configs and templates can carry ``grpc_port: 50051`` from an old schema default, and
+    that must not override the port configured on the target.
     """
     cfg = config if isinstance(config, dict) else {}
     tgt_dict = target if isinstance(target, dict) else {}
@@ -479,9 +484,9 @@ def resolve_grpc_target(
 
     explicit_port: int | None = None
     for port_candidate in (
-        cfg.get("grpc_port"),
         tgt_dict.get("grpc_port"),
         extra.get("grpc_port"),
+        cfg.get("grpc_port"),
     ):
         if port_candidate is not None and str(port_candidate).strip():
             try:

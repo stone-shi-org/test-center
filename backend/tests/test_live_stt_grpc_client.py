@@ -180,6 +180,39 @@ def test_resolve_grpc_target_variants() -> None:
         resolve_grpc_target({})
 
 
+def test_resolve_grpc_target_target_port_beats_config_port() -> None:
+    """Run 28: target gRPC Port 4030 was overridden by a config grpc_port of 50051."""
+    target = {"base_url": "https://live-stt.local.shifamily.com/", "extra": {"grpc_port": 4030}}
+
+    # Target port wins over a config port (e.g. a stale 50051 saved in a template)
+    assert resolve_grpc_target(target, {"grpc_port": 50051}) == "live-stt.local.shifamily.com:4030"
+    assert resolve_grpc_target({**target, "extra": {}, "grpc_port": 4031}, {"grpc_port": 50051}) == (
+        "live-stt.local.shifamily.com:4031"
+    )
+
+    # Config port applies only when the target sets none
+    assert resolve_grpc_target({"base_url": "https://stt.example/"}, {"grpc_port": 6000}) == "stt.example:6000"
+    # Neither set: default port
+    assert resolve_grpc_target({"base_url": "https://stt.example/"}, {}) == f"stt.example:{DEFAULT_GRPC_PORT}"
+
+    # A full grpc_target in the run config is still an explicit override of everything
+    assert resolve_grpc_target(target, {"grpc_target": "10.0.0.9:7000", "grpc_port": 50051}) == "10.0.0.9:7000"
+
+
+def test_streaming_harness_uses_target_port_with_validated_tester_config() -> None:
+    """The tester's validated config must not inject a grpc_port that hides the target's port."""
+    from backend.app.testers.live_stt.tester import LiveSTTTester
+
+    cfg = LiveSTTTester().validate_and_apply_config({"models": "default", "suites": ["grpc_streaming"]})
+    assert "grpc_port" not in cfg
+
+    harness = LiveSTTStreamingHarness(
+        {"base_url": "https://live-stt.local.shifamily.com/", "extra": {"grpc_port": 4030}},
+        config=cfg,
+    )
+    assert harness.grpc_target == "live-stt.local.shifamily.com:4030"
+
+
 # ===========================================================================
 # 3. Audio Extraction & Chunking Tests
 # ===========================================================================

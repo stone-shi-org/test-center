@@ -55,7 +55,6 @@ from backend.app.testers.live_stt.fixtures import (
     get_bad_audio_fixture,
 )
 from backend.app.testers.live_stt.grpc_client import (
-    DEFAULT_GRPC_PORT,
     LiveSTTGRPCError,
     LiveSTTStreamingHarness,
     resolve_grpc_target,
@@ -422,11 +421,15 @@ class LiveSTTTester(TesterPlugin):
                 "x-advanced": True,
             },
             "grpc_port": {
+                # No schema default: a default here was filled into every run config and silently
+                # overrode the target's gRPC Port (run 28: target port 4030, run used 50051).
                 "type": "integer",
-                "default": DEFAULT_GRPC_PORT,
                 "minimum": 1,
                 "maximum": 65535,
-                "description": "gRPC port used when deriving gRPC target from HTTP base_url",
+                "description": (
+                    "gRPC port used with the host of base_url, only when the target has no gRPC Port set "
+                    "(default 50051). Use grpc_target for a full host:port override."
+                ),
                 "x-advanced": True,
             },
             "chunk_ms": {
