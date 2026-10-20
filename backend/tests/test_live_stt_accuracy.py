@@ -1196,3 +1196,129 @@ def test_accuracy_streaming_and_diarization_server_errors_excluded_and_not_cache
         assert servicer.total_calls == 3  # 1 ok + 1 fail on run1, + 1 fail on run2 (ok was cached)
 
 
+
+
+def _diarization_progress_transport(events: list[tuple[str, str]]) -> httpx.MockTransport:
+    """Mock live-stt for diarization progress tests; records each request into ``events``."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body_text = request.read().decode("latin-1", errors="ignore")
+        if path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "parakeet-tdt-0.6b-v2", "object": "model", "type": "asr", "engine": "parakeet"},
+                        {"id": "pyannote/speaker-diarization-3.1", "object": "model", "type": "diarization", "engine": "pyannote"},
+                    ],
+                },
+            )
+        meeting = "MTG_90002" if "MTG_90002.wav" in body_text else "MTG_90001"
+        if path == "/v1/audio/diarization":
+            events.append(("request", f"diarization:{meeting}"))
+            return httpx.Response(
+                200,
+                json={
+                    "num_speakers": 2,
+                    "duration": 3.0,
+                    "segments": [
+                        {"speaker": "SPEAKER_00", "start_sec": 0.1, "end_sec": 1.4},
+                        {"speaker": "SPEAKER_01", "start_sec": 1.6, "end_sec": 2.8},
+                    ],
+                    "speakers": [
+                        {"speaker": "SPEAKER_00", "total_sec": 1.3, "segment_count": 1},
+                        {"speaker": "SPEAKER_01", "total_sec": 1.2, "segment_count": 1},
+                    ],
+                },
+            )
+        if path == "/v1/audio/transcriptions":
+            events.append(("request", f"transcription:{meeting}"))
+            return httpx.Response(
+                200,
+                json={
+                    "text": "hello bob lets start",
+                    "language": "en",
+                    "duration": 3.0,
+                    "words": [{"word": "hello", "start": 0.2, "end": 0.4}],
+                    "segments": [],
+                },
+            )
+        return httpx.Response(404, json={"error": {"message": "Not found"}})
+
+    return httpx.MockTransport(handler)
+
+
+def test_accuracy_diarization_logs_progress_per_meeting(tmp_path: Path):
+    """accuracy_diarization alone must diarize meeting by meeting, logging each one, instead of
+    silently diarizing every meeting up front (looked stuck on 80 meetings)."""
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    def on_event(ev: dict[str, Any]) -> None:
+        if ev.get("type") == "log":
+            events.append(("log", str(ev.get("message", ""))))
+
+    ctx = TestContext(run_id=210, artifacts_dir=tmp_path / "diar_progress", emit_stdout=False, on_event=on_event)
+    res = LiveSTTTester().run(
+        {
+            "suites": ["accuracy_diarization"],
+            "dataset_dir": str(ds_root),
+            "meetings": ["MTG_90001", "MTG_90002"],
+            "use_cache": False,
+            "_transport": _diarization_progress_transport(events),
+        },
+        {"name": "mock-live-stt", "base_url": "http://mockserver/v1"},
+        ctx,
+    )
+    assert [c.case_id for c in res.cases] == [
+        "accuracy_diarization:pyannote/speaker-diarization-3.1:MTG_90001",
+        "accuracy_diarization:pyannote/speaker-diarization-3.1:MTG_90002",
+    ]
+    assert not any(kind == "log" and "Pre-computing diarization" in msg for kind, msg in events)
+
+    # Order per meeting: "Running [i/N] ..." log, then its diarization request, then the "-> STATUS" log
+    def idx(pred) -> int:
+        return next(i for i, e in enumerate(events) if pred(e))
+
+    for n, mtg in enumerate(("MTG_90001", "MTG_90002"), start=1):
+        running = idx(lambda e: e[0] == "log" and e[1].startswith(f"Running [{n}/2] accuracy_diarization:") and mtg in e[1])
+        request = idx(lambda e: e == ("request", f"diarization:{mtg}"))
+        done = idx(lambda e: e[0] == "log" and f"accuracy_diarization:pyannote/speaker-diarization-3.1:{mtg} -> " in e[1])
+        assert running < request < done
+    assert sum(1 for e in events if e[0] == "request") == 2
+
+
+def test_accuracy_wer_cpwer_precompute_logs_each_meeting_and_is_reused(tmp_path: Path):
+    """With accuracy_wer + accuracy_diarization, the cpWER pre-compute logs every meeting and the
+    diarization suite reuses those results instead of diarizing again."""
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    def on_event(ev: dict[str, Any]) -> None:
+        if ev.get("type") == "log":
+            events.append(("log", str(ev.get("message", ""))))
+
+    ctx = TestContext(run_id=211, artifacts_dir=tmp_path / "cpwer_progress", emit_stdout=False, on_event=on_event)
+    res = LiveSTTTester().run(
+        {
+            "suites": ["accuracy_wer", "accuracy_diarization"],
+            "dataset_dir": str(ds_root),
+            "meetings": ["MTG_90001", "MTG_90002"],
+            "use_cache": False,
+            "_transport": _diarization_progress_transport(events),
+        },
+        {"name": "mock-live-stt", "base_url": "http://mockserver/v1"},
+        ctx,
+    )
+    logs = [msg for kind, msg in events if kind == "log"]
+    assert any(m.startswith("Pre-computing diarization for cpWER") for m in logs)
+    for n, mtg in enumerate(("MTG_90001", "MTG_90002"), start=1):
+        assert any(f"[diarize {n}/2] pyannote/speaker-diarization-3.1:{mtg} -> HTTP 200, speakers=2, segments=2" in m for m in logs)
+    # Each meeting diarized exactly once across pre-compute and the accuracy_diarization suite
+    assert sorted(msg for kind, msg in events if kind == "request" and msg.startswith("diarization:")) == [
+        "diarization:MTG_90001",
+        "diarization:MTG_90002",
+    ]
+    assert len([c for c in res.cases if c.suite == "accuracy_diarization"]) == 2

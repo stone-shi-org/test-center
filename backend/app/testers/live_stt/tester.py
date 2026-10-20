@@ -3424,13 +3424,32 @@ class LiveSTTTester(TesterPlugin):
         der_collar_sec = float(cfg.get("der_collar_sec", 0.0))
         der_frame_sec = float(cfg.get("der_frame_sec", 0.05))
 
-        # Pre-resolve diarization per meeting if needed for accuracy_diarization or cpWER alignment
+        # Pre-compute diarization only where the WER suites need it: cpWER speaker attribution for
+        # accuracy_wer / accuracy_streaming, which run before accuracy_diarization. One model per
+        # meeting is enough (the first that returns segments). accuracy_diarization itself diarizes
+        # lazily in its own loop, with per-meeting progress logs, reusing these results and the cache.
         diar_by_model_meeting: dict[tuple[str, str], dict[str, Any]] = {}
         primary_diar_by_meeting: dict[str, list[dict[str, Any]]] = {}
-        if diarize_for_cpwer and diar_models:
-            models_to_diarize = diar_models if "accuracy_diarization" in suites_to_run else [diar_models[0]]
-            for d_model in models_to_diarize:
-                for meeting in meetings:
+        needs_cpwer_diarization = (
+            bool(diar_models)
+            and diarize_for_cpwer
+            and compute_cpwer_enabled
+            and any(sname in suites_to_run for sname in ("accuracy_wer", "accuracy_streaming"))
+        )
+        if needs_cpwer_diarization:
+            n_meetings = len(meetings)
+            ctx.log(
+                f"Pre-computing diarization for cpWER speaker attribution on {n_meetings} meeting(s) "
+                f"(model={diar_models[0].id}, fallback={[m.id for m in diar_models[1:]] or 'none'})..."
+            )
+            for idx, meeting in enumerate(meetings, start=1):
+                for d_model in diar_models:
+                    ctx.check_cancelled()
+                    ctx.progress(
+                        completed_cases,
+                        planned_cases,
+                        f"Diarizing for cpWER [{idx}/{n_meetings}] {d_model.id}:{meeting.meeting_id}",
+                    )
                     d_payload = self._evaluate_meeting_diarization(
                         client=client,
                         eval_cache=eval_cache,
@@ -3449,8 +3468,27 @@ class LiveSTTTester(TesterPlugin):
                         and isinstance(d_body.get("segments"), list)
                         else []
                     )
-                    if segs and meeting.meeting_id not in primary_diar_by_meeting:
+                    d_status = d_payload.get("status_code")
+                    d_lat = float(d_payload.get("latency_ms", 0.0) or 0.0)
+                    n_spk = d_body.get("num_speakers") if isinstance(d_body, dict) else None
+                    err_msg = (
+                        d_payload.get("transport_error")
+                        or (extract_error_message(d_body) if isinstance(d_body, dict) else None)
+                    )
+                    ctx.log(
+                        f"  [diarize {idx}/{n_meetings}] {d_model.id}:{meeting.meeting_id} -> "
+                        + (
+                            f"HTTP {d_status}, speakers={n_spk}, segments={len(segs)}"
+                            if segs
+                            else f"no segments (HTTP {d_status}{f': {err_msg}' if err_msg else ''})"
+                        )
+                        + f" | Latency={d_lat:.2f}ms, RTF={compute_rtf(d_lat, meeting.duration_sec):.4f}x, "
+                        f"Cache={'HIT' if d_payload.get('cache_hit') else 'MISS'}",
+                        level="info" if segs else "warning",
+                    )
+                    if segs:
                         primary_diar_by_meeting[meeting.meeting_id] = segs
+                        break
 
         meeting_asr_words: dict[str, list[dict[str, Any]]] = {}
 
