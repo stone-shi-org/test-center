@@ -13,6 +13,155 @@ const SERIES_COLORS = [
   '#eab308', // yellow
 ]
 
+export type MetricCategoryId = 'latency' | 'throughput' | 'accuracy' | 'cases' | 'other'
+export type MetricFilterTab = 'key' | 'all' | MetricCategoryId
+
+export interface MetricCategoryMeta {
+  id: MetricCategoryId
+  label: string
+  shortLabel: string
+}
+
+export const METRIC_CATEGORIES: MetricCategoryMeta[] = [
+  { id: 'latency', label: 'Latency & Timing', shortLabel: 'Latency' },
+  { id: 'throughput', label: 'Throughput & Speed', shortLabel: 'Throughput' },
+  { id: 'accuracy', label: 'Accuracy & Quality', shortLabel: 'Accuracy' },
+  { id: 'cases', label: 'Cases & Coverage', shortLabel: 'Cases' },
+  { id: 'other', label: 'System & Other', shortLabel: 'Other' },
+]
+
+const HEADLINE_METRIC_NAMES = new Set([
+  'pass_rate',
+  'success_rate',
+  'latency_mean_ms',
+  'latency_p50_ms',
+  'latency_p95_ms',
+  'ttft_ms',
+  'ttft_mean_ms',
+  'ttft_p50_ms',
+  'ttft_p95_ms',
+  'ttfp_mean_ms',
+  'ttfp_p50_ms',
+  'grpc_ttfp_mean_ms',
+  'tts_ttfb_mean_ms',
+  'rtf',
+  'rtf_mean',
+  'grpc_rtf_mean',
+  'tokens_per_sec',
+  'tps',
+  'decode_tps_mean',
+  'throughput',
+  'throughput_seq_docs_per_sec',
+  'wer',
+  'wer_pct',
+  'http_wer',
+  'streaming_wer',
+  'cpwer',
+  'cpwer_pct',
+  'der',
+  'der_pct',
+  'speaker_count_error',
+  'judge_score_mean',
+  'judge_pass_rate',
+  'recall@1',
+  'recall_at_1',
+  'mrr',
+])
+
+const COMPACT_PILL_THRESHOLD = 12
+const MAX_COLLAPSED_PILLS = 12
+
+export function categorizeMetric(
+  metric: Pick<TrendMetricOption, 'name' | 'unit'>
+): MetricCategoryId {
+  const n = metric.name.toLowerCase()
+  const u = (metric.unit || '').toLowerCase()
+
+  if (
+    n === 'pass_rate' ||
+    n === 'success_rate' ||
+    n.includes('cases') ||
+    n.includes('meetings') ||
+    n.includes('cache_hits') ||
+    n.includes('cache_misses') ||
+    u === 'cases' ||
+    u === 'meetings'
+  ) {
+    return 'cases'
+  }
+
+  if (
+    /(^|_)(wer|cpwer|der)($|_)/.test(n) ||
+    n.startsWith('speaker_') ||
+    n.startsWith('judge_') ||
+    n === 'judge_score' ||
+    n.startsWith('recall') ||
+    n === 'mrr' ||
+    n === 'mean_rank' ||
+    n.includes('similarity') ||
+    n.startsWith('consistency_') ||
+    n.startsWith('norm_') ||
+    n.includes('accuracy') ||
+    n.includes('cer') ||
+    n.includes('bleu') ||
+    n.includes('rouge')
+  ) {
+    return 'accuracy'
+  }
+
+  if (
+    /(^|_)(rtf|tps|throughput)($|_)/.test(n) ||
+    n === 'tokens_per_sec' ||
+    n.endsWith('_per_sec') ||
+    u === 'x' ||
+    u === 'tokens/s' ||
+    u === 'tok/s' ||
+    u === 'docs/s' ||
+    u === 'req/s'
+  ) {
+    return 'throughput'
+  }
+
+  if (
+    n.includes('latency') ||
+    n.includes('ttft') ||
+    n.includes('ttfp') ||
+    n.includes('ttfb') ||
+    n.includes('duration') ||
+    n.endsWith('_wall_ms') ||
+    n.endsWith('_ms') ||
+    n.endsWith('_sec') ||
+    u === 'ms' ||
+    u === 's' ||
+    u === 'sec'
+  ) {
+    return 'latency'
+  }
+
+  return 'other'
+}
+
+export function isKeyMetric(metric: Pick<TrendMetricOption, 'name'>): boolean {
+  return HEADLINE_METRIC_NAMES.has(metric.name.toLowerCase())
+}
+
+export function groupMetricsByCategory(
+  metrics: TrendMetricOption[]
+): Array<{ category: MetricCategoryMeta; metrics: TrendMetricOption[] }> {
+  const buckets = new Map<MetricCategoryId, TrendMetricOption[]>()
+  for (const cat of METRIC_CATEGORIES) {
+    buckets.set(cat.id, [])
+  }
+  for (const m of metrics) {
+    const catId = categorizeMetric(m)
+    buckets.get(catId)!.push(m)
+  }
+  return METRIC_CATEGORIES.map((category) => ({
+    category,
+    metrics: buckets.get(category.id) || [],
+  })).filter((g) => g.metrics.length > 0)
+}
+
 function parseMetricEntry(raw: unknown): {
   value: number | null
   unit: string | null
@@ -318,6 +467,9 @@ export function MetricTrendChart({
   onStartCompare: (runIds: number[], baselineRunId?: number) => void
 }) {
   const [selectedMetric, setSelectedMetric] = useState<string | null>(null)
+  const [selectedCategory, setSelectedCategory] = useState<MetricFilterTab | null>(null)
+  const [metricSearch, setMetricSearch] = useState('')
+  const [pillsExpanded, setPillsExpanded] = useState(false)
   const [hiddenSeries, setHiddenSeries] = useState<string[]>([])
   const [activePoint, setActivePoint] = useState<TrendPoint | null>(null)
   const [clickMode, setClickMode] = useState<'menu' | 'open' | 'compare'>('menu')
@@ -347,6 +499,76 @@ export function MetricTrendChart({
       </div>
     )
   }
+
+  const groupedMetrics = groupMetricsByCategory(availableMetrics)
+  const explicitKeyMetrics = availableMetrics.filter((m) => isKeyMetric(m))
+  const keyMetrics =
+    explicitKeyMetrics.length > 0 ? explicitKeyMetrics : availableMetrics.slice(0, 8)
+  const showKeyTab =
+    availableMetrics.length > COMPACT_PILL_THRESHOLD &&
+    keyMetrics.length < availableMetrics.length
+
+  const defaultCategory: MetricFilterTab = showKeyTab ? 'key' : 'all'
+  const activeCategory: MetricFilterTab = (() => {
+    if (selectedCategory === 'all') return 'all'
+    if (selectedCategory === 'key' && showKeyTab) return 'key'
+    if (
+      selectedCategory &&
+      groupedMetrics.some((g) => g.category.id === selectedCategory)
+    ) {
+      return selectedCategory
+    }
+    return defaultCategory
+  })()
+
+  const trimmedSearch = metricSearch.trim().toLowerCase()
+  const categoryFilteredMetrics: TrendMetricOption[] = (() => {
+    if (trimmedSearch) {
+      return availableMetrics.filter((m) => {
+        const cat = METRIC_CATEGORIES.find((c) => c.id === categorizeMetric(m))
+        return (
+          m.name.toLowerCase().includes(trimmedSearch) ||
+          (m.unit || '').toLowerCase().includes(trimmedSearch) ||
+          (cat?.label.toLowerCase().includes(trimmedSearch) ?? false)
+        )
+      })
+    }
+    if (activeCategory === 'key') return keyMetrics
+    if (activeCategory === 'all') return availableMetrics
+    return (
+      groupedMetrics.find((g) => g.category.id === activeCategory)?.metrics ||
+      availableMetrics
+    )
+  })()
+
+  const activeMetricOption = availableMetrics.find((m) => m.name === currentMetric)
+  const shouldCollapsePills =
+    !trimmedSearch &&
+    !pillsExpanded &&
+    categoryFilteredMetrics.length > MAX_COLLAPSED_PILLS
+
+  const visibleMetricPills: TrendMetricOption[] = (() => {
+    let list = shouldCollapsePills
+      ? categoryFilteredMetrics.slice(0, MAX_COLLAPSED_PILLS)
+      : [...categoryFilteredMetrics]
+
+    if (!trimmedSearch && activeMetricOption && !list.some((m) => m.name === activeMetricOption.name)) {
+      if (shouldCollapsePills && list.length >= MAX_COLLAPSED_PILLS) {
+        list = [activeMetricOption, ...list.slice(0, MAX_COLLAPSED_PILLS - 1)]
+      } else {
+        list = [activeMetricOption, ...list]
+      }
+    }
+    return list
+  })()
+
+  const hiddenPillsCount = Math.max(
+    0,
+    categoryFilteredMetrics.length -
+      visibleMetricPills.filter((m) =>
+        categoryFilteredMetrics.some((cm) => cm.name === m.name)
+      ).length
+  )
 
   const visibleSeries = series.filter((s) => !hiddenSeries.includes(s.series_key))
   const visiblePoints = visibleSeries.flatMap((s) => s.points)
@@ -468,13 +690,28 @@ export function MetricTrendChart({
                 setActivePoint(null)
               }}
             >
-              {availableMetrics.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
-                  {m.unit ? ` (${m.unit})` : ''}
-                  {m.better === 'lower' ? ' ↓' : m.better === 'higher' ? ' ↑' : ''}
-                </option>
-              ))}
+              {groupedMetrics.length > 1
+                ? groupedMetrics.map((g) => (
+                    <optgroup
+                      key={g.category.id}
+                      label={`${g.category.label} (${g.metrics.length})`}
+                    >
+                      {g.metrics.map((m) => (
+                        <option key={m.name} value={m.name}>
+                          {m.name}
+                          {m.unit ? ` (${m.unit})` : ''}
+                          {m.better === 'lower' ? ' ↓' : m.better === 'higher' ? ' ↑' : ''}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))
+                : availableMetrics.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.name}
+                      {m.unit ? ` (${m.unit})` : ''}
+                      {m.better === 'lower' ? ' ↓' : m.better === 'higher' ? ' ↑' : ''}
+                    </option>
+                  ))}
             </select>
           </div>
 
@@ -497,26 +734,146 @@ export function MetricTrendChart({
         </div>
       </div>
 
-      {/* Metric Quick Selector Pills */}
+      {/* Metric Quick Selector & Category / Search Navigator */}
       {availableMetrics.length > 1 && (
-        <div className="chart-metric-pills">
-          {availableMetrics.map((m) => {
-            const isSelected = m.name === currentMetric
-            return (
-              <button
-                key={m.name}
-                type="button"
-                className={`pill-btn ${isSelected ? 'selected' : ''}`}
-                onClick={() => {
-                  setSelectedMetric(m.name)
-                  setActivePoint(null)
-                }}
+        <div className="trend-metric-browser" data-testid="trend-metric-browser">
+          {(groupedMetrics.length > 1 || availableMetrics.length > 6) && (
+            <div className="trend-metric-toolbar" data-testid="trend-metric-toolbar">
+              <div
+                className="trend-category-tabs"
+                role="tablist"
+                aria-label="Metric categories"
               >
-                <span>{m.name}</span>
-                {m.unit && <span className="text-muted text-sm">({m.unit})</span>}
+                {showKeyTab && (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={activeCategory === 'key' && !trimmedSearch}
+                    className={`trend-category-tab ${activeCategory === 'key' && !trimmedSearch ? 'active' : ''}`}
+                    data-testid="trend-category-key"
+                    onClick={() => {
+                      setSelectedCategory('key')
+                      setMetricSearch('')
+                      setPillsExpanded(false)
+                    }}
+                  >
+                    ★ Key ({keyMetrics.length})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={activeCategory === 'all' && !trimmedSearch}
+                  className={`trend-category-tab ${activeCategory === 'all' && !trimmedSearch ? 'active' : ''}`}
+                  data-testid="trend-category-all"
+                  onClick={() => {
+                    setSelectedCategory('all')
+                    setMetricSearch('')
+                    setPillsExpanded(false)
+                  }}
+                >
+                  All ({availableMetrics.length})
+                </button>
+                {groupedMetrics.map((g) => (
+                  <button
+                    key={g.category.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeCategory === g.category.id && !trimmedSearch}
+                    className={`trend-category-tab ${activeCategory === g.category.id && !trimmedSearch ? 'active' : ''}`}
+                    data-testid={`trend-category-${g.category.id}`}
+                    onClick={() => {
+                      setSelectedCategory(g.category.id)
+                      setMetricSearch('')
+                      setPillsExpanded(false)
+                    }}
+                  >
+                    {g.category.label} ({g.metrics.length})
+                  </button>
+                ))}
+              </div>
+
+              <div className="search-input-wrapper trend-metric-search-wrap">
+                <span className="search-icon">🔍</span>
+                <input
+                  type="text"
+                  className="search-input trend-metric-search-input"
+                  placeholder={`Filter ${availableMetrics.length} metrics...`}
+                  aria-label="Search trend metrics"
+                  data-testid="trend-metric-search"
+                  value={metricSearch}
+                  onChange={(e) => setMetricSearch(e.target.value)}
+                />
+                {metricSearch && (
+                  <button
+                    type="button"
+                    className="trend-search-clear-btn"
+                    aria-label="Clear metric search"
+                    data-testid="trend-metric-search-clear"
+                    onClick={() => setMetricSearch('')}
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {visibleMetricPills.length === 0 ? (
+            <div className="text-muted text-sm" data-testid="trend-metric-no-matches">
+              No metrics match &ldquo;{metricSearch}&rdquo;.{' '}
+              <button
+                type="button"
+                className="btn-link"
+                onClick={() => setMetricSearch('')}
+              >
+                Clear filter
               </button>
-            )
-          })}
+            </div>
+          ) : (
+            <div className="chart-metric-pills">
+              {visibleMetricPills.map((m) => {
+                const isSelected = m.name === currentMetric
+                return (
+                  <button
+                    key={m.name}
+                    type="button"
+                    data-testid={`trend-metric-pill-${m.name}`}
+                    className={`pill-btn ${isSelected ? 'selected' : ''}`}
+                    onClick={() => {
+                      setSelectedMetric(m.name)
+                      setActivePoint(null)
+                    }}
+                  >
+                    <span>{m.name}</span>
+                    {m.unit && <span className="text-muted text-sm">({m.unit})</span>}
+                  </button>
+                )
+              })}
+              {hiddenPillsCount > 0 && (
+                <button
+                  type="button"
+                  className="pill-btn pill-btn-more"
+                  data-testid="trend-pills-expand-btn"
+                  onClick={() => setPillsExpanded(true)}
+                >
+                  +{hiddenPillsCount} more
+                </button>
+              )}
+              {pillsExpanded &&
+                !trimmedSearch &&
+                categoryFilteredMetrics.length > MAX_COLLAPSED_PILLS && (
+                  <button
+                    type="button"
+                    className="pill-btn pill-btn-more"
+                    data-testid="trend-pills-collapse-btn"
+                    onClick={() => setPillsExpanded(false)}
+                  >
+                    Show fewer
+                  </button>
+                )}
+            </div>
+          )}
         </div>
       )}
 

@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RetentionSettings, Run } from '../../api/types.ts'
 import { matchRoute, RouterContext } from '../../router/index.ts'
+import { categorizeMetric, groupMetricsByCategory } from './MetricTrendChart.tsx'
 import { RunsListView } from './RunsListView.tsx'
 
 const mockRuns: Run[] = [
@@ -451,5 +452,123 @@ describe('RunsListView — Filterable Run History, Per-Metric Trend Charts & Ret
         '2 baseline runs protected'
       )
     })
+  })
+
+  it('groups large metric sets by category, defaults to Key metrics, and supports search and expand/collapse', async () => {
+    expect(categorizeMetric({ name: 'grpc_ttfp_mean_ms', unit: 'ms' })).toBe('latency')
+    expect(categorizeMetric({ name: 'rtf_mean', unit: 'x' })).toBe('throughput')
+    expect(categorizeMetric({ name: 'wer_pct', unit: '%' })).toBe('accuracy')
+    expect(categorizeMetric({ name: 'wer_evaluated_cases', unit: 'cases' })).toBe('cases')
+    expect(categorizeMetric({ name: 'models_discovered', unit: 'models' })).toBe('other')
+
+    const manyMetrics: Record<string, { value: number; unit?: string; better?: 'lower' | 'higher' }> = {
+      latency_mean_ms: { value: 120.5, unit: 'ms', better: 'lower' },
+      latency_p50_ms: { value: 110.0, unit: 'ms', better: 'lower' },
+      latency_p95_ms: { value: 180.0, unit: 'ms', better: 'lower' },
+      latency_p99_ms: { value: 220.0, unit: 'ms', better: 'lower' },
+      grpc_ttfp_mean_ms: { value: 45.2, unit: 'ms', better: 'lower' },
+      grpc_ttfp_p95_ms: { value: 65.0, unit: 'ms', better: 'lower' },
+      transcription_json_latency_mean_ms: { value: 95.0, unit: 'ms', better: 'lower' },
+      transcription_sse_latency_mean_ms: { value: 88.0, unit: 'ms', better: 'lower' },
+      diarization_latency_mean_ms: { value: 210.0, unit: 'ms', better: 'lower' },
+      tts_latency_mean_ms: { value: 140.0, unit: 'ms', better: 'lower' },
+      admin_latency_mean_ms: { value: 12.0, unit: 'ms', better: 'lower' },
+      error_handling_latency_mean_ms: { value: 15.0, unit: 'ms', better: 'lower' },
+      concurrency_latency_mean_ms: { value: 175.0, unit: 'ms', better: 'lower' },
+      total_wall_ms: { value: 4500.0, unit: 'ms', better: 'lower' },
+      rtf_mean: { value: 0.08, unit: 'x', better: 'lower' },
+      rtf_p95: { value: 0.14, unit: 'x', better: 'lower' },
+      wer: { value: 0.062, unit: 'ratio', better: 'lower' },
+      wer_pct: { value: 6.2, unit: '%', better: 'lower' },
+      cpwer: { value: 0.085, unit: 'ratio', better: 'lower' },
+      der: { value: 0.11, unit: 'ratio', better: 'lower' },
+      speaker_count_error: { value: 0.25, unit: 'speakers', better: 'lower' },
+      pass_rate: { value: 96.5, unit: '%', better: 'higher' },
+      cases_total: { value: 40, unit: 'cases', better: 'higher' },
+      cases_passed: { value: 39, unit: 'cases', better: 'higher' },
+      models_discovered: { value: 4, unit: 'models', better: 'higher' },
+    }
+
+    const runsWithManyMetrics: Run[] = [
+      {
+        ...mockRuns[0],
+        results: [
+          {
+            ...mockRuns[0].results![0],
+            tester: 'live_stt',
+            metrics: manyMetrics,
+          },
+        ],
+      },
+    ]
+
+    const grouped = groupMetricsByCategory(
+      Object.entries(manyMetrics).map(([name, m]) => ({
+        name,
+        unit: m.unit ?? null,
+        better: m.better ?? null,
+        testers: ['live_stt'],
+        count: 1,
+      }))
+    )
+    expect(grouped.map((g) => g.category.id)).toEqual([
+      'latency',
+      'throughput',
+      'accuracy',
+      'cases',
+      'other',
+    ])
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith('/api/runs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => runsWithManyMetrics,
+        } as Response
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    })
+
+    const navigate = vi.fn()
+    render(
+      <RouterContext.Provider value={{ route: matchRoute('/runs'), navigate }}>
+        <RunsListView />
+      </RouterContext.Provider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('trend-metric-toolbar')).toBeTruthy()
+    })
+
+    // Defaults to Key category tab when > 12 metrics exist
+    const keyTab = screen.getByTestId('trend-category-key')
+    expect(keyTab.getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByTestId('trend-metric-pill-wer_pct')).toBeTruthy()
+    // Non-key detail metric should not clutter the default Key view
+    expect(screen.queryByTestId('trend-metric-pill-admin_latency_mean_ms')).toBeNull()
+
+    // Dropdown has <optgroup> categories
+    const metricSelect = screen.getByLabelText('Trend Metric') as HTMLSelectElement
+    const optgroups = metricSelect.querySelectorAll('optgroup')
+    expect(optgroups.length).toBe(5)
+
+    // Switch to Latency & Timing tab (14 metrics -> collapsed to 12 with "+2 more")
+    fireEvent.click(screen.getByTestId('trend-category-latency'))
+    expect(screen.getByTestId('trend-pills-expand-btn').textContent).toContain('+2 more')
+    fireEvent.click(screen.getByTestId('trend-pills-expand-btn'))
+    expect(screen.getByTestId('trend-metric-pill-total_wall_ms')).toBeTruthy()
+    expect(screen.getByTestId('trend-pills-collapse-btn')).toBeTruthy()
+
+    // Search across all categories
+    const searchInput = screen.getByTestId('trend-metric-search')
+    fireEvent.change(searchInput, { target: { value: 'speaker' } })
+    expect(screen.getByTestId('trend-metric-pill-speaker_count_error')).toBeTruthy()
+    expect(screen.queryByTestId('trend-metric-pill-latency_mean_ms')).toBeNull()
+
+    // Clear search
+    fireEvent.click(screen.getByTestId('trend-metric-search-clear'))
+    expect((searchInput as HTMLInputElement).value).toBe('')
   })
 })
