@@ -480,3 +480,53 @@ def test_grpc_streaming_uses_real_speech_fixtures_with_wer(tmp_path: Path):
         assert any(ch["name"] == "speech_wer_within_threshold" for ch in c.detail["checks"])
     assert per_model["short_speech"].metrics["wer"]["value"] == pytest.approx(0.0, abs=1e-9)
     assert per_model["short_speech"].status == "pass"
+
+
+def test_build_long_call_audio_fixture_from_real_base(tmp_path: Path):
+    from backend.app.testers.live_stt.dataset import build_notsofar_speech_fixture
+    from backend.tests.test_live_stt_accuracy import _create_long_synthetic_notsofar_split
+
+    ds_root = _create_long_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+    base = build_notsofar_speech_fixture("short_speech", dataset_dir=ds_root)
+    assert base is not None and base.duration_sec == pytest.approx(6.0, abs=0.01)
+
+    long_fix = build_long_call_audio_fixture(duration_sec=15.0, base_fixture=base)
+    assert long_fix.id == f"long_call_15s:{base.id}"
+    assert long_fix.duration_sec == pytest.approx(15.0, abs=0.01)
+    # 2 full loops plus a partial third; words rebased by 6s per loop and monotonic
+    assert len(long_fix.words) > 2 * len(base.words)
+    assert long_fix.words[len(base.words)].start_sec == pytest.approx(base.words[0].start_sec + 6.0, abs=0.01)
+    assert all(long_fix.words[i].start_sec <= long_fix.words[i + 1].start_sec for i in range(len(long_fix.words) - 1))
+    assert long_fix.words[-1].end_sec <= long_fix.duration_sec + 1e-6
+
+
+def test_grpc_long_call_only_run_uses_real_speech(tmp_path: Path):
+    """Run 36: suites=['grpc_long_call'] alone looped the tone fixture and got no partials/words."""
+    from backend.tests.test_live_stt_accuracy import _create_long_synthetic_notsofar_split
+
+    ds_root = _create_long_synthetic_notsofar_split(tmp_path / "NOTSOFAR-1")
+    with MockLiveSTTGRPCServer(max_concurrent_calls=2, recycle_every_sec=3.0, final_delay_sec=0.005) as grpc_server:
+        result = LiveSTTTester().run(
+            config={
+                "suites": ["grpc_long_call"],
+                "include_long_call": True,
+                "grpc_target": grpc_server.target,
+                "discover_models": False,
+                "long_call_duration_sec": 12.0,
+                "long_call_speed": 20.0,
+                "dataset_dir": str(ds_root),
+                "speech_wer_threshold": 5.0,
+            },
+            target={"name": "mock-grpc-long-call-real", "grpc_target": grpc_server.target},
+            ctx=_make_ctx(tmp_path, run_id=3112),
+        )
+
+    long_cases = [c for c in result.cases if c.suite == "grpc_long_call"]
+    assert len(long_cases) == 1
+    lc = long_cases[0]
+    assert lc.status == "pass", lc.detail.get("errors")
+    assert lc.detail["fixture_source"] == "notsofar"
+    assert lc.detail["fixture_id"].startswith("long_call_12s:notsofar:MTG_91001:")
+    assert lc.detail["audio_duration_sec"] == pytest.approx(12.0, abs=0.01)
+    assert any(ch["name"] == "speech_wer_within_threshold" for ch in lc.detail["checks"])
+    assert "wer" in lc.metrics

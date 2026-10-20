@@ -1109,7 +1109,7 @@ class LiveSTTTester(TesterPlugin):
 
         t_run_start = time.perf_counter()
 
-        speech_suites = ("transcriptions_json", "transcriptions_sse", "grpc_streaming")
+        speech_suites = ("transcriptions_json", "transcriptions_sse", "grpc_streaming", "grpc_long_call")
         if any(sname in suites_to_run for sname in speech_suites):
             speech_fixtures, speech_source = self._resolve_speech_fixtures(cfg, ctx)
         else:

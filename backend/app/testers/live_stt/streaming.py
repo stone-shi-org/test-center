@@ -330,14 +330,16 @@ def select_grpc_streaming_models(
 def build_long_call_audio_fixture(
     duration_sec: float = 30.0,
     base_fixture_id: str = "two_speaker_dialog",
+    base_fixture: AudioFixture | None = None,
 ) -> AudioFixture:
-    """Synthesize a long-call 16kHz mono 16-bit PCM WAV fixture by looping a base speech fixture.
+    """Build a long-call 16kHz mono 16-bit PCM WAV fixture by looping a base speech fixture.
 
-    Rebases word-level timestamps across each loop cycle so that ``words`` and
+    ``base_fixture`` (e.g. a real NOTSOFAR-1 excerpt) takes precedence over the built-in
+    ``base_fixture_id``. Rebases word-level timestamps across each loop cycle so that ``words`` and
     ``reference_text`` span the full ``[0, duration_sec]`` timeline.
     """
     target_sec = max(1.0, float(duration_sec))
-    base_fix = get_audio_fixture(base_fixture_id)
+    base_fix = base_fixture if base_fixture is not None else get_audio_fixture(base_fixture_id)
     extracted = extract_pcm16_audio(base_fix)
     sample_rate = extracted.sample_rate_hz
     bytes_per_sec = sample_rate * 2  # 16kHz mono 16-bit = 32,000 bytes/s
@@ -385,9 +387,12 @@ def build_long_call_audio_fixture(
     ref_text = " ".join(w.text for w in rebased_words)
 
     return AudioFixture(
-        id=f"long_call_{int(round(actual_duration_sec))}s",
+        id=f"long_call_{int(round(actual_duration_sec))}s"
+        + (f":{base_fix.id}" if base_fixture is not None else ""),
         name=f"Long Call ({actual_duration_sec:.1f}s)",
-        description=f"Synthesized {actual_duration_sec:.1f}s 16kHz mono 16-bit PCM long-call fixture",
+        description=(
+            f"{actual_duration_sec:.1f}s 16kHz mono 16-bit PCM long-call fixture looping '{base_fix.id}'"
+        ),
         wav_bytes=wav_bytes,
         duration_sec=actual_duration_sec,
         sample_rate=sample_rate,
@@ -1762,9 +1767,13 @@ def execute_grpc_streaming_suites(
         long_speed = float(cfg.get("long_call_speed", 4.0))
         long_max_rtf = float(cfg.get("long_call_max_rtf", 2.0))
         long_max_drift = float(cfg.get("long_call_max_drift_ratio", 4.0))
+        # Loop real speech when available: the generated tone fixture yields no partials or words,
+        # which fails continuous_partials_emitted and the word-timestamp checks (run 36).
+        long_base = (speech_fixtures or {}).get("dialog") if speech_source == "notsofar" else None
         long_fix = build_long_call_audio_fixture(
             duration_sec=long_dur_sec,
             base_fixture_id="two_speaker_dialog",
+            base_fixture=long_base,
         )
         long_models = (
             streaming_models[:1]
@@ -1816,6 +1825,21 @@ def execute_grpc_streaming_suites(
                     f"post_long_call_slot_released: active_calls={info_after_long.active_calls}"
                 )
                 report.passed = False
+
+            long_acc_metrics: dict[str, Any] = {}
+            long_acc_detail: dict[str, Any] = {"fixture_source": speech_source if long_base is not None else "synthetic"}
+            if long_base is not None and long_fix.reference_text:
+                acc_ok, acc_check, acc_err, long_acc_metrics, acc_extra = speech_accuracy_check(
+                    long_fix.reference_text, long_sess.text, speech_wer_threshold
+                )
+                long_acc_detail.update(acc_extra)
+                report.checks.append(acc_check)
+                if acc_err:
+                    report.errors.append(acc_err)
+                    report.passed = False
+            if not report.passed:
+                # Checks appended after evaluate_long_call_stability() must show in the summary too
+                report.summary_message = "; ".join(report.errors)
 
             long_status = "pass" if report.passed else "fail"
             long_metrics: dict[str, Any] = {
@@ -1869,6 +1893,7 @@ def execute_grpc_streaming_suites(
                     "unit": "x",
                     "better": "lower",
                 },
+                **long_acc_metrics,
             }
 
             result.add_case(
@@ -1881,6 +1906,9 @@ def execute_grpc_streaming_suites(
                     "grpc_target": harness.grpc_target,
                     "model": m_info.id,
                     "engine": m_info.engine,
+                    "fixture_id": long_fix.id,
+                    **long_acc_detail,
+                    "audio_duration_sec": long_fix.duration_sec,
                     "stability": report.to_dict(),
                     "passed": report.passed,
                     "eval_message": report.summary_message,
