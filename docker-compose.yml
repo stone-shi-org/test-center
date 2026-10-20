@@ -14,11 +14,34 @@ services:
       - DATA_DIR=/app/data
       - TEST_DATA_DIR=/app/test-data
       - STATIC_DIR=/app/frontend/dist
+      - PISTON_URL=${PISTON_URL:-http://piston:2000}
     env_file:
       - path: .env
         required: false
+    depends_on:
+      - piston
+    restart: unless-stopped
+
+  piston:
+    image: ghcr.io/engineer-man/piston:latest
+    privileged: true
+    ports:
+      - "${PISTON_PORT:-2000}:2000"
+    volumes:
+      - piston_packages:/piston/packages
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - 'const http=require("http");http.get("http://127.0.0.1:2000/api/v2/runtimes",r=>{let d="";r.on("data",c=>d+=c);r.on("end",()=>{if(d.includes("\"java\""))process.exit(0);const b=JSON.stringify({language:"java",version:"15.0.2"});const q=http.request({host:"127.0.0.1",port:2000,path:"/api/v2/packages",method:"POST",headers:{"Content-Type":"application/json","Content-Length":b.length}},res=>process.exit(res.statusCode===200?0:1));q.on("error",()=>process.exit(1));q.end(b);});}).on("error",()=>process.exit(1));'
+      interval: 10s
+      timeout: 30s
+      retries: 5
     restart: unless-stopped
 
 volumes:
   data:
     name: test_center_data
+  piston_packages:
+    name: test_center_piston_packages

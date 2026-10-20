@@ -359,3 +359,113 @@ class OpenAIChatClient:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
         }, round(elapsed_ms, 2)
+
+    def chat_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        tools: list[dict[str, Any]],
+        max_tokens: int = 2048,
+        tool_choice: str | dict[str, Any] = "auto",
+        reasoning_effort: str | None = None,
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a chat completion turn with OpenAI tool definitions enabled.
+
+        Returns a dict with:
+            - content: str
+            - tool_calls: list[dict[str, Any]]
+            - message: dict[str, Any] (assistant message suitable for appending to transcript)
+            - usage: dict[str, int]
+            - latency_ms: float
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        eff = reasoning_effort if reasoning_effort is not None else effort
+        if eff is not None and str(eff).strip():
+            payload["reasoning_effort"] = str(eff).strip()
+
+        headers = self._build_headers()
+        t0 = time.perf_counter()
+
+        try:
+            with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
+                resp = client.post(
+                    self.endpoint_url,
+                    json=payload,
+                    headers=headers,
+                )
+        except httpx.RequestError as e:
+            raise ChatClientError(f"HTTP request to {self.endpoint_url} failed: {e}") from e
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        if resp.status_code != 200:
+            raise ChatClientError(
+                f"Chat tool request to {self.endpoint_url} failed with status {resp.status_code}: {resp.text}"
+            )
+
+        try:
+            body = resp.json()
+        except Exception as e:
+            raise ChatClientError(f"Failed to parse JSON response from {self.endpoint_url}: {e}") from e
+
+        choices = body.get("choices")
+        if not isinstance(choices, list) or len(choices) == 0:
+            raise ChatClientError(f"Invalid chat response: missing or empty 'choices' field in {body}")
+
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        message = first_choice.get("message") or first_choice.get("delta") or {}
+        raw_content = str(message.get("content") or "").strip()
+        content = strip_think_blocks(raw_content)
+        raw_tool_calls = message.get("tool_calls") or []
+        tool_calls: list[dict[str, Any]] = []
+        if isinstance(raw_tool_calls, list):
+            for idx, tc in enumerate(raw_tool_calls):
+                if isinstance(tc, dict):
+                    fn = tc.get("function") or {}
+                    tool_calls.append(
+                        {
+                            "id": str(tc.get("id") or f"call_{idx + 1}"),
+                            "type": "function",
+                            "function": {
+                                "name": str(fn.get("name") or ""),
+                                "arguments": fn.get("arguments")
+                                if isinstance(fn.get("arguments"), str)
+                                else json.dumps(fn.get("arguments") or {}),
+                            },
+                        }
+                    )
+
+        usage_raw = body.get("usage") or {}
+        prompt_tokens = int(usage_raw.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage_raw.get("completion_tokens", 0) or 0)
+        if prompt_tokens <= 0:
+            prompt_text = " ".join(str(m.get("content") or "") for m in messages if isinstance(m, dict))
+            prompt_tokens = estimate_tokens(prompt_text)
+        if completion_tokens <= 0:
+            comp_text = content + " " + json.dumps(tool_calls)
+            completion_tokens = estimate_tokens(comp_text)
+        total_tokens = int(usage_raw.get("total_tokens", 0) or (prompt_tokens + completion_tokens))
+
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+
+        return {
+            "content": content,
+            "tool_calls": tool_calls,
+            "message": assistant_msg,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+            "latency_ms": round(elapsed_ms, 2),
+        }

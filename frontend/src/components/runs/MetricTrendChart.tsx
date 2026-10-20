@@ -63,6 +63,11 @@ const HEADLINE_METRIC_NAMES = new Set([
   'speaker_count_error',
   'judge_score_mean',
   'judge_pass_rate',
+  'judge_mean',
+  'score',
+  'solve_at_1',
+  'solve_at_k',
+  'test_case_pass_rate',
   'recall@1',
   'recall_at_1',
   'mrr',
@@ -95,6 +100,10 @@ export function categorizeMetric(
     n.startsWith('speaker_') ||
     n.startsWith('judge_') ||
     n === 'judge_score' ||
+    n === 'score' ||
+    n.startsWith('score_') ||
+    n.startsWith('solve_at_') ||
+    n === 'test_case_pass_rate' ||
     n.startsWith('recall') ||
     n === 'mrr' ||
     n === 'mean_rank' ||

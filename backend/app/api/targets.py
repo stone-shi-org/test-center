@@ -118,6 +118,10 @@ def _validate_extra(extra_dict: dict[str, Any] | None) -> dict[str, Any]:
             raise ValueError("extra.grpc_port must be an integer between 1 and 65535") from None
         if isinstance(port, bool) or not 1 <= port_int <= 65535:
             raise ValueError("extra.grpc_port must be an integer between 1 and 65535")
+    runner_url = extra_dict.get("runner_url")
+    if runner_url is not None and not (isinstance(runner_url, str) and not runner_url.strip()):
+        if not isinstance(runner_url, str) or not runner_url.strip().startswith(("http://", "https://")):
+            raise ValueError("extra.runner_url must be a valid http:// or https:// URL")
     return extra_dict
 
 

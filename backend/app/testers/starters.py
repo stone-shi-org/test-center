@@ -111,6 +111,45 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
             "max_tokens": 8192,
         },
     },
+    # llm_coding
+    {
+        "tester": "llm_coding",
+        "name": "Quick smoke (Easy)",
+        "description": "Fast 5-problem Easy Java coding check judged on Piston.",
+        "suites": ["easy"],
+        "config": {
+            "limit": 5,
+        },
+    },
+    {
+        "tester": "llm_coding",
+        "name": "Standard benchmark (All)",
+        "description": "Full Java coding benchmark across easy, medium, and hard problems (single attempt).",
+        "suites": ["all"],
+        "config": {},
+    },
+    {
+        "tester": "llm_coding",
+        "name": "Retries + LLM Judge",
+        "description": "3-attempt feedback retry benchmark with LLM code-quality judge and composite score.",
+        "suites": ["all"],
+        "config": {
+            "max_attempts": 3,
+            "feedback_level": "first_failure",
+            "judge_enabled": True,
+        },
+    },
+    {
+        "tester": "llm_coding",
+        "name": "Agent tool mode",
+        "description": "Agentic Java coding benchmark with compile, run_samples, run_custom, and submit tools.",
+        "suites": ["all"],
+        "config": {
+            "tools_enabled": True,
+            "max_attempts": 3,
+            "max_tool_calls": 12,
+        },
+    },
     # embedding
     {
         "tester": "embedding",

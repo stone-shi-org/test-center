@@ -21,6 +21,7 @@ from backend.app.testers.registry import (
 from backend.app.testers.dummy import DummyTester
 from backend.app.testers.embedding import EmbeddingTester
 from backend.app.testers.llm import LLMTester
+from backend.app.testers.llm_coding import LLMCodingTester
 from backend.app.testers.live_stt import LiveSTTTester
 from backend.app.testers.starters import STARTER_TEMPLATES, get_starter_templates
 
@@ -44,6 +45,7 @@ __all__ = [
     "DummyTester",
     "EmbeddingTester",
     "LLMTester",
+    "LLMCodingTester",
     "LiveSTTTester",
     "STARTER_TEMPLATES",
     "get_starter_templates",

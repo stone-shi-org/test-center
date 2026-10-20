@@ -5,6 +5,7 @@ from backend.app.testers.base import TesterPlugin, TesterError
 from backend.app.testers.dummy import DummyTester
 from backend.app.testers.embedding import EmbeddingTester
 from backend.app.testers.llm import LLMTester
+from backend.app.testers.llm_coding import LLMCodingTester
 from backend.app.testers.live_stt import LiveSTTTester
 
 
@@ -62,6 +63,7 @@ tester_registry = TesterRegistry()
 tester_registry.register(DummyTester())
 tester_registry.register(EmbeddingTester())
 tester_registry.register(LLMTester())
+tester_registry.register(LLMCodingTester(), aliases=["llm-coding"])
 tester_registry.register(
     LiveSTTTester(),
     aliases=[
