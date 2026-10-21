@@ -272,10 +272,12 @@ def export_dataset(
             dropped_problems.append({"id": qid, "title": title, "reason": "Solution section could not be cleanly stripped"})
             continue
 
-        timeout_ms = int(row.get("test_timeout_value") or 2000)
+        timeout_ms = max(int(row.get("test_timeout_value") or 3000), 3000)
         cpu_expectations = _parse_json_field(row.get("coding_execution_time_expectation"), {})
         raw_java_cpu = (cpu_expectations or {}).get("java") if isinstance(cpu_expectations, dict) else None
         cpu_limit_ms = int(raw_java_cpu) if isinstance(raw_java_cpu, (int, float)) and raw_java_cpu > 0 else None
+        if cpu_limit_ms is not None and cpu_limit_ms < 3000:
+            cpu_limit_ms = 3000
 
         sample_case_idx = pick_sample_case_indices(statement_md, normalized_tests)
 

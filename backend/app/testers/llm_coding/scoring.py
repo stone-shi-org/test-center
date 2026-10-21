@@ -195,10 +195,40 @@ def aggregate_run_metrics(
 
     tool_calls_mean = sum(int(r.get("tool_call_count", 0)) for r in case_records) / n
 
+    valid_tps = [
+        float(r["tokens_per_sec"])
+        for r in case_records
+        if r.get("tokens_per_sec") is not None and float(r["tokens_per_sec"]) > 0
+    ]
+    tps_mean = round(sum(valid_tps) / len(valid_tps), 2) if valid_tps else 0.0
+
+    valid_ttfts = sorted(
+        float(r["ttft_ms"])
+        for r in case_records
+        if r.get("ttft_ms") is not None and float(r["ttft_ms"]) > 0
+    )
+    if valid_ttfts:
+        ttft_mean = round(sum(valid_ttfts) / len(valid_ttfts), 2)
+        ttft_p50 = round(_percentile(valid_ttfts, 50.0), 1)
+        ttft_p95 = round(_percentile(valid_ttfts, 95.0), 1)
+    else:
+        ttft_mean = 0.0
+        ttft_p50 = 0.0
+        ttft_p95 = 0.0
+
     metrics: dict[str, dict[str, Any]] = {
         "score": {"value": round(mean_score_100, 2), "unit": "pts", "better": "higher"},
         "solve_at_1": {"value": round(solve_at_1_pct, 2), "unit": "%", "better": "higher"},
         "solve_at_k": {"value": round(solve_at_k_pct, 2), "unit": "%", "better": "higher"},
+        "tokens_per_sec": {
+            "value": tps_mean,
+            "unit": "tokens/s",
+            "better": "higher",
+        },
+        "ttft_ms": {"value": ttft_mean, "unit": "ms", "better": "lower"},
+        "ttft_mean_ms": {"value": ttft_mean, "unit": "ms", "better": "lower"},
+        "ttft_p50_ms": {"value": ttft_p50, "unit": "ms", "better": "lower"},
+        "ttft_p95_ms": {"value": ttft_p95, "unit": "ms", "better": "lower"},
         "mean_attempts_to_solve": {
             "value": round(mean_attempts, 2),
             "unit": "attempts",

@@ -238,6 +238,21 @@ class LLMCodingTester(TesterPlugin):
                 "description": "Weight of normalized LLM judge score when judge is enabled",
                 "x-advanced": True,
             },
+            "per_case_timeout_ms": {
+                "type": "integer",
+                "default": 3000,
+                "minimum": 500,
+                "maximum": 10000,
+                "description": "Per-case execution timeout in ms on Piston (clamped to max 3000ms by runner)",
+                "x-advanced": True,
+            },
+            "cpu_limit_ms": {
+                "type": "integer",
+                "default": 3000,
+                "minimum": 500,
+                "description": "Per-case CPU time limit in ms before reporting Performance Limit Exceeded",
+                "x-advanced": True,
+            },
             "timeout_seconds": {
                 "type": "number",
                 "default": 180.0,
@@ -487,6 +502,17 @@ class LLMCodingTester(TesterPlugin):
         weight_correctness = float(config.get("weight_correctness", DEFAULT_WEIGHT_CORRECTNESS))
         weight_judge = float(config.get("weight_judge", DEFAULT_WEIGHT_JUDGE))
 
+        configured_timeout = config.get("per_case_timeout_ms")
+        eff_timeout_ms = int(configured_timeout) if configured_timeout is not None else max(int(problem.timeout_ms or 3000), 3000)
+
+        configured_cpu_limit = config.get("cpu_limit_ms")
+        if configured_cpu_limit is not None:
+            eff_cpu_limit_ms = int(configured_cpu_limit)
+        elif problem.cpu_limit_ms is not None:
+            eff_cpu_limit_ms = max(int(problem.cpu_limit_ms), 3000)
+        else:
+            eff_cpu_limit_ms = None
+
         user_prompt = build_problem_prompt(problem, tools_enabled=tools_enabled)
         sys_prompt = SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD
         messages: list[dict[str, Any]] = [
@@ -496,6 +522,8 @@ class LLMCodingTester(TesterPlugin):
 
         t0 = time.perf_counter()
         attempts: list[dict[str, Any]] = []
+        attempt_tps: list[float] = []
+        attempt_ttfts: list[float] = []
         tool_events: list[dict[str, Any]] = []
         tool_call_count = 0
         prompt_tokens = 0
@@ -518,6 +546,8 @@ class LLMCodingTester(TesterPlugin):
                 max_total_tokens=max_total_tokens,
                 max_tokens_per_turn=max_tokens,
                 effort=effort,
+                timeout_ms=eff_timeout_ms,
+                cpu_limit_ms=eff_cpu_limit_ms,
                 should_cancel=lambda: ctx.is_cancelled,
             )
             ctx.check_cancelled()
@@ -543,6 +573,20 @@ class LLMCodingTester(TesterPlugin):
                 )
                 prompt_tokens += int(getattr(stream_res, "prompt_tokens", 0) or 0)
                 completion_tokens += int(getattr(stream_res, "completion_tokens", 0) or 0)
+                tps_val = getattr(stream_res, "tokens_per_sec", None)
+                if tps_val is not None and float(tps_val) > 0:
+                    cur_tps = float(tps_val)
+                elif hasattr(stream_res, "decode_duration_ms") and getattr(stream_res, "decode_duration_ms") > 0:
+                    dec_s = getattr(stream_res, "decode_duration_ms") / 1000.0
+                    c_tok = int(getattr(stream_res, "completion_tokens", 0) or 0)
+                    cur_tps = (c_tok / dec_s) if dec_s > 0 else 0.0
+                else:
+                    cur_tps = 0.0
+                if cur_tps > 0:
+                    attempt_tps.append(cur_tps)
+                cur_ttft = float(getattr(stream_res, "ttft_ms", 0.0) or 0.0)
+                if cur_ttft > 0:
+                    attempt_ttfts.append(cur_ttft)
                 response_text = str(getattr(stream_res, "content", "") or "")
                 messages.append({"role": "assistant", "content": response_text})
 
@@ -553,8 +597,8 @@ class LLMCodingTester(TesterPlugin):
                     harness=problem.harness_java,
                     test_cases=problem.tests,
                     sample_case_idx=problem.sample_case_idx,
-                    timeout_ms=problem.timeout_ms,
-                    cpu_limit_ms=problem.cpu_limit_ms,
+                    timeout_ms=eff_timeout_ms,
+                    cpu_limit_ms=eff_cpu_limit_ms,
                     stop_on_first_failure=False,
                     extract_from_markdown=False,
                 )
@@ -565,6 +609,8 @@ class LLMCodingTester(TesterPlugin):
                     "attempt": attempt_num,
                     "response": response_text,
                     "code": final_code,
+                    "tokens_per_sec": round(cur_tps, 2),
+                    "ttft_ms": round(cur_ttft, 2),
                     "status": judge_run.status,
                     "passed": judge_run.passed,
                     "correct": judge_run.correct,
@@ -621,6 +667,13 @@ class LLMCodingTester(TesterPlugin):
                 judge_run=final_judge_run,
             )
 
+        if tools_enabled:
+            case_tps = tool_outcome.mean_tps
+            case_ttft = tool_outcome.mean_ttft
+        else:
+            case_tps = sum(attempt_tps) / len(attempt_tps) if attempt_tps else 0.0
+            case_ttft = sum(attempt_ttfts) / len(attempt_ttfts) if attempt_ttfts else 0.0
+
         score_breakdown = compute_case_score(
             correct=1 if solved else 0,
             solved_attempt=solved_attempt,
@@ -642,6 +695,8 @@ class LLMCodingTester(TesterPlugin):
             "attempts_used": format_metric(len(attempts), unit="attempts", better="lower"),
             "tool_call_count": format_metric(tool_call_count, unit="calls", better="lower"),
             "wall_time_ms": format_metric(wall_time_ms, unit="ms", better="lower"),
+            "tokens_per_sec": format_metric(round(case_tps, 2), unit="tokens/s", better="higher"),
+            "ttft_ms": format_metric(round(case_ttft, 2), unit="ms", better="lower"),
             "prompt_tokens": format_metric(prompt_tokens, unit="tokens", better="lower"),
             "completion_tokens": format_metric(completion_tokens, unit="tokens", better="lower"),
             "total_tokens": format_metric(total_tokens, unit="tokens", better="lower"),
@@ -695,6 +750,8 @@ class LLMCodingTester(TesterPlugin):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "tokens_per_sec": round(case_tps, 2),
+            "ttft_ms": round(case_ttft, 2),
             "wall_time_ms": wall_time_ms,
         }
 
@@ -709,6 +766,8 @@ class LLMCodingTester(TesterPlugin):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "tool_call_count": tool_call_count,
+            "tokens_per_sec": round(case_tps, 2),
+            "ttft_ms": round(case_ttft, 2),
             "wall_time_ms": wall_time_ms,
         }
 

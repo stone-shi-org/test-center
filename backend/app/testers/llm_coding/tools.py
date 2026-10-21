@@ -114,29 +114,54 @@ class ToolLoopOutcome:
     completion_tokens: int = 0
     total_tokens: int = 0
     wall_time_ms: float = 0.0
+    turn_tps: list[float] = field(default_factory=list)
+    turn_ttfts: list[float] = field(default_factory=list)
+    total_generation_ms: float = 0.0
     solved: bool = False
     solved_attempt: int | None = None
     final_code: str = ""
     final_judge_result: JudgeRunResult | None = None
     budget_exhausted_reason: str | None = None
 
+    @property
+    def mean_tps(self) -> float:
+        if self.turn_tps:
+            return sum(self.turn_tps) / len(self.turn_tps)
+        if self.total_generation_ms > 0 and self.completion_tokens > 0:
+            return self.completion_tokens / (self.total_generation_ms / 1000.0)
+        return 0.0
+
+    @property
+    def mean_ttft(self) -> float:
+        if self.turn_ttfts:
+            return sum(self.turn_ttfts) / len(self.turn_ttfts)
+        return 0.0
+
 
 def execute_run_samples(
     piston_client: PistonClient,
     problem: ProblemSpec,
     code: str,
+    timeout_ms: int | None = None,
+    cpu_limit_ms: int | None = None,
 ) -> dict[str, Any]:
     """Run candidate code on visible sample test cases ONLY (never runs or reveals hidden tests)."""
     sample_cases = problem.sample_tests
     sample_indices = list(range(len(sample_cases)))
+    eff_timeout_ms = timeout_ms if timeout_ms is not None else max(problem.timeout_ms or 3000, 3000)
+    eff_cpu_limit_ms = (
+        cpu_limit_ms
+        if cpu_limit_ms is not None
+        else (max(int(problem.cpu_limit_ms), 3000) if problem.cpu_limit_ms is not None else None)
+    )
     res = judge_java_solution(
         client=piston_client,
         code=code,
         harness=problem.harness_java,
         test_cases=sample_cases,
         sample_case_idx=sample_indices,
-        timeout_ms=problem.timeout_ms,
-        cpu_limit_ms=problem.cpu_limit_ms,
+        timeout_ms=eff_timeout_ms,
+        cpu_limit_ms=eff_cpu_limit_ms,
         stop_on_first_failure=False,
         extract_from_markdown=False,
     )
@@ -185,10 +210,18 @@ def run_agent_tool_loop(
     max_total_tokens: int = 32768,
     max_tokens_per_turn: int = 4096,
     effort: str | None = None,
+    timeout_ms: int | None = None,
+    cpu_limit_ms: int | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> ToolLoopOutcome:
     """Execute the OpenAI tool-calling loop for a coding problem with tool/token/attempt budgets."""
     t0 = time.perf_counter()
+    eff_timeout_ms = timeout_ms if timeout_ms is not None else max(problem.timeout_ms or 3000, 3000)
+    eff_cpu_limit_ms = (
+        cpu_limit_ms
+        if cpu_limit_ms is not None
+        else (max(int(problem.cpu_limit_ms), 3000) if problem.cpu_limit_ms is not None else None)
+    )
     messages: list[dict[str, Any]] = [dict(m) for m in initial_messages]
     outcome = ToolLoopOutcome(transcript=messages)
     last_seen_code: str = ""
@@ -219,6 +252,13 @@ def run_agent_tool_loop(
         outcome.prompt_tokens += p_tok
         outcome.completion_tokens += c_tok
         outcome.total_tokens += t_tok
+        lat_ms = float(turn.get("latency_ms", 0.0) or 0.0)
+        outcome.total_generation_ms += lat_ms
+        if lat_ms > 0 and c_tok > 0:
+            outcome.turn_tps.append(c_tok / (lat_ms / 1000.0))
+        ttft = float(turn.get("ttft_ms", lat_ms) or lat_ms)
+        if ttft > 0:
+            outcome.turn_ttfts.append(ttft)
 
         assistant_msg = turn.get("message") or {
             "role": "assistant",
@@ -264,13 +304,15 @@ def run_agent_tool_loop(
                     client=piston_client,
                     code=cleaned_code,
                     harness=problem.harness_java,
-                    timeout_ms=problem.timeout_ms,
+                    timeout_ms=eff_timeout_ms,
                 )
             elif fn_name == "run_samples":
                 tool_res = execute_run_samples(
                     piston_client=piston_client,
                     problem=problem,
                     code=cleaned_code,
+                    timeout_ms=eff_timeout_ms,
+                    cpu_limit_ms=eff_cpu_limit_ms,
                 )
             elif fn_name == "run_custom":
                 custom_stdin = str(args.get("stdin") or "")
@@ -279,7 +321,7 @@ def run_agent_tool_loop(
                     code=cleaned_code,
                     harness=problem.harness_java,
                     stdin=custom_stdin,
-                    timeout_ms=problem.timeout_ms,
+                    timeout_ms=eff_timeout_ms,
                 )
             elif fn_name == "submit":
                 attempt_num = len(outcome.attempts) + 1
@@ -289,8 +331,8 @@ def run_agent_tool_loop(
                     harness=problem.harness_java,
                     test_cases=problem.tests,
                     sample_case_idx=problem.sample_case_idx,
-                    timeout_ms=problem.timeout_ms,
-                    cpu_limit_ms=problem.cpu_limit_ms,
+                    timeout_ms=eff_timeout_ms,
+                    cpu_limit_ms=eff_cpu_limit_ms,
                     stop_on_first_failure=False,
                     extract_from_markdown=False,
                 )
@@ -386,8 +428,8 @@ def run_agent_tool_loop(
             harness=problem.harness_java,
             test_cases=problem.tests,
             sample_case_idx=problem.sample_case_idx,
-            timeout_ms=problem.timeout_ms,
-            cpu_limit_ms=problem.cpu_limit_ms,
+            timeout_ms=eff_timeout_ms,
+            cpu_limit_ms=eff_cpu_limit_ms,
             stop_on_first_failure=False,
             extract_from_markdown=False,
         )
