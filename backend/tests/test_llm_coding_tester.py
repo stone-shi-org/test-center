@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -947,6 +949,58 @@ def test_tester_partial_results_checkpoint_on_cancel(tmp_path):
     assert last_cp.cases[0].case_id == "prob-1"
     assert last_cp.metrics["score"]["value"] == 100.0
     assert last_cp.metrics["problems_evaluated"]["value"] == 1
+
+
+def test_tester_concurrency_execution(tmp_path):
+    """Verify that concurrency > 1 executes problems in parallel across worker threads."""
+    tester = get_tester("llm_coding")
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=4)
+    fake_llm = FakeChatClient()
+
+    active_threads = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+
+    def _piston_hook(payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal active_threads, max_concurrent
+        with lock:
+            active_threads += 1
+            if active_threads > max_concurrent:
+                max_concurrent = active_threads
+        time.sleep(0.04)
+        with lock:
+            active_threads -= 1
+
+        stdin = str(payload.get("stdin") or "")
+        if "2 3" in stdin:
+            out = "5\n"
+        elif "10 20" in stdin:
+            out = "30\n"
+        elif "SECRET_IN_1" in stdin:
+            out = "SECRET_OUT_101\n"
+        elif "SECRET_IN_2" in stdin:
+            out = "SECRET_OUT_202\n"
+        else:
+            out = "0\n"
+        return {"run": {"stdout": out, "stderr": "", "code": 0, "cpu_time": 50}}
+
+    ctx = TestContext(run_id=202, artifacts_dir=tmp_path / "artifacts", emit_stdout=False)
+    res = tester.run(
+        config={
+            "dataset_dir": str(ds_dir),
+            "model": "test-coder-7b",
+            "concurrency": 4,
+            "_chat_client": fake_llm,
+            "_piston_execute_hook": _piston_hook,
+        },
+        target={"name": "local-llm", "kind": "llm", "base_url": "http://fake-llm:8000/v1"},
+        ctx=ctx,
+    )
+
+    assert res.status == "pass"
+    assert len(res.cases) == 4
+    assert [c.case_id for c in res.cases] == ["prob-1", "prob-2", "prob-3", "prob-4"]
+    assert max_concurrent >= 2, f"Expected concurrent execution, but max concurrency was {max_concurrent}"
 
 
 def test_llm_coding_compare_and_baselines_integration(app_and_client, tmp_path):
