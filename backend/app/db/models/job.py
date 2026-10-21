@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import Integer, String, Boolean, JSON, Text, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from backend.app.db.base import Base, TimestampMixin
+from backend.app.db.base import Base, TimestampMixin, UTCDateTime
 
 if TYPE_CHECKING:
     from backend.app.db.models.run import Run
@@ -24,10 +24,10 @@ class Job(Base, TimestampMixin):
         String(32), default="skip", server_default="skip", nullable=False
     )
     next_run_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True, index=True
+        UTCDateTime, nullable=True, index=True
     )
     last_scheduled_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime, nullable=True
     )
     definition_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     overrides: Mapped[dict[str, Any]] = mapped_column(
@@ -52,9 +52,23 @@ class Job(Base, TimestampMixin):
             "enabled": self.enabled,
             "run_mode": self.run_mode or "sequential",
             "missed_run_policy": self.missed_run_policy or "skip",
-            "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
+            "next_run_at": (
+                (
+                    self.next_run_at
+                    if self.next_run_at.tzinfo
+                    else self.next_run_at.replace(tzinfo=timezone.utc)
+                ).isoformat()
+                if self.next_run_at
+                else None
+            ),
             "last_scheduled_at": (
-                self.last_scheduled_at.isoformat() if self.last_scheduled_at else None
+                (
+                    self.last_scheduled_at
+                    if self.last_scheduled_at.tzinfo
+                    else self.last_scheduled_at.replace(tzinfo=timezone.utc)
+                ).isoformat()
+                if self.last_scheduled_at
+                else None
             ),
             "definition_ids": list(self.definition_ids or []),
             "overrides": dict(self.overrides or {}),

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, api, type Artifact, type Run, type RunBaselineBadge } from '../../api/index.ts'
 import { useRouter } from '../../router/index.ts'
+import { formatDateTime, parseUtcDate } from '../../utils/date.ts'
 import { Badge } from '../common/Badge.tsx'
 import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { Spinner } from '../common/Spinner.tsx'
@@ -279,8 +280,12 @@ export function RunDetailView({ runId }: { runId: number }) {
   // Calculate duration without calling Date.now() during render
   let durationStr = '—'
   if (run.started_at && run.finished_at) {
-    const ms = new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
-    durationStr = `${(ms / 1000).toFixed(1)}s`
+    const start = parseUtcDate(run.started_at)
+    const finish = parseUtcDate(run.finished_at)
+    if (start && finish) {
+      const ms = finish.getTime() - start.getTime()
+      durationStr = `${(ms / 1000).toFixed(1)}s`
+    }
   } else if (run.status === 'running') {
     durationStr = 'Running...'
   } else if (run.status === 'queued') {
@@ -450,22 +455,22 @@ export function RunDetailView({ runId }: { runId: number }) {
 
           <div className="meta-item">
             <span className="meta-label">Queued At</span>
-            <span className="meta-value text-muted">
-              {run.queued_at ? new Date(run.queued_at).toLocaleTimeString() : '—'}
+            <span className="meta-value text-muted font-mono">
+              {formatDateTime(run.queued_at)}
             </span>
           </div>
 
           <div className="meta-item">
             <span className="meta-label">Started At</span>
-            <span className="meta-value text-muted">
-              {run.started_at ? new Date(run.started_at).toLocaleTimeString() : '—'}
+            <span className="meta-value text-muted font-mono">
+              {formatDateTime(run.started_at)}
             </span>
           </div>
 
           <div className="meta-item">
             <span className="meta-label">Finished At</span>
-            <span className="meta-value text-muted">
-              {run.finished_at ? new Date(run.finished_at).toLocaleTimeString() : '—'}
+            <span className="meta-value text-muted font-mono">
+              {formatDateTime(run.finished_at)}
             </span>
           </div>
         </div>

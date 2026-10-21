@@ -100,6 +100,14 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _format_iso_utc(dt: datetime | None) -> str | None:
+    """Format a datetime as an ISO-8601 string with UTC timezone information."""
+    if dt is None:
+        return None
+    utc_dt = _ensure_utc(dt)
+    return utc_dt.isoformat() if utc_dt is not None else None
+
+
 def _extract_run_timestamp(run: Run) -> datetime | None:
     """Return the primary execution timestamp of a run in UTC."""
     for candidate in (run.started_at, run.queued_at, run.finished_at, run.created_at):
@@ -464,9 +472,9 @@ def _format_run_detail(
         "job_id": run.job_id,
         "job_name": job_name,
         "status": run.status,
-        "queued_at": run.queued_at.isoformat() if run.queued_at else None,
-        "started_at": run.started_at.isoformat() if run.started_at else None,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "queued_at": _format_iso_utc(run.queued_at),
+        "started_at": _format_iso_utc(run.started_at),
+        "finished_at": _format_iso_utc(run.finished_at),
         "config_snapshot": run.config_snapshot,
         "target_snapshot": run.target_snapshot,
         "git_info": run.git_info,

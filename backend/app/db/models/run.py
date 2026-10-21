@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import Integer, String, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from backend.app.db.base import Base, TimestampMixin
+from backend.app.db.base import Base, TimestampMixin, UTCDateTime
 
 if TYPE_CHECKING:
     from backend.app.db.models.baseline import Baseline
@@ -21,9 +21,9 @@ class Run(Base, TimestampMixin):
         Integer, ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
     )
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)
-    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
     # Snapshots ensure that historical run results remain comparable after edits or deletions
     config_snapshot: Mapped[dict[str, Any] | list[Any]] = mapped_column(

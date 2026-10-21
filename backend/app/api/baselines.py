@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -33,6 +34,22 @@ class UpdateBaselineRequest(BaseModel):
     description: str | None = Field(default=None, description="Updated description")
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_iso_utc(dt: datetime | None) -> str | None:
+    """Format a datetime as an ISO-8601 string with UTC timezone information."""
+    if dt is None:
+        return None
+    utc_dt = _ensure_utc(dt)
+    return utc_dt.isoformat() if utc_dt is not None else None
+
+
 def format_baseline(baseline: Baseline, run: Run | None = None) -> dict[str, Any]:
     """Serialize a Baseline along with its associated Run summary."""
     from backend.app.api.runs import (
@@ -57,9 +74,9 @@ def format_baseline(baseline: Baseline, run: Run | None = None) -> dict[str, Any
         target_ids, target_names = _extract_run_targets(eff_run)
         models = _extract_run_models(eff_run)
         run_status = eff_run.status
-        finished_at = eff_run.finished_at.isoformat() if eff_run.finished_at else None
-        started_at = eff_run.started_at.isoformat() if eff_run.started_at else None
-        queued_at = eff_run.queued_at.isoformat() if eff_run.queued_at else None
+        finished_at = _format_iso_utc(eff_run.finished_at)
+        started_at = _format_iso_utc(eff_run.started_at)
+        queued_at = _format_iso_utc(eff_run.queued_at)
         for res in eff_run.results or []:
             if isinstance(res.metrics, dict):
                 for m_key, m_val in res.metrics.items():
@@ -77,8 +94,8 @@ def format_baseline(baseline: Baseline, run: Run | None = None) -> dict[str, Any
         "run_id": baseline.run_id,
         "description": baseline.description,
         "history": list(baseline.history or []),
-        "created_at": baseline.created_at.isoformat() if baseline.created_at else None,
-        "updated_at": baseline.updated_at.isoformat() if baseline.updated_at else None,
+        "created_at": _format_iso_utc(baseline.created_at),
+        "updated_at": _format_iso_utc(baseline.updated_at),
         "status": run_status,
         "run_status": run_status,
         "tester": primary_tester,

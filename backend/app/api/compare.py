@@ -14,6 +14,7 @@ Supports:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -24,6 +25,22 @@ from backend.app.db.models.run import Run
 from backend.app.db.models.result import Result
 from backend.app.db.models.case_result import CaseResult
 from backend.app.db.session import get_db
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_iso_utc(dt: datetime | None) -> str | None:
+    """Format a datetime as an ISO-8601 string with UTC timezone information."""
+    if dt is None:
+        return None
+    utc_dt = _ensure_utc(dt)
+    return utc_dt.isoformat() if utc_dt is not None else None
+
 
 router = APIRouter(prefix="/compare", tags=["compare"])
 
@@ -881,9 +898,9 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
         "config_snapshot": config_snap,
         "target_snapshot": target_snap,
         "git_info": run.git_info,
-        "queued_at": run.queued_at.isoformat() if run.queued_at else None,
-        "started_at": run.started_at.isoformat() if run.started_at else None,
-        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "queued_at": _format_iso_utc(run.queued_at),
+        "started_at": _format_iso_utc(run.started_at),
+        "finished_at": _format_iso_utc(run.finished_at),
         "case_count": len(result.cases),
         "artifact_count": len(artifacts_list),
         "artifacts": artifacts_list,

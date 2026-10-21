@@ -6,6 +6,7 @@ import {
   type Run,
 } from '../../api/index.ts'
 import { Link, useRouter } from '../../router/index.ts'
+import { formatDateTime, formatTime } from '../../utils/date.ts'
 import { Badge } from '../common/Badge.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 import { ArtifactsCompareSection } from './ArtifactsCompareSection.tsx'
@@ -924,11 +925,26 @@ export function CompareView() {
                         <td className="font-mono">{target}</td>
                         <td className="font-mono text-muted">{model}</td>
                         <td className="text-muted">
-                          {r.started_at
-                            ? new Date(r.started_at).toLocaleString()
-                            : r.queued_at
-                              ? new Date(r.queued_at).toLocaleString()
-                              : '—'}
+                          {r.started_at ? (
+                            <div>
+                              <div>{formatDateTime(r.started_at)}</div>
+                              {r.queued_at && r.queued_at !== r.started_at && (
+                                <div
+                                  className="text-xs text-muted"
+                                  title={`Queued: ${formatDateTime(r.queued_at)}`}
+                                >
+                                  queued {formatTime(r.queued_at)}
+                                </div>
+                              )}
+                            </div>
+                          ) : r.queued_at ? (
+                            <div>
+                              <div>{formatDateTime(r.queued_at)}</div>
+                              <div className="text-xs text-muted">(queued)</div>
+                            </div>
+                          ) : (
+                            '—'
+                          )}
                         </td>
                         <td>
                           {isChecked ? (

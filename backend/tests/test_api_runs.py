@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import pytest
@@ -271,4 +272,43 @@ def test_run_without_definition_id_end_to_end(app_and_client):
         assert pairs[0][1].id == r1.id
     finally:
         db.close()
+
+
+def test_run_datetime_utc_serialization_and_db_persistence(app_and_client):
+    """Verify queued_at, started_at, and finished_at are stored and returned with UTC timezone."""
+    client, session_factory, artifacts_dir = app_and_client
+
+    db = session_factory()
+    run = Run(
+        status="completed",
+        queued_at=datetime(2026, 10, 21, 14, 0, 0, tzinfo=timezone.utc),
+        started_at=datetime(2026, 10, 21, 14, 0, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 10, 21, 14, 0, 5, tzinfo=timezone.utc),
+        config_snapshot={"tester": "dummy"},
+        target_snapshot={},
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    # Verify model tzinfo is preserved from DB
+    assert run.queued_at.tzinfo == timezone.utc
+    assert run.started_at.tzinfo == timezone.utc
+    assert run.finished_at.tzinfo == timezone.utc
+    run_id = run.id
+    db.close()
+
+    # Verify API serializes with explicit timezone (+00:00 or Z)
+    res = client.get(f"/api/runs/{run_id}")
+    assert res.status_code == 200
+    data = res.json()
+    assert "+00:00" in data["queued_at"] or data["queued_at"].endswith("Z")
+    assert "+00:00" in data["started_at"] or data["started_at"].endswith("Z")
+    assert "+00:00" in data["finished_at"] or data["finished_at"].endswith("Z")
+
+    # Verify list runs API also includes timezone
+    res_list = client.get("/api/runs?limit=1")
+    assert res_list.status_code == 200
+    first_run = res_list.json()[0]
+    assert "+00:00" in first_run["queued_at"] or first_run["queued_at"].endswith("Z")
 

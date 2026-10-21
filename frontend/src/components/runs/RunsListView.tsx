@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api, type Run } from '../../api/index.ts'
 import { Link, useRouter } from '../../router/index.ts'
+import {
+  formatDateTime,
+  formatTime,
+  parseLocalDateEnd,
+  parseLocalDateStart,
+  parseUtcDate,
+} from '../../utils/date.ts'
 import { Badge } from '../common/Badge.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 import { MetricTrendChart } from './MetricTrendChart.tsx'
@@ -102,9 +109,8 @@ function getRunJobLabel(r: Run): { key: string; label: string } {
 
 function getRunTimestampMs(r: Run): number | null {
   const raw = r.started_at || r.queued_at || r.finished_at
-  if (!raw) return null
-  const ms = new Date(raw).getTime()
-  return Number.isNaN(ms) ? null : ms
+  const d = parseUtcDate(raw)
+  return d ? d.getTime() : null
 }
 
 export function RunsListView() {
@@ -212,12 +218,8 @@ export function RunsListView() {
     }
   }
 
-  const fromMs = dateFrom
-    ? new Date(`${dateFrom}T00:00:00.000Z`).getTime()
-    : null
-  const toMs = dateTo
-    ? new Date(`${dateTo}T23:59:59.999Z`).getTime()
-    : null
+  const fromMs = parseLocalDateStart(dateFrom)
+  const toMs = parseLocalDateEnd(dateTo)
 
   const filteredRuns = runs.filter((r) => {
     // 0. Baselines only filter
@@ -298,9 +300,17 @@ export function RunsListView() {
   }
 
   const formatDuration = (r: Run): string => {
-    if (r.started_at && r.finished_at) {
-      const ms = new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()
-      return `${(ms / 1000).toFixed(1)}s`
+    const start = parseUtcDate(r.started_at)
+    const finish = parseUtcDate(r.finished_at)
+    if (start && finish) {
+      const ms = finish.getTime() - start.getTime()
+      if (ms < 0) return '0s'
+      if (ms < 1000) return `${ms}ms`
+      const sec = Math.round(ms / 1000)
+      if (sec < 60) return `${sec}s`
+      const min = Math.floor(sec / 60)
+      const remSec = sec % 60
+      return `${min}m ${remSec}s`
     }
     if (r.status === 'running') {
       return 'Running...'
@@ -625,11 +635,26 @@ export function RunsListView() {
                     </td>
                     <td className="font-mono">{formatDuration(r)}</td>
                     <td className="text-muted">
-                      {r.started_at
-                        ? new Date(r.started_at).toLocaleString()
-                        : r.queued_at
-                          ? new Date(r.queued_at).toLocaleString()
-                          : '—'}
+                      {r.started_at ? (
+                        <div>
+                          <div>{formatDateTime(r.started_at)}</div>
+                          {r.queued_at && r.queued_at !== r.started_at && (
+                            <div
+                              className="text-xs text-muted"
+                              title={`Queued: ${formatDateTime(r.queued_at)}`}
+                            >
+                              queued {formatTime(r.queued_at)}
+                            </div>
+                          )}
+                        </div>
+                      ) : r.queued_at ? (
+                        <div>
+                          <div>{formatDateTime(r.queued_at)}</div>
+                          <div className="text-xs text-muted">(queued)</div>
+                        </div>
+                      ) : (
+                        '—'
+                      )}
                     </td>
                     <td>
                       {r.results && r.results.length > 1 ? (

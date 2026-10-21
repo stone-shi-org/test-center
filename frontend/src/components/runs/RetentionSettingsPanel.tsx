@@ -4,6 +4,7 @@ import {
   type RetentionCleanupResult,
   type RetentionSettings,
 } from '../../api/index.ts'
+import { formatDateTime } from '../../utils/date.ts'
 
 function formatBytes(bytes: number | null | undefined): string {
   if (!bytes || bytes <= 0) return '0 B'
@@ -179,7 +180,7 @@ export function RetentionSettingsPanel({
           </span>
           {lastCleanupAt && (
             <span className="retention-stat-item text-muted">
-              Last cleanup: {new Date(lastCleanupAt).toLocaleString()}
+              Last cleanup: {formatDateTime(lastCleanupAt)}
             </span>
           )}
         </div>

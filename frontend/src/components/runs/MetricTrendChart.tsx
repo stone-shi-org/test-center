@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Run, RunResult, TrendMetricOption, TrendPoint, TrendSeries } from '../../api/types.ts'
+import { formatDateTime, parseUtcDate } from '../../utils/date.ts'
 import { Badge } from '../common/Badge.tsx'
 
 const SERIES_COLORS = [
@@ -304,8 +305,8 @@ export function extractTrendsFromRuns(
 } {
   // Sort chronologically (oldest first)
   const chronologicalRuns = [...runs].sort((a, b) => {
-    const tA = new Date(a.started_at || a.queued_at || a.finished_at || 0).getTime()
-    const tB = new Date(b.started_at || b.queued_at || b.finished_at || 0).getTime()
+    const tA = parseUtcDate(a.started_at || a.queued_at || a.finished_at)?.getTime() ?? 0
+    const tB = parseUtcDate(b.started_at || b.queued_at || b.finished_at)?.getTime() ?? 0
     if (tA !== tB) return tA - tB
     return a.id - b.id
   })
@@ -454,8 +455,8 @@ function formatMetricNum(val: number): string {
 function formatShortTime(ts: string | null): string {
   if (!ts) return ''
   try {
-    const d = new Date(ts)
-    if (Number.isNaN(d.getTime())) return ''
+    const d = parseUtcDate(ts)
+    if (!d) return ''
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   } catch {
     return ''
@@ -1103,7 +1104,7 @@ export function MetricTrendChart({
             </span>
             {resolvedActivePoint.timestamp && (
               <span className="text-muted text-sm">
-                {new Date(resolvedActivePoint.timestamp).toLocaleString()}
+                {formatDateTime(resolvedActivePoint.timestamp)}
               </span>
             )}
           </div>

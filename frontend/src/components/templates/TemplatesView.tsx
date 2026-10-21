@@ -11,12 +11,10 @@ import { ConfirmDialog } from '../common/ConfirmDialog.tsx'
 import { Modal } from '../common/Modal.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 import { SchemaForm } from '../schema/SchemaForm.tsx'
+import { formatDateTime } from '../../utils/date.ts'
 
 function formatUpdatedTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleString()
+  return formatDateTime(iso)
 }
 
 function buildCopyName(baseName: string, existingNames: Set<string>): string {

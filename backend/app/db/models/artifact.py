@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import Integer, String, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from backend.app.db.base import Base, utc_now
+from backend.app.db.base import Base, UTCDateTime, utc_now
 
 if TYPE_CHECKING:
     from backend.app.db.models.result import Result
@@ -21,7 +21,7 @@ class Artifact(Base):
     mime: Mapped[str] = mapped_column(String(128), default="application/octet-stream", nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, server_default=func.now(), nullable=False
+        UTCDateTime, default=utc_now, server_default=func.now(), nullable=False
     )
 
     result: Mapped["Result"] = relationship(

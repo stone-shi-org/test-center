@@ -30,6 +30,22 @@ from backend.app.db.models.job import Job
 from backend.app.db.models.result import Result
 from backend.app.db.models.run import Run
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _format_iso_utc(dt: datetime | None) -> str | None:
+    """Format a datetime as an ISO-8601 string with UTC timezone information."""
+    if dt is None:
+        return None
+    utc_dt = _ensure_utc(dt)
+    return utc_dt.isoformat() if utc_dt is not None else None
+
+
 logger = logging.getLogger(__name__)
 
 _SECRET_FIELD_NAMES = {
@@ -744,9 +760,9 @@ def build_notification_payload(
                 "job_id": job_id,
                 "status": run.status,
                 "result_status": overall_result_status,
-                "queued_at": run.queued_at.isoformat() if run.queued_at else None,
-                "started_at": run.started_at.isoformat() if run.started_at else None,
-                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "queued_at": _format_iso_utc(run.queued_at),
+                "started_at": _format_iso_utc(run.started_at),
+                "finished_at": _format_iso_utc(run.finished_at),
                 "url": f"/runs/{run.id}",
                 "results": results_summary,
             }

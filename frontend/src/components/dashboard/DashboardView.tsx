@@ -6,6 +6,7 @@ import {
   type TesterInfo,
 } from '../../api/index.ts'
 import { Link, useRouter } from '../../router/index.ts'
+import { formatDateTime, formatTime } from '../../utils/date.ts'
 import { Badge } from '../common/Badge.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 
@@ -215,10 +216,12 @@ export function DashboardView() {
                         </Link>
                         <span className="run-time text-muted">
                           {latestRun.finished_at
-                            ? new Date(latestRun.finished_at).toLocaleTimeString()
+                            ? formatDateTime(latestRun.finished_at)
                             : latestRun.started_at
-                              ? new Date(latestRun.started_at).toLocaleTimeString()
-                              : 'Just now'}
+                              ? formatDateTime(latestRun.started_at)
+                              : latestRun.queued_at
+                                ? `Queued ${formatDateTime(latestRun.queued_at)}`
+                                : 'Just now'}
                         </span>
                       </div>
 
@@ -315,11 +318,26 @@ export function DashboardView() {
                       </td>
                       <td className="font-mono text-muted">{target}</td>
                       <td className="text-muted">
-                        {r.started_at
-                          ? new Date(r.started_at).toLocaleString()
-                          : r.queued_at
-                            ? new Date(r.queued_at).toLocaleString()
-                            : '—'}
+                        {r.started_at ? (
+                          <div>
+                            <div>{formatDateTime(r.started_at)}</div>
+                            {r.queued_at && r.queued_at !== r.started_at && (
+                              <div
+                                className="text-xs text-muted"
+                                title={`Queued: ${formatDateTime(r.queued_at)}`}
+                              >
+                                queued {formatTime(r.queued_at)}
+                              </div>
+                            )}
+                          </div>
+                        ) : r.queued_at ? (
+                          <div>
+                            <div>{formatDateTime(r.queued_at)}</div>
+                            <div className="text-xs text-muted">(queued)</div>
+                          </div>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td>
                         {primaryRes ? (

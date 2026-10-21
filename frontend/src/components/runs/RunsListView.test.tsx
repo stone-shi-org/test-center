@@ -571,4 +571,66 @@ describe('RunsListView — Filterable Run History, Per-Metric Trend Charts & Ret
     fireEvent.click(screen.getByTestId('trend-metric-search-clear'))
     expect((searchInput as HTMLInputElement).value).toBe('')
   })
+
+  it('renders queued and started run timestamps in user browser local time', async () => {
+    const runSample: Run[] = [
+      {
+        id: 991,
+        job_id: null,
+        status: 'queued',
+        queued_at: '2026-10-21T18:00:00Z',
+        started_at: null,
+        finished_at: null,
+        config_snapshot: { tester: 'dummy' },
+        target_snapshot: { name: 'local-test' },
+        git_info: null,
+        results: [],
+      },
+      {
+        id: 992,
+        job_id: null,
+        status: 'completed',
+        queued_at: '2026-10-21T18:00:00Z',
+        started_at: '2026-10-21T18:00:05Z',
+        finished_at: '2026-10-21T18:00:10Z',
+        config_snapshot: { tester: 'dummy' },
+        target_snapshot: { name: 'local-test' },
+        git_info: null,
+        results: [],
+      },
+    ]
+
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.startsWith('/api/runs')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => runSample,
+        } as Response
+      }
+      throw new Error(`Unexpected fetch URL: ${url}`)
+    })
+
+    const navigate = vi.fn()
+    render(
+      <RouterContext.Provider value={{ route: matchRoute('/runs'), navigate }}>
+        <RunsListView />
+      </RouterContext.Provider>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('#991')).toBeTruthy()
+    })
+    expect(screen.getByText('#992')).toBeTruthy()
+
+    // Queued run displays formatted browser local date/time with (queued) indicator
+    const expectedQueuedLocal = new Date('2026-10-21T18:00:00Z').toLocaleString()
+    expect(screen.getByText(expectedQueuedLocal)).toBeTruthy()
+    expect(screen.getByText('(queued)')).toBeTruthy()
+
+    // Started run displays formatted browser local started date/time
+    const expectedStartedLocal = new Date('2026-10-21T18:00:05Z').toLocaleString()
+    expect(screen.getByText(expectedStartedLocal)).toBeTruthy()
+  })
 })
