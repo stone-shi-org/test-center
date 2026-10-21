@@ -125,18 +125,26 @@ def execute_run_samples(
     piston_client: PistonClient,
     problem: ProblemSpec,
     code: str,
+    timeout_ms: int | None = None,
+    cpu_limit_ms: int | None = None,
 ) -> dict[str, Any]:
     """Run candidate code on visible sample test cases ONLY (never runs or reveals hidden tests)."""
     sample_cases = problem.sample_tests
     sample_indices = list(range(len(sample_cases)))
+    eff_timeout_ms = timeout_ms if timeout_ms is not None else max(problem.timeout_ms or 3000, 3000)
+    eff_cpu_limit_ms = (
+        cpu_limit_ms
+        if cpu_limit_ms is not None
+        else (max(int(problem.cpu_limit_ms), 3000) if problem.cpu_limit_ms is not None else None)
+    )
     res = judge_java_solution(
         client=piston_client,
         code=code,
         harness=problem.harness_java,
         test_cases=sample_cases,
         sample_case_idx=sample_indices,
-        timeout_ms=problem.timeout_ms,
-        cpu_limit_ms=problem.cpu_limit_ms,
+        timeout_ms=eff_timeout_ms,
+        cpu_limit_ms=eff_cpu_limit_ms,
         stop_on_first_failure=False,
         extract_from_markdown=False,
     )
@@ -185,10 +193,18 @@ def run_agent_tool_loop(
     max_total_tokens: int = 32768,
     max_tokens_per_turn: int = 4096,
     effort: str | None = None,
+    timeout_ms: int | None = None,
+    cpu_limit_ms: int | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> ToolLoopOutcome:
     """Execute the OpenAI tool-calling loop for a coding problem with tool/token/attempt budgets."""
     t0 = time.perf_counter()
+    eff_timeout_ms = timeout_ms if timeout_ms is not None else max(problem.timeout_ms or 3000, 3000)
+    eff_cpu_limit_ms = (
+        cpu_limit_ms
+        if cpu_limit_ms is not None
+        else (max(int(problem.cpu_limit_ms), 3000) if problem.cpu_limit_ms is not None else None)
+    )
     messages: list[dict[str, Any]] = [dict(m) for m in initial_messages]
     outcome = ToolLoopOutcome(transcript=messages)
     last_seen_code: str = ""
@@ -264,13 +280,15 @@ def run_agent_tool_loop(
                     client=piston_client,
                     code=cleaned_code,
                     harness=problem.harness_java,
-                    timeout_ms=problem.timeout_ms,
+                    timeout_ms=eff_timeout_ms,
                 )
             elif fn_name == "run_samples":
                 tool_res = execute_run_samples(
                     piston_client=piston_client,
                     problem=problem,
                     code=cleaned_code,
+                    timeout_ms=eff_timeout_ms,
+                    cpu_limit_ms=eff_cpu_limit_ms,
                 )
             elif fn_name == "run_custom":
                 custom_stdin = str(args.get("stdin") or "")
@@ -279,7 +297,7 @@ def run_agent_tool_loop(
                     code=cleaned_code,
                     harness=problem.harness_java,
                     stdin=custom_stdin,
-                    timeout_ms=problem.timeout_ms,
+                    timeout_ms=eff_timeout_ms,
                 )
             elif fn_name == "submit":
                 attempt_num = len(outcome.attempts) + 1
@@ -289,8 +307,8 @@ def run_agent_tool_loop(
                     harness=problem.harness_java,
                     test_cases=problem.tests,
                     sample_case_idx=problem.sample_case_idx,
-                    timeout_ms=problem.timeout_ms,
-                    cpu_limit_ms=problem.cpu_limit_ms,
+                    timeout_ms=eff_timeout_ms,
+                    cpu_limit_ms=eff_cpu_limit_ms,
                     stop_on_first_failure=False,
                     extract_from_markdown=False,
                 )
@@ -386,8 +404,8 @@ def run_agent_tool_loop(
             harness=problem.harness_java,
             test_cases=problem.tests,
             sample_case_idx=problem.sample_case_idx,
-            timeout_ms=problem.timeout_ms,
-            cpu_limit_ms=problem.cpu_limit_ms,
+            timeout_ms=eff_timeout_ms,
+            cpu_limit_ms=eff_cpu_limit_ms,
             stop_on_first_failure=False,
             extract_from_markdown=False,
         )

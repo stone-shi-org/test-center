@@ -128,8 +128,8 @@ def _write_synthetic_dataset(root: Path, num_problems: int = 2) -> Path:
             "source": "interviewqb",
             "leetcode_id": str(1000 + i),
             "statement_md": f"Given two integers `a` and `b`, return `a + b`.\n\nExample 1:\nInput: 2 3\nOutput: 5",
-            "timeout_ms": 2000,
-            "cpu_limit_ms": 1500,
+            "timeout_ms": 3000,
+            "cpu_limit_ms": 3000,
             "style_rubric": "Prefer O(1) time and space.",
             "sample_case_idx": [0, 1],
         }

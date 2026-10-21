@@ -238,6 +238,21 @@ class LLMCodingTester(TesterPlugin):
                 "description": "Weight of normalized LLM judge score when judge is enabled",
                 "x-advanced": True,
             },
+            "per_case_timeout_ms": {
+                "type": "integer",
+                "default": 3000,
+                "minimum": 500,
+                "maximum": 10000,
+                "description": "Per-case execution timeout in ms on Piston (clamped to max 3000ms by runner)",
+                "x-advanced": True,
+            },
+            "cpu_limit_ms": {
+                "type": "integer",
+                "default": 3000,
+                "minimum": 500,
+                "description": "Per-case CPU time limit in ms before reporting Performance Limit Exceeded",
+                "x-advanced": True,
+            },
             "timeout_seconds": {
                 "type": "number",
                 "default": 180.0,
@@ -487,6 +502,17 @@ class LLMCodingTester(TesterPlugin):
         weight_correctness = float(config.get("weight_correctness", DEFAULT_WEIGHT_CORRECTNESS))
         weight_judge = float(config.get("weight_judge", DEFAULT_WEIGHT_JUDGE))
 
+        configured_timeout = config.get("per_case_timeout_ms")
+        eff_timeout_ms = int(configured_timeout) if configured_timeout is not None else max(int(problem.timeout_ms or 3000), 3000)
+
+        configured_cpu_limit = config.get("cpu_limit_ms")
+        if configured_cpu_limit is not None:
+            eff_cpu_limit_ms = int(configured_cpu_limit)
+        elif problem.cpu_limit_ms is not None:
+            eff_cpu_limit_ms = max(int(problem.cpu_limit_ms), 3000)
+        else:
+            eff_cpu_limit_ms = None
+
         user_prompt = build_problem_prompt(problem, tools_enabled=tools_enabled)
         sys_prompt = SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD
         messages: list[dict[str, Any]] = [
@@ -518,6 +544,8 @@ class LLMCodingTester(TesterPlugin):
                 max_total_tokens=max_total_tokens,
                 max_tokens_per_turn=max_tokens,
                 effort=effort,
+                timeout_ms=eff_timeout_ms,
+                cpu_limit_ms=eff_cpu_limit_ms,
                 should_cancel=lambda: ctx.is_cancelled,
             )
             ctx.check_cancelled()
@@ -553,8 +581,8 @@ class LLMCodingTester(TesterPlugin):
                     harness=problem.harness_java,
                     test_cases=problem.tests,
                     sample_case_idx=problem.sample_case_idx,
-                    timeout_ms=problem.timeout_ms,
-                    cpu_limit_ms=problem.cpu_limit_ms,
+                    timeout_ms=eff_timeout_ms,
+                    cpu_limit_ms=eff_cpu_limit_ms,
                     stop_on_first_failure=False,
                     extract_from_markdown=False,
                 )
