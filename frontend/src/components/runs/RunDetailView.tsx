@@ -680,7 +680,7 @@ export function RunDetailView({ runId }: { runId: number }) {
 
       {/* Save as Baseline Dialog */}
       {showBaselineDialog && (
-        <div className="modal-backdrop" onClick={() => setShowBaselineDialog(false)}>
+        <div className="modal-backdrop">
           <div
             className="modal-content"
             data-testid="save-baseline-dialog"
@@ -787,7 +787,7 @@ export function RunDetailView({ runId }: { runId: number }) {
 
       {/* Rename Baseline Dialog */}
       {renamingBaseline && (
-        <div className="modal-backdrop" onClick={() => setRenamingBaseline(null)}>
+        <div className="modal-backdrop">
           <div
             className="modal-content"
             data-testid="rename-baseline-dialog"

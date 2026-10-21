@@ -30,7 +30,7 @@ export function Modal({
   if (!isOpen) return null
 
   return (
-    <div className="modal-backdrop" onClick={onClose} role="dialog" aria-modal="true">
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
       <div
         className="modal-content"
         style={{ maxWidth }}
