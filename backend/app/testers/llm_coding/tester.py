@@ -258,7 +258,13 @@ class LLMCodingTester(TesterPlugin):
                 "default": 180.0,
                 "minimum": 5.0,
                 "maximum": 1800.0,
-                "description": "HTTP request timeout in seconds per LLM API call",
+                "description": "Per-HTTP request timeout in seconds per LLM API turn (recommend 300s-600s for local reasoning models with effort=high)",
+                "x-advanced": True,
+            },
+            "run_timeout": {
+                "type": "number",
+                "minimum": 60.0,
+                "description": "Total run timeout in seconds before worker aborts execution (overrides DEFAULT_RUN_TIMEOUT of 5400s)",
                 "x-advanced": True,
             },
         },
@@ -474,6 +480,87 @@ class LLMCodingTester(TesterPlugin):
         )
         return p_client, runner_url
 
+    def _build_error_fallback(
+        self,
+        problem: ProblemSpec,
+        error: Exception | str,
+        wall_time_ms: float = 0.0,
+        tools_enabled: bool = False,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Construct fallback result structures when problem evaluation fails."""
+        err_msg = str(error)
+        case_metrics: dict[str, Any] = {
+            "score": format_metric(0.0, unit="pts", better="higher"),
+            "case_score": format_metric(0.0, unit="pts", better="higher"),
+            "correct": format_metric(0, unit="bool", better="higher"),
+            "test_case_pass_rate": format_metric(0.0, unit="%", better="higher"),
+            "attempts_used": format_metric(0, unit="attempts", better="lower"),
+            "tool_call_count": format_metric(0, unit="calls", better="lower"),
+            "wall_time_ms": format_metric(round(wall_time_ms, 2), unit="ms", better="lower"),
+            "tokens_per_sec": format_metric(0.0, unit="tokens/s", better="higher"),
+            "ttft_ms": format_metric(0.0, unit="ms", better="lower"),
+            "prompt_tokens": format_metric(0, unit="tokens", better="lower"),
+            "completion_tokens": format_metric(0, unit="tokens", better="lower"),
+            "total_tokens": format_metric(0, unit="tokens", better="lower"),
+        }
+        case_detail: dict[str, Any] = {
+            "problem_id": problem.id,
+            "difficulty": problem.difficulty,
+            "title": problem.title,
+            "status": "Runtime Error",
+            "passed": False,
+            "correct": 0,
+            "verdict": "Error",
+            "error": err_msg,
+            "attempts_used": 0,
+            "max_attempts": 1,
+            "passed_cases": 0,
+            "total_cases": len(problem.tests),
+            "test_case_pass_rate": 0.0,
+            "sample_passed": 0,
+            "sample_total": len(problem.sample_case_idx),
+            "hidden_passed": 0,
+            "hidden_total": max(0, len(problem.tests) - len(problem.sample_case_idx)),
+            "case_score_100": 0.0,
+            "score_breakdown": {
+                "correct": 0,
+                "solved_attempt": None,
+                "attempt_factor": 0.0,
+                "correctness_component": 0.0,
+                "judge_component": 0.0,
+                "case_score": 0.0,
+            },
+            "attempts": [],
+            "final_code": "",
+            "transcript": [],
+            "judge": None,
+            "tools_enabled": tools_enabled,
+            "tool_call_count": 0,
+            "tool_events": [],
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "tokens_per_sec": 0.0,
+            "ttft_ms": 0.0,
+            "wall_time_ms": round(wall_time_ms, 2),
+        }
+        agg_record: dict[str, Any] = {
+            "problem_id": problem.id,
+            "difficulty": problem.difficulty,
+            "correct": 0,
+            "solved_attempt": None,
+            "case_score": 0.0,
+            "test_case_pass_rate": 0.0,
+            "judge_overall": None,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "tool_call_count": 0,
+            "tokens_per_sec": 0.0,
+            "ttft_ms": 0.0,
+            "wall_time_ms": round(wall_time_ms, 2),
+        }
+        return case_metrics, case_detail, agg_record
+
     def _evaluate_single_problem(
         self,
         problem: ProblemSpec,
@@ -533,119 +620,158 @@ class LLMCodingTester(TesterPlugin):
         final_code = ""
         final_judge_run: JudgeRunResult | None = None
 
-        if tools_enabled:
-            tool_outcome = run_agent_tool_loop(
-                chat_client=chat_client,
-                piston_client=piston_client,
-                problem=problem,
-                model=model,
-                initial_messages=messages,
-                max_attempts=max_attempts,
-                feedback_level=feedback_level,
-                max_tool_calls=max_tool_calls,
-                max_total_tokens=max_total_tokens,
-                max_tokens_per_turn=max_tokens,
-                effort=effort,
-                timeout_ms=eff_timeout_ms,
-                cpu_limit_ms=eff_cpu_limit_ms,
-                should_cancel=lambda: ctx.is_cancelled,
-            )
-            ctx.check_cancelled()
-            messages = tool_outcome.transcript
-            attempts = tool_outcome.attempts
-            tool_events = tool_outcome.tool_events
-            tool_call_count = tool_outcome.tool_call_count
-            prompt_tokens = tool_outcome.prompt_tokens
-            completion_tokens = tool_outcome.completion_tokens
-            solved = tool_outcome.solved
-            solved_attempt = tool_outcome.solved_attempt
-            final_code = tool_outcome.final_code
-            final_judge_result = tool_outcome.final_judge_result
-            final_judge_run = final_judge_result
-        else:
-            for attempt_num in range(1, max_attempts + 1):
-                ctx.check_cancelled()
-                stream_res = chat_client.stream_chat(
-                    messages=messages,
+        try:
+            if tools_enabled:
+                tool_outcome = run_agent_tool_loop(
+                    chat_client=chat_client,
+                    piston_client=piston_client,
+                    problem=problem,
                     model=model,
-                    max_tokens=max_tokens,
+                    initial_messages=messages,
+                    max_attempts=max_attempts,
+                    feedback_level=feedback_level,
+                    max_tool_calls=max_tool_calls,
+                    max_total_tokens=max_total_tokens,
+                    max_tokens_per_turn=max_tokens,
                     effort=effort,
-                )
-                prompt_tokens += int(getattr(stream_res, "prompt_tokens", 0) or 0)
-                completion_tokens += int(getattr(stream_res, "completion_tokens", 0) or 0)
-                tps_val = getattr(stream_res, "tokens_per_sec", None)
-                if tps_val is not None and float(tps_val) > 0:
-                    cur_tps = float(tps_val)
-                elif hasattr(stream_res, "decode_duration_ms") and getattr(stream_res, "decode_duration_ms") > 0:
-                    dec_s = getattr(stream_res, "decode_duration_ms") / 1000.0
-                    c_tok = int(getattr(stream_res, "completion_tokens", 0) or 0)
-                    cur_tps = (c_tok / dec_s) if dec_s > 0 else 0.0
-                else:
-                    cur_tps = 0.0
-                if cur_tps > 0:
-                    attempt_tps.append(cur_tps)
-                cur_ttft = float(getattr(stream_res, "ttft_ms", 0.0) or 0.0)
-                if cur_ttft > 0:
-                    attempt_ttfts.append(cur_ttft)
-                response_text = str(getattr(stream_res, "content", "") or "")
-                messages.append({"role": "assistant", "content": response_text})
-
-                extracted_code = extract_java_code(response_text)
-                judge_run = judge_java_solution(
-                    client=piston_client,
-                    code=extracted_code,
-                    harness=problem.harness_java,
-                    test_cases=problem.tests,
-                    sample_case_idx=problem.sample_case_idx,
                     timeout_ms=eff_timeout_ms,
                     cpu_limit_ms=eff_cpu_limit_ms,
-                    stop_on_first_failure=False,
-                    extract_from_markdown=False,
+                    should_cancel=lambda: ctx.is_cancelled,
                 )
-                final_code = extracted_code or ""
-                final_judge_run = judge_run
-
-                attempt_entry: dict[str, Any] = {
-                    "attempt": attempt_num,
-                    "response": response_text,
-                    "code": final_code,
-                    "tokens_per_sec": round(cur_tps, 2),
-                    "ttft_ms": round(cur_ttft, 2),
-                    "status": judge_run.status,
-                    "passed": judge_run.passed,
-                    "correct": judge_run.correct,
-                    "passed_cases": judge_run.passed_cases,
-                    "total_cases": judge_run.total_cases,
-                    "test_case_pass_rate": judge_run.test_case_pass_rate,
-                    "sample_passed": judge_run.sample_passed,
-                    "sample_total": judge_run.sample_total,
-                    "hidden_passed": judge_run.hidden_passed,
-                    "hidden_total": judge_run.hidden_total,
-                    "compile_error_output": judge_run.compile_error_output,
-                    "run_time_ms": judge_run.run_time_ms,
-                    "max_cpu_time_ms": judge_run.max_cpu_time_ms,
-                }
-
-                if judge_run.passed:
-                    solved = True
-                    solved_attempt = attempt_num
-                    attempts.append(attempt_entry)
-                    break
-
-                if attempt_num < max_attempts:
-                    fb_text = build_attempt_feedback(
-                        judge_result=judge_run,
-                        feedback_level=feedback_level,
-                        attempt_number=attempt_num,
-                        max_attempts=max_attempts,
+                ctx.check_cancelled()
+                messages = tool_outcome.transcript
+                attempts = tool_outcome.attempts
+                tool_events = tool_outcome.tool_events
+                tool_call_count = tool_outcome.tool_call_count
+                prompt_tokens = tool_outcome.prompt_tokens
+                completion_tokens = tool_outcome.completion_tokens
+                solved = tool_outcome.solved
+                solved_attempt = tool_outcome.solved_attempt
+                final_code = tool_outcome.final_code
+                final_judge_result = tool_outcome.final_judge_result
+                final_judge_run = final_judge_result
+            else:
+                for attempt_num in range(1, max_attempts + 1):
+                    ctx.check_cancelled()
+                    stream_res = chat_client.stream_chat(
+                        messages=messages,
+                        model=model,
+                        max_tokens=max_tokens,
+                        effort=effort,
                     )
-                    attempt_entry["feedback"] = fb_text
-                    messages.append({"role": "user", "content": fb_text})
+                    prompt_tokens += int(getattr(stream_res, "prompt_tokens", 0) or 0)
+                    completion_tokens += int(getattr(stream_res, "completion_tokens", 0) or 0)
+                    tps_val = getattr(stream_res, "tokens_per_sec", None)
+                    if tps_val is not None and float(tps_val) > 0:
+                        cur_tps = float(tps_val)
+                    elif hasattr(stream_res, "decode_duration_ms") and getattr(stream_res, "decode_duration_ms") > 0:
+                        dec_s = getattr(stream_res, "decode_duration_ms") / 1000.0
+                        c_tok = int(getattr(stream_res, "completion_tokens", 0) or 0)
+                        cur_tps = (c_tok / dec_s) if dec_s > 0 else 0.0
+                    else:
+                        cur_tps = 0.0
+                    if cur_tps > 0:
+                        attempt_tps.append(cur_tps)
+                    cur_ttft = float(getattr(stream_res, "ttft_ms", 0.0) or 0.0)
+                    if cur_ttft > 0:
+                        attempt_ttfts.append(cur_ttft)
+                    response_text = str(getattr(stream_res, "content", "") or "")
+                    messages.append({"role": "assistant", "content": response_text})
 
-                attempts.append(attempt_entry)
+                    extracted_code = extract_java_code(response_text)
+                    judge_run = judge_java_solution(
+                        client=piston_client,
+                        code=extracted_code,
+                        harness=problem.harness_java,
+                        test_cases=problem.tests,
+                        sample_case_idx=problem.sample_case_idx,
+                        timeout_ms=eff_timeout_ms,
+                        cpu_limit_ms=eff_cpu_limit_ms,
+                        stop_on_first_failure=False,
+                        extract_from_markdown=False,
+                    )
+                    final_code = extracted_code or ""
+                    final_judge_run = judge_run
+
+                    attempt_entry: dict[str, Any] = {
+                        "attempt": attempt_num,
+                        "response": response_text,
+                        "code": final_code,
+                        "tokens_per_sec": round(cur_tps, 2),
+                        "ttft_ms": round(cur_ttft, 2),
+                        "status": judge_run.status,
+                        "passed": judge_run.passed,
+                        "correct": judge_run.correct,
+                        "passed_cases": judge_run.passed_cases,
+                        "total_cases": judge_run.total_cases,
+                        "test_case_pass_rate": judge_run.test_case_pass_rate,
+                        "sample_passed": judge_run.sample_passed,
+                        "sample_total": judge_run.sample_total,
+                        "hidden_passed": judge_run.hidden_passed,
+                        "hidden_total": judge_run.hidden_total,
+                        "compile_error_output": judge_run.compile_error_output,
+                        "run_time_ms": judge_run.run_time_ms,
+                        "max_cpu_time_ms": judge_run.max_cpu_time_ms,
+                    }
+
+                    if judge_run.passed:
+                        solved = True
+                        solved_attempt = attempt_num
+                        attempts.append(attempt_entry)
+                        break
+
+                    if attempt_num < max_attempts:
+                        fb_text = build_attempt_feedback(
+                            judge_result=judge_run,
+                            feedback_level=feedback_level,
+                            attempt_number=attempt_num,
+                            max_attempts=max_attempts,
+                        )
+                        attempt_entry["feedback"] = fb_text
+                        messages.append({"role": "user", "content": fb_text})
+
+                    attempts.append(attempt_entry)
+        except TesterCancelledError:
+            raise
+        except Exception as exc:
+            wall_time_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            ctx.log(f"[{problem.id}] Problem evaluation failed: {type(exc).__name__}: {exc}", level="warning")
+            c_metrics, c_detail, agg_rec = self._build_error_fallback(
+                problem=problem,
+                error=exc,
+                wall_time_ms=wall_time_ms,
+                tools_enabled=tools_enabled,
+            )
+            c_detail["attempts"] = attempts
+            c_detail["tool_events"] = tool_events
+            c_detail["tool_call_count"] = tool_call_count
+            c_detail["prompt_tokens"] = prompt_tokens
+            c_detail["completion_tokens"] = completion_tokens
+            c_detail["total_tokens"] = prompt_tokens + completion_tokens
+            c_metrics["prompt_tokens"] = format_metric(prompt_tokens, unit="tokens", better="lower")
+            c_metrics["completion_tokens"] = format_metric(completion_tokens, unit="tokens", better="lower")
+            c_metrics["total_tokens"] = format_metric(prompt_tokens + completion_tokens, unit="tokens", better="lower")
+            c_metrics["tool_call_count"] = format_metric(tool_call_count, unit="calls", better="lower")
+            agg_rec["prompt_tokens"] = prompt_tokens
+            agg_rec["completion_tokens"] = completion_tokens
+            agg_rec["tool_call_count"] = tool_call_count
+            return c_metrics, c_detail, agg_rec
 
         wall_time_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-        assert final_judge_run is not None
+        if final_judge_run is None:
+            final_judge_run = JudgeRunResult(
+                status="Runtime Error",
+                passed=False,
+                correct=0,
+                passed_cases=0,
+                total_cases=len(problem.tests),
+                test_case_pass_rate=0.0,
+                sample_passed=0,
+                sample_total=len(problem.sample_case_idx),
+                hidden_passed=0,
+                hidden_total=max(0, len(problem.tests) - len(problem.sample_case_idx)),
+                cases=[],
+            )
 
         # Optional LLM Judge evaluation (Section 6)
         judge_result: CodingJudgeResult | None = None
@@ -657,19 +783,25 @@ class LLMCodingTester(TesterPlugin):
         )
         if should_run_judge:
             ctx.check_cancelled()
-            judge_result = evaluate_with_coding_judge(
-                judge_client=judge_client,
-                judge_model=str(judge_model),
-                judge_target_name=str(judge_info.get("target_name", "judge-target")),
-                judge_prompt_md=dataset.judge_prompt_md,
-                problem=problem,
-                candidate_code=final_code,
-                judge_run=final_judge_run,
-            )
+            try:
+                judge_result = evaluate_with_coding_judge(
+                    judge_client=judge_client,
+                    judge_model=str(judge_model),
+                    judge_target_name=str(judge_info.get("target_name", "judge-target")),
+                    judge_prompt_md=dataset.judge_prompt_md,
+                    problem=problem,
+                    candidate_code=final_code,
+                    judge_run=final_judge_run,
+                )
+            except TesterCancelledError:
+                raise
+            except Exception as j_exc:
+                ctx.log(f"[{problem.id}] LLM judge evaluation failed: {j_exc}", level="warning")
+                judge_result = None
 
         if tools_enabled:
-            case_tps = tool_outcome.mean_tps
-            case_ttft = tool_outcome.mean_ttft
+            case_tps = tool_outcome.mean_tps if "tool_outcome" in locals() else 0.0
+            case_ttft = tool_outcome.mean_ttft if "tool_outcome" in locals() else 0.0
         else:
             case_tps = sum(attempt_tps) / len(attempt_tps) if attempt_tps else 0.0
             case_ttft = sum(attempt_ttfts) / len(attempt_ttfts) if attempt_ttfts else 0.0
@@ -905,31 +1037,53 @@ class LLMCodingTester(TesterPlugin):
                 )
                 _record_problem_completion(prob, c_metrics, c_detail, agg_rec)
         else:
-            with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                future_to_prob = {
-                    pool.submit(
-                        self._evaluate_single_problem,
-                        prob,
-                        dataset,
-                        chat_client,
-                        model,
-                        piston_client,
-                        judge_client,
-                        judge_model,
-                        judge_info,
-                        config,
-                        ctx,
-                    ): prob
-                    for prob in problems
-                }
+            pool = ThreadPoolExecutor(max_workers=concurrency)
+            future_to_prob = {
+                pool.submit(
+                    self._evaluate_single_problem,
+                    prob,
+                    dataset,
+                    chat_client,
+                    model,
+                    piston_client,
+                    judge_client,
+                    judge_model,
+                    judge_info,
+                    config,
+                    ctx,
+                ): prob
+                for prob in problems
+            }
+            try:
                 for fut in as_completed(future_to_prob):
                     if ctx.is_cancelled:
                         for pending in future_to_prob:
                             pending.cancel()
                         ctx.check_cancelled()
                     prob = future_to_prob[fut]
-                    c_metrics, c_detail, agg_rec = fut.result()
+                    try:
+                        c_metrics, c_detail, agg_rec = fut.result()
+                    except TesterCancelledError:
+                        raise
+                    except Exception as exc:
+                        ctx.log(
+                            f"[{prob.id}] Future execution unhandled exception: {type(exc).__name__}: {exc}",
+                            level="warning",
+                        )
+                        c_metrics, c_detail, agg_rec = self._build_error_fallback(
+                            problem=prob,
+                            error=exc,
+                            wall_time_ms=0.0,
+                            tools_enabled=tools_enabled,
+                        )
                     _record_problem_completion(prob, c_metrics, c_detail, agg_rec)
+            except Exception:
+                for pending in future_to_prob:
+                    pending.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
 
         # Sort result.cases to deterministic problem order
         order_map = {p.id: i for i, p in enumerate(problems)}

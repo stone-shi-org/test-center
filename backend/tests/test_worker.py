@@ -245,6 +245,34 @@ def test_worker_default_timeout_is_90_minutes(tmp_path: Path, test_db_session):
     assert worker.default_timeout == 5400.0
 
 
+def test_worker_extract_timeout_override_from_config(tmp_path: Path, test_db_session):
+    """Verify that timeout overrides can be extracted from run.config_snapshot or tester config."""
+    worker = RunWorker(session_factory=test_db_session, artifacts_dir=tmp_path / "artifacts")
+    db: Session = test_db_session()
+
+    # 1. Direct timeout on config_snapshot
+    run_direct = Run(
+        status="queued",
+        config_snapshot={"tester": "dummy", "timeout": 7200.0},
+        target_snapshot={},
+    )
+    steps, _ = worker._extract_execution_steps(db, run_direct)
+    assert steps[0]["timeout"] == 7200.0
+
+    # 2. run_timeout in tester config dictionary
+    run_nested = Run(
+        status="queued",
+        config_snapshot={
+            "tester": "llm_coding",
+            "config": {"run_timeout": 10800.0, "model": "test-model"},
+        },
+        target_snapshot={},
+    )
+    steps, _ = worker._extract_execution_steps(db, run_nested)
+    assert steps[0]["timeout"] == 10800.0
+    db.close()
+
+
 @pytest.mark.asyncio
 async def test_worker_timeout(tmp_path: Path, test_db_session):
     artifacts_dir = tmp_path / "artifacts"

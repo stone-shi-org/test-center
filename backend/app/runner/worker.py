@@ -230,6 +230,10 @@ class RunWorker:
                 run_mode = run.config_snapshot["run_mode"].lower()
             if "timeout" in run.config_snapshot and run.config_snapshot["timeout"] is not None:
                 run_timeout = float(run.config_snapshot["timeout"])
+            elif isinstance(run.config_snapshot.get("config"), dict):
+                cfg_t = run.config_snapshot["config"].get("run_timeout") or run.config_snapshot["config"].get("timeout")
+                if cfg_t is not None:
+                    run_timeout = float(cfg_t)
             if isinstance(run.config_snapshot.get("definitions"), list) and len(run.config_snapshot["definitions"]) > 0:
                 raw_defs = run.config_snapshot["definitions"]
         elif isinstance(run.config_snapshot, list) and len(run.config_snapshot) > 0:
@@ -292,13 +296,17 @@ class RunWorker:
         config_data: dict[str, Any] = {}
         suites: list[str] | None = None
         test_def_id: int | None = None
-        timeout = run_timeout if run_timeout is not None else self.default_timeout
-
         if isinstance(run.config_snapshot, dict):
             tester_name = run.config_snapshot.get("tester", "dummy")
             config_data = dict(run.config_snapshot.get("config") or {})
             suites = run.config_snapshot.get("suites")
             test_def_id = run.config_snapshot.get("test_definition_id") or run.config_snapshot.get("id")
+            if run_timeout is None:
+                cfg_t = config_data.get("run_timeout") or config_data.get("timeout")
+                if cfg_t is not None:
+                    run_timeout = float(cfg_t)
+
+        timeout = run_timeout if run_timeout is not None else self.default_timeout
 
         target_data = self._resolve_judge_target(db, config_data, default_target)
 
