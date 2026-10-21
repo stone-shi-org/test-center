@@ -27,6 +27,9 @@ def format_llm_coding_report(
     judge_mean = metrics.get("judge_mean", {}).get("value", 0.0)
     tool_mean = metrics.get("tool_calls_mean", {}).get("value", 0.0)
     tps_val = metrics.get("tokens_per_sec", {}).get("value", 0.0)
+    ttft_mean = metrics.get("ttft_mean_ms", {}).get("value", 0.0)
+    ttft_p50 = metrics.get("ttft_p50_ms", {}).get("value", 0.0)
+    ttft_p95 = metrics.get("ttft_p95_ms", {}).get("value", 0.0)
 
     lines: list[str] = [
         "=" * 90,
@@ -63,6 +66,7 @@ def format_llm_coding_report(
             f"  Judge Mean Score    : {judge_mean:.2f} / 5.0",
             f"  Tool Calls (mean)   : {tool_mean:.2f}",
             f"  Generation Speed    : {tps_val:.2f} tokens/s",
+            f"  TTFT mean / p50 / p95 : {ttft_mean:.1f} ms / {ttft_p50:.1f} ms / {ttft_p95:.1f} ms",
             f"  Total Tokens        : {metrics.get('total_tokens', {}).get('value', 0)} "
             f"(prompt {metrics.get('prompt_tokens_total', {}).get('value', 0)} / "
             f"completion {metrics.get('completion_tokens_total', {}).get('value', 0)})",

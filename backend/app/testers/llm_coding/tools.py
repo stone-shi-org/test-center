@@ -115,6 +115,7 @@ class ToolLoopOutcome:
     total_tokens: int = 0
     wall_time_ms: float = 0.0
     turn_tps: list[float] = field(default_factory=list)
+    turn_ttfts: list[float] = field(default_factory=list)
     total_generation_ms: float = 0.0
     solved: bool = False
     solved_attempt: int | None = None
@@ -128,6 +129,12 @@ class ToolLoopOutcome:
             return sum(self.turn_tps) / len(self.turn_tps)
         if self.total_generation_ms > 0 and self.completion_tokens > 0:
             return self.completion_tokens / (self.total_generation_ms / 1000.0)
+        return 0.0
+
+    @property
+    def mean_ttft(self) -> float:
+        if self.turn_ttfts:
+            return sum(self.turn_ttfts) / len(self.turn_ttfts)
         return 0.0
 
 
@@ -249,6 +256,9 @@ def run_agent_tool_loop(
         outcome.total_generation_ms += lat_ms
         if lat_ms > 0 and c_tok > 0:
             outcome.turn_tps.append(c_tok / (lat_ms / 1000.0))
+        ttft = float(turn.get("ttft_ms", lat_ms) or lat_ms)
+        if ttft > 0:
+            outcome.turn_ttfts.append(ttft)
 
         assistant_msg = turn.get("message") or {
             "role": "assistant",

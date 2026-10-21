@@ -163,6 +163,7 @@ class FakeStreamResp:
     prompt_tokens: int = 120
     completion_tokens: int = 80
     tokens_per_sec: float = 75.0
+    ttft_ms: float = 45.0
 
 
 class FakeChatClient:
@@ -736,6 +737,10 @@ def test_tester_registered_and_single_attempt_run(tmp_path):
     assert res.metrics["tokens_per_sec"]["value"] == 75.0
     assert res.metrics["tokens_per_sec"]["unit"] == "tokens/s"
     assert res.metrics["tokens_per_sec"]["better"] == "higher"
+    assert "ttft_ms" in res.metrics
+    assert res.metrics["ttft_ms"]["value"] == 45.0
+    assert res.metrics["ttft_ms"]["unit"] == "ms"
+    assert res.metrics["ttft_ms"]["better"] == "lower"
     assert "score_easy" in res.metrics
     assert "solve_at_1_easy" in res.metrics
 
