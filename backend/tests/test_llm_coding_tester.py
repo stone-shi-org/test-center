@@ -1015,6 +1015,66 @@ def test_tester_concurrency_execution(tmp_path):
     assert max_concurrent >= 2, f"Expected concurrent execution, but max concurrency was {max_concurrent}"
 
 
+def test_tester_survives_single_case_error_and_continues_execution(tmp_path):
+    """Verify that an unexpected exception or timeout on one problem does not crash the entire run."""
+    from backend.app.testers.llm.client import ChatClientError
+
+    tester = get_tester("llm_coding")
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=2)
+
+    class FailingOnFirstProblemLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            self.calls += 1
+            # First problem stream throws an HTTP timeout / ChatClientError
+            user_content = messages[-1].get("content", "")
+            if "Problem 1" in user_content or "prob-1" in user_content:
+                raise ChatClientError("HTTP request failed: Timeout after 180s")
+            return FakeStreamResp(content=SAMPLE_REFERENCE_JAVA)
+
+    def _piston_hook(payload: dict[str, Any]) -> dict[str, Any]:
+        stdin = payload.get("stdin", "")
+        if "2 3" in stdin:
+            return {"run": {"stdout": "5\n", "stderr": "", "code": 0, "cpu_time": 50}}
+        if "10 20" in stdin:
+            return {"run": {"stdout": "30\n", "stderr": "", "code": 0, "cpu_time": 50}}
+        if "SECRET_IN_1" in stdin:
+            return {"run": {"stdout": "SECRET_OUT_101\n", "stderr": "", "code": 0, "cpu_time": 50}}
+        return {"run": {"stdout": "SECRET_OUT_202\n", "stderr": "", "code": 0, "cpu_time": 50}}
+
+    ctx = TestContext(run_id=203, artifacts_dir=tmp_path / "artifacts", emit_stdout=False)
+    res = tester.run(
+        config={
+            "dataset_dir": str(ds_dir),
+            "model": "test-coder-7b",
+            "concurrency": 2,
+            "_chat_client": FailingOnFirstProblemLLM(),
+            "_piston_execute_hook": _piston_hook,
+        },
+        target={"name": "local-llm", "kind": "llm", "base_url": "http://fake-llm:8000/v1"},
+        ctx=ctx,
+    )
+
+    assert len(res.cases) == 2
+    case_1 = next(c for c in res.cases if c.case_id == "prob-1")
+    case_2 = next(c for c in res.cases if c.case_id == "prob-2")
+
+    assert case_1.status == "fail"
+    assert case_1.detail["verdict"] == "Error"
+    assert "Timeout after 180s" in case_1.detail["error"]
+    assert case_1.metrics["score"]["value"] == 0.0
+
+    assert case_2.status == "pass"
+    assert case_2.detail["verdict"] == "Accepted"
+    assert case_2.metrics["score"]["value"] == 100.0
+
+    assert res.status == "pass"
+    assert res.metrics["problems_evaluated"]["value"] == 2
+    assert res.metrics["problems_solved"]["value"] == 1
+
+
 def test_llm_coding_compare_and_baselines_integration(app_and_client, tmp_path):
     """Verify two llm_coding runs line up by stable problem case_id in /api/compare and /api/baselines."""
     client, session_factory, _artifacts_dir = app_and_client
