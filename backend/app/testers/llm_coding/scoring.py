@@ -195,10 +195,22 @@ def aggregate_run_metrics(
 
     tool_calls_mean = sum(int(r.get("tool_call_count", 0)) for r in case_records) / n
 
+    valid_tps = [
+        float(r["tokens_per_sec"])
+        for r in case_records
+        if r.get("tokens_per_sec") is not None and float(r["tokens_per_sec"]) > 0
+    ]
+    tps_mean = round(sum(valid_tps) / len(valid_tps), 2) if valid_tps else 0.0
+
     metrics: dict[str, dict[str, Any]] = {
         "score": {"value": round(mean_score_100, 2), "unit": "pts", "better": "higher"},
         "solve_at_1": {"value": round(solve_at_1_pct, 2), "unit": "%", "better": "higher"},
         "solve_at_k": {"value": round(solve_at_k_pct, 2), "unit": "%", "better": "higher"},
+        "tokens_per_sec": {
+            "value": tps_mean,
+            "unit": "tokens/s",
+            "better": "higher",
+        },
         "mean_attempts_to_solve": {
             "value": round(mean_attempts, 2),
             "unit": "attempts",

@@ -114,11 +114,21 @@ class ToolLoopOutcome:
     completion_tokens: int = 0
     total_tokens: int = 0
     wall_time_ms: float = 0.0
+    turn_tps: list[float] = field(default_factory=list)
+    total_generation_ms: float = 0.0
     solved: bool = False
     solved_attempt: int | None = None
     final_code: str = ""
     final_judge_result: JudgeRunResult | None = None
     budget_exhausted_reason: str | None = None
+
+    @property
+    def mean_tps(self) -> float:
+        if self.turn_tps:
+            return sum(self.turn_tps) / len(self.turn_tps)
+        if self.total_generation_ms > 0 and self.completion_tokens > 0:
+            return self.completion_tokens / (self.total_generation_ms / 1000.0)
+        return 0.0
 
 
 def execute_run_samples(
@@ -235,6 +245,10 @@ def run_agent_tool_loop(
         outcome.prompt_tokens += p_tok
         outcome.completion_tokens += c_tok
         outcome.total_tokens += t_tok
+        lat_ms = float(turn.get("latency_ms", 0.0) or 0.0)
+        outcome.total_generation_ms += lat_ms
+        if lat_ms > 0 and c_tok > 0:
+            outcome.turn_tps.append(c_tok / (lat_ms / 1000.0))
 
         assistant_msg = turn.get("message") or {
             "role": "assistant",

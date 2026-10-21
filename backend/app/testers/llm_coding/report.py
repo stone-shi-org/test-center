@@ -26,6 +26,7 @@ def format_llm_coding_report(
     tc_rate = metrics.get("test_case_pass_rate", {}).get("value", 0.0)
     judge_mean = metrics.get("judge_mean", {}).get("value", 0.0)
     tool_mean = metrics.get("tool_calls_mean", {}).get("value", 0.0)
+    tps_val = metrics.get("tokens_per_sec", {}).get("value", 0.0)
 
     lines: list[str] = [
         "=" * 90,
@@ -61,6 +62,7 @@ def format_llm_coding_report(
             f"  Test Case Pass Rate : {tc_rate:.2f}%",
             f"  Judge Mean Score    : {judge_mean:.2f} / 5.0",
             f"  Tool Calls (mean)   : {tool_mean:.2f}",
+            f"  Generation Speed    : {tps_val:.2f} tokens/s",
             f"  Total Tokens        : {metrics.get('total_tokens', {}).get('value', 0)} "
             f"(prompt {metrics.get('prompt_tokens_total', {}).get('value', 0)} / "
             f"completion {metrics.get('completion_tokens_total', {}).get('value', 0)})",

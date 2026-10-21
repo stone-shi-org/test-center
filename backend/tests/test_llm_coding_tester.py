@@ -162,6 +162,7 @@ class FakeStreamResp:
     content: str
     prompt_tokens: int = 120
     completion_tokens: int = 80
+    tokens_per_sec: float = 75.0
 
 
 class FakeChatClient:
@@ -731,6 +732,10 @@ def test_tester_registered_and_single_attempt_run(tmp_path):
     assert res.metrics["solve_at_1"]["value"] == 100.0
     assert res.metrics["solve_at_k"]["value"] == 100.0
     assert res.metrics["test_case_pass_rate"]["value"] == 100.0
+    assert "tokens_per_sec" in res.metrics
+    assert res.metrics["tokens_per_sec"]["value"] == 75.0
+    assert res.metrics["tokens_per_sec"]["unit"] == "tokens/s"
+    assert res.metrics["tokens_per_sec"]["better"] == "higher"
     assert "score_easy" in res.metrics
     assert "solve_at_1_easy" in res.metrics
 
@@ -888,6 +893,8 @@ def test_tester_agent_tool_mode(tmp_path):
     assert res.metrics["score"]["value"] == 100.0
     assert res.metrics["solve_at_1"]["value"] == 100.0
     assert res.metrics["tool_calls_mean"]["value"] == 4.0
+    assert "tokens_per_sec" in res.metrics
+    assert res.metrics["tokens_per_sec"]["value"] > 0.0
     case_detail = res.cases[0].detail
     assert case_detail["tool_call_count"] == 4
     assert [e["name"] for e in case_detail["tool_events"]] == [
