@@ -1,6 +1,6 @@
 # Test datasets (large, copied in manually)
 test-data/
-
+test-data
 # Secrets / env
 .env
 *.env
