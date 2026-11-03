@@ -271,12 +271,15 @@ def test_starter_templates_endpoint(app_and_client):
     res_stt = client.get("/api/test-definitions/starters?tester=live-stt")
     assert res_stt.status_code == 200
     stt_starters = res_stt.json()
-    assert len(stt_starters) == 6
+    assert len(stt_starters) == 7
     assert all(s["tester"] == "live-stt" for s in stt_starters)
     stt_names = [s["name"] for s in stt_starters]
     assert "HTTP smoke" in stt_names
     assert "HTTP full contract" in stt_names
     assert "Quick accuracy (WER)" in stt_names
+    speaker = next(s for s in stt_starters if s["name"] == "Speaker-attributed accuracy (one-pass vs pipeline)")
+    assert speaker["suites"] == ["accuracy_wer", "accuracy_diarization"]
+    assert "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B" in speaker["config"]["models"]
 
     res_llm = client.get("/api/test-definitions/starters?tester=llm")
     assert res_llm.status_code == 200

@@ -72,6 +72,25 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
     },
     {
         "tester": "live-stt",
+        "name": "Speaker-attributed accuracy (one-pass vs pipeline)",
+        "description": (
+            "Who-said-what accuracy on 3 full NOTSOFAR-1 meetings: Nemotron Transcribe (transcript + "
+            "speakers in one request; joint_cpwer / joint_wer / joint_der) vs parakeet-tdt words "
+            "attributed by pyannote (cpwer, der)."
+        ),
+        "suites": ["accuracy_wer", "accuracy_diarization"],
+        "config": {
+            "models": [
+                "parakeet-tdt-0.6b-v3",
+                "pyannote/speaker-diarization-community-1",
+                "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B",
+            ],
+            "max_meetings": 3,
+            "timeout_seconds": 300,
+        },
+    },
+    {
+        "tester": "live-stt",
         "name": "gRPC long call",
         "description": "Long-duration gRPC streaming stability and memory growth test.",
         "suites": ["grpc_long_call"],
