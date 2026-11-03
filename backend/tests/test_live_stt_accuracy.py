@@ -1498,3 +1498,60 @@ def test_report_shows_one_pass_transcript_line():
     }
     text = format_live_stt_report("http://x", {}, metrics, [])
     assert "One-pass Transcript : cpWER 29.50%, WER 38.60%, DER 5.40% (n=20)" in text
+
+
+def test_explicit_one_pass_only_models_skip_asr_accuracy_suites(tmp_path: Path):
+    """models=[Nemotron Transcribe] with accuracy_wer + accuracy_diarization must not silently fall
+    back to the server's default ASR model: accuracy_wer is skipped with a warning, and Nemotron is
+    still scored on its own transcript."""
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    events: list[str] = []
+    logs: list[tuple[str, str]] = []
+
+    def on_event(ev: dict[str, Any]) -> None:
+        if ev.get("type") == "log":
+            logs.append((str(ev.get("level", "")), str(ev.get("message", ""))))
+
+    ctx = TestContext(run_id=213, artifacts_dir=tmp_path / "one_pass_only", emit_stdout=False, on_event=on_event)
+    res = LiveSTTTester().run(
+        {
+            "suites": ["accuracy_wer", "accuracy_diarization"],
+            "models": [NEMOTRON_TRANSCRIBE_ID],
+            "dataset_dir": str(ds_root),
+            "meetings": ["MTG_90001", "MTG_90002"],
+            "use_cache": False,
+            "_transport": _one_pass_diarization_transport(events),
+        },
+        {"name": "mock-live-stt", "base_url": "http://mockserver/v1"},
+        ctx,
+    )
+    assert "transcription" not in events
+    assert events.count("diarization") == 2
+    assert {c.suite for c in res.cases} == {"accuracy_diarization"}
+    assert all(NEMOTRON_TRANSCRIBE_ID in c.case_id for c in res.cases)
+    assert res.metrics["joint_evaluated_cases"]["value"] == 2
+    messages = [m for _, m in logs]
+    assert any(m.startswith("Skipping accuracy_wer: 'models' lists no ASR model") for m in messages)
+    assert not any("falling back to default ASR model" in m for m in messages)
+    assert not any(m.startswith("Pre-computing diarization for cpWER") for m in messages)
+
+
+def test_explicit_one_pass_only_models_with_only_asr_suite_is_config_error(tmp_path: Path):
+    from backend.app.testers.base import TesterConfigError
+
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    events: list[str] = []
+    ctx = TestContext(run_id=214, artifacts_dir=tmp_path / "one_pass_wer_only", emit_stdout=False)
+    with pytest.raises(TesterConfigError, match="need an ASR model"):
+        LiveSTTTester().run(
+            {
+                "suites": ["accuracy_wer"],
+                "models": [NEMOTRON_TRANSCRIBE_ID],
+                "dataset_dir": str(ds_root),
+                "use_cache": False,
+                "_transport": _one_pass_diarization_transport(events),
+            },
+            {"name": "mock-live-stt", "base_url": "http://mockserver/v1"},
+            ctx,
+        )
+    assert events == []

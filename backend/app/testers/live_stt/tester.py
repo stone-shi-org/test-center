@@ -791,6 +791,16 @@ class LiveSTTTester(TesterPlugin):
             )
         return get_audio_fixture("two_speaker_dialog"), "synthetic"
 
+    @staticmethod
+    def _explicit_models_include_asr(models_cfg: list[Any], discovered: DiscoveredModels | None) -> bool:
+        """Return True if an explicit 'models' list names at least one ASR model (same typing as resolution)."""
+        by_id = {m.id: m for m in discovered.models} if discovered else {}
+        for raw_id in models_cfg:
+            clean_id = str(raw_id).strip()
+            if clean_id and (by_id.get(clean_id) or infer_model_info({"id": clean_id})).type == "asr":
+                return True
+        return False
+
     def _resolve_parametrized_models(
         self,
         cfg: dict[str, Any],
@@ -1011,6 +1021,27 @@ class LiveSTTTester(TesterPlugin):
                         "falling back to built-in default models",
                         level="warning",
                     )
+
+        # Accuracy suites score the models you picked; never spend GPU time on a fallback ASR
+        # model. An explicit list with no ASR model (e.g. only Nemotron Transcribe, which reports
+        # its own WER in accuracy_diarization) skips the ASR accuracy suites instead.
+        asr_accuracy_suites = [s for s in ("accuracy_wer", "accuracy_streaming") if s in suites_to_run]
+        if asr_accuracy_suites and isinstance(models_cfg, list) and not self._explicit_models_include_asr(
+            models_cfg, discovered
+        ):
+            suites_to_run = [s for s in suites_to_run if s not in asr_accuracy_suites]
+            if not suites_to_run:
+                raise TesterConfigError(
+                    f"{', '.join(asr_accuracy_suites)} need an ASR model, but 'models' lists none "
+                    f"({[str(m) for m in models_cfg]}). Add an ASR model, or run accuracy_diarization "
+                    "for a one-pass diarization model (it reports joint_wer / joint_cpwer itself)."
+                )
+            ctx.log(
+                f"Skipping {', '.join(asr_accuracy_suites)}: 'models' lists no ASR model, and accuracy "
+                "suites never fall back to the server default. One-pass diarization models report "
+                "their own WER/cpWER in accuracy_diarization.",
+                level="warning",
+            )
 
         asr_models, diar_models, tts_models = self._resolve_parametrized_models(
             cfg=cfg,
