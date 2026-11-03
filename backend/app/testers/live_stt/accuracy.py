@@ -1127,6 +1127,20 @@ def render_notsofar_accuracy_html_report(
             f'<div class="val">{float(der_val) * 100.0:.2f}%</div>'
             f'<div class="sub">ratio={float(der_val):.4f}</div></div>'
         )
+    joint_cpwer_val = _mval("joint_cpwer")
+    if joint_cpwer_val is not None:
+        joint_wer_val = _mval("joint_wer")
+        joint_der_val = _mval("joint_der")
+        sub_parts = []
+        if joint_wer_val is not None:
+            sub_parts.append(f"WER={float(joint_wer_val) * 100.0:.2f}%")
+        if joint_der_val is not None:
+            sub_parts.append(f"DER={float(joint_der_val) * 100.0:.2f}%")
+        cards_html.append(
+            f'<div class="card"><div class="label">One-pass cpWER</div>'
+            f'<div class="val">{float(joint_cpwer_val) * 100.0:.2f}%</div>'
+            f'<div class="sub">{html.escape(", ".join(sub_parts) or "transcript + speakers in one request")}</div></div>'
+        )
     if spk_err is not None:
         cards_html.append(
             f'<div class="card"><div class="label">Speaker Count Error</div>'

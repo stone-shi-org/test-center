@@ -28,6 +28,11 @@ def is_batch_only_grpc_model(model_id: str, engine: str = "") -> bool:
     return any(tok in low_id for tok in KNOWN_BATCH_ONLY_PREFIXES)
 
 
+# Diarization engines that transcribe and attribute speakers in one pass: their
+# /v1/audio/diarization segments carry the model's own text (no ASR words needed).
+TRANSCRIBING_DIARIZATION_ENGINES = frozenset({"nemotron_transcribe"})
+
+
 @dataclass
 class ModelInfo:
     """Metadata for a model discovered via GET /v1/models or configured explicitly."""
@@ -51,6 +56,15 @@ class ModelInfo:
             return bool(self.raw["supports_grpc_streaming"])
         return self.supports_streaming and not is_batch_only_grpc_model(self.id, self.engine)
 
+    @property
+    def produces_transcript(self) -> bool:
+        """Return True for a diarization model that also transcribes (one-pass speaker-attributed ASR)."""
+        if self.type != "diarization":
+            return False
+        if "produces_transcript" in self.raw:
+            return bool(self.raw["produces_transcript"])
+        return self.engine.strip().lower() in TRANSCRIBING_DIARIZATION_ENGINES
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -63,6 +77,7 @@ class ModelInfo:
             "supported_voices": self.supported_voices,
             "supports_streaming": self.supports_streaming,
             "grpc_streaming": self.grpc_streaming,
+            "produces_transcript": self.produces_transcript,
         }
 
 
@@ -220,10 +235,12 @@ def infer_model_info(item: dict[str, Any]) -> ModelInfo:
     model_id = str(item.get("id", "")).strip()
     id_lower = model_id.lower()
 
+    is_nemotron_transcribe = "nemotron" in id_lower and "transcribe" in id_lower
+
     raw_type = item.get("type")
     if raw_type in ("asr", "diarization", "tts"):
         model_type = str(raw_type)
-    elif any(k in id_lower for k in ("diar", "pyannote", "sortformer")):
+    elif is_nemotron_transcribe or any(k in id_lower for k in ("diar", "pyannote", "sortformer")):
         model_type = "diarization"
     elif any(k in id_lower for k in ("tts", "kokoro", "piper")):
         model_type = "tts"
@@ -234,7 +251,12 @@ def infer_model_info(item: dict[str, Any]) -> ModelInfo:
     if isinstance(raw_engine, str) and raw_engine.strip():
         engine = raw_engine.strip()
     elif model_type == "diarization":
-        engine = "nemo_sortformer" if ("sortformer" in id_lower or "nvidia" in id_lower) else "pyannote"
+        if is_nemotron_transcribe:
+            engine = "nemotron_transcribe"
+        elif "sortformer" in id_lower or "nvidia" in id_lower:
+            engine = "nemo_sortformer"
+        else:
+            engine = "pyannote"
     elif model_type == "tts":
         engine = "piper" if "piper" in id_lower else "kokoro"
     else:

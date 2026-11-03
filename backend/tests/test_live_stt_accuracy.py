@@ -1322,3 +1322,179 @@ def test_accuracy_wer_cpwer_precompute_logs_each_meeting_and_is_reused(tmp_path:
         "diarization:MTG_90002",
     ]
     assert len([c for c in res.cases if c.suite == "accuracy_diarization"]) == 2
+
+
+NEMOTRON_TRANSCRIBE_ID = "nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B"
+
+
+def _one_pass_diarization_transport(events: list[str]) -> httpx.MockTransport:
+    """Mock live-stt where the only diarization model is a one-pass transcriber (Nemotron Transcribe,
+    shape captured from live-stt-2): segments carry the model's own text and words carry speakers.
+    The ASR model returns deliberately wrong words so its cpWER can never come out perfect."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "parakeet-tdt-0.6b-v3", "object": "model", "type": "asr", "engine": "parakeet_tdt"},
+                        {
+                            "id": NEMOTRON_TRANSCRIBE_ID,
+                            "object": "model",
+                            "type": "diarization",
+                            "engine": "nemotron_transcribe",
+                            "gated": False,
+                            "supports_num_speakers_hint": False,
+                        },
+                    ],
+                },
+            )
+        if path == "/v1/audio/diarization":
+            events.append("diarization")
+            words_a = ["Hello", "Bob,", "let's", "start", "the", "quarterly", "review."]
+            words_b = ["Sounds", "good", "I", "have", "the", "metrics", "ready."]
+            words = [
+                {"text": t, "start": 0.2 + i * 0.17, "end": 0.35 + i * 0.17, "speaker": "SPEAKER_00"}
+                for i, t in enumerate(words_a)
+            ] + [
+                {"text": t, "start": 1.6 + i * 0.17, "end": 1.75 + i * 0.17, "speaker": "SPEAKER_01"}
+                for i, t in enumerate(words_b)
+            ]
+            return httpx.Response(
+                200,
+                json={
+                    "task": "diarize",
+                    "model": NEMOTRON_TRANSCRIBE_ID,
+                    "num_speakers": 2,
+                    "duration": 3.0,
+                    "segments": [
+                        {"id": 0, "speaker": "SPEAKER_00", "label": "SPEAKER_00", "start": 0.2, "end": 1.4,
+                         "text": " ".join(words_a)},
+                        {"id": 1, "speaker": "SPEAKER_01", "label": "SPEAKER_01", "start": 1.6, "end": 2.8,
+                         "text": " ".join(words_b)},
+                        # Backchannel turn whose words went to another speaker: empty text, as live-stt sends it
+                        {"id": 2, "speaker": "SPEAKER_00", "label": "SPEAKER_00", "start": 2.85, "end": 2.95,
+                         "text": ""},
+                    ],
+                    "speakers": [
+                        {"id": "SPEAKER_00", "label": "SPEAKER_00", "total_speech_duration": 1.3, "segment_count": 2},
+                        {"id": "SPEAKER_01", "label": "SPEAKER_01", "total_speech_duration": 1.2, "segment_count": 1},
+                    ],
+                    "words": words,
+                    "warnings": [],
+                },
+            )
+        if path == "/v1/audio/transcriptions":
+            events.append("transcription")
+            return httpx.Response(
+                200,
+                json={
+                    "text": "zebra yonder xylophone",
+                    "language": "en",
+                    "duration": 3.0,
+                    "words": [
+                        {"word": "zebra", "start": 0.3, "end": 0.5},
+                        {"word": "yonder", "start": 1.7, "end": 1.9},
+                        {"word": "xylophone", "start": 2.0, "end": 2.3},
+                    ],
+                    "segments": [],
+                },
+            )
+        return httpx.Response(404, json={"error": {"message": "Not found"}})
+
+    return httpx.MockTransport(handler)
+
+
+def test_infer_model_info_flags_one_pass_transcribing_diarizer():
+    from backend.app.testers.live_stt.client import infer_model_info
+
+    advertised = infer_model_info(
+        {"id": NEMOTRON_TRANSCRIBE_ID, "type": "diarization", "engine": "nemotron_transcribe"}
+    )
+    assert advertised.type == "diarization"
+    assert advertised.produces_transcript is True
+    assert advertised.supports_num_speakers_hint is False
+    assert advertised.to_dict()["produces_transcript"] is True
+
+    # Explicit model ID with no /v1/models entry still resolves to the one-pass diarizer
+    bare = infer_model_info({"id": NEMOTRON_TRANSCRIBE_ID})
+    assert (bare.type, bare.engine, bare.produces_transcript) == ("diarization", "nemotron_transcribe", True)
+
+    # Plain diarizers and Nemotron ASR models are unaffected
+    assert infer_model_info({"id": "pyannote/speaker-diarization-3.1"}).produces_transcript is False
+    assert infer_model_info({"id": "nvidia/diar_streaming_sortformer_4spk-v2.1"}).engine == "nemo_sortformer"
+    asr = infer_model_info({"id": "nemotron-3.5-asr-streaming-0.6b"})
+    assert (asr.type, asr.produces_transcript) == ("asr", False)
+    # Server flag wins over the engine default
+    assert infer_model_info(
+        {"id": "x/diar", "type": "diarization", "engine": "pyannote", "produces_transcript": True}
+    ).produces_transcript is True
+
+
+def test_one_pass_diarizer_scored_on_own_transcript_and_not_leaked_into_asr_cpwer(tmp_path: Path):
+    """A one-pass model (Nemotron Transcribe) gets cpWER/WER/DER from its own output, reported as
+    joint_* metrics. When it is the only diarizer, ASR cpWER still scores the ASR model's words
+    (speaker turns only), instead of silently taking the one-pass model's segment text."""
+    ds_root = _create_synthetic_notsofar_split(tmp_path)
+    events: list[str] = []
+    ctx = TestContext(run_id=212, artifacts_dir=tmp_path / "one_pass", emit_stdout=False)
+    res = LiveSTTTester().run(
+        {
+            "suites": ["accuracy_wer", "accuracy_diarization"],
+            "dataset_dir": str(ds_root),
+            "meetings": ["MTG_90001"],
+            "use_cache": False,
+            "_transport": _one_pass_diarization_transport(events),
+        },
+        {"name": "mock-live-stt", "base_url": "http://mockserver/v1"},
+        ctx,
+    )
+    by_cid = {c.case_id: c for c in res.cases}
+
+    diar_case = by_cid[f"accuracy_diarization:{NEMOTRON_TRANSCRIBE_ID}:MTG_90001"]
+    assert diar_case.detail["one_pass_transcript"] is True
+    assert diar_case.metrics["cpwer"]["value"] == 0.0
+    assert diar_case.metrics["wer"]["value"] == 0.0
+    assert "one-pass cpWER=0.00%" in diar_case.detail["eval_message"]
+
+    asr_case = by_cid["accuracy_wer:parakeet-tdt-0.6b-v3:MTG_90001"]
+    assert asr_case.metrics["cpwer"]["value"] >= 0.8  # the ASR's own (wrong) words, not Nemotron's text
+
+    assert res.metrics["joint_cpwer"]["value"] == 0.0
+    assert res.metrics["joint_wer"]["value"] == 0.0
+    assert res.metrics["joint_evaluated_cases"]["value"] == 1
+    assert "joint_der" in res.metrics
+    # Top-level cpWER stays the ASR-attributed figure
+    assert res.metrics["cpwer"]["value"] == asr_case.metrics["cpwer"]["value"]
+    # Diarized once (pre-compute result reused by accuracy_diarization)
+    assert events.count("diarization") == 1
+
+
+def test_one_pass_transcript_text_orders_words_and_falls_back_to_segments():
+    words = [
+        {"text": "world", "start": 1.0, "end": 1.2, "speaker": "SPEAKER_01"},
+        {"text": "hello", "start": 0.1, "end": 0.3, "speaker": "SPEAKER_00"},
+    ]
+    assert LiveSTTTester._one_pass_transcript_text(words, []) == "hello world"
+    segments = [
+        {"speaker": "SPEAKER_01", "start": 2.0, "end": 3.0, "text": "second"},
+        {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0, "text": "first"},
+        {"speaker": "SPEAKER_00", "start": 1.5, "end": 1.6, "text": ""},
+    ]
+    assert LiveSTTTester._one_pass_transcript_text([], segments) == "first second"
+
+
+def test_report_shows_one_pass_transcript_line():
+    from backend.app.testers.live_stt.report import format_live_stt_report
+
+    metrics = {
+        "joint_cpwer": {"value": 0.295},
+        "joint_wer": {"value": 0.386},
+        "joint_der": {"value": 0.054},
+        "joint_evaluated_cases": {"value": 20},
+    }
+    text = format_live_stt_report("http://x", {}, metrics, [])
+    assert "One-pass Transcript : cpWER 29.50%, WER 38.60%, DER 5.40% (n=20)" in text

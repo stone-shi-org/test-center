@@ -133,6 +133,18 @@ def format_live_stt_report(
             f"(ratio {metrics['der']['value']:.4f}, "
             f"spk_err {metrics.get('speaker_count_error', {}).get('value', 0.0):.2f}{der_cov})"
         )
+    if "joint_cpwer" in metrics or "joint_der" in metrics:
+        j_n = int(metrics.get("joint_evaluated_cases", {}).get("value", 0) or 0)
+        j_parts = []
+        if "joint_cpwer" in metrics:
+            j_parts.append(f"cpWER {metrics['joint_cpwer']['value'] * 100.0:.2f}%")
+        if "joint_wer" in metrics:
+            j_parts.append(f"WER {metrics['joint_wer']['value'] * 100.0:.2f}%")
+        if "joint_der" in metrics:
+            j_parts.append(f"DER {metrics['joint_der']['value'] * 100.0:.2f}%")
+        endpoint_lines.append(
+            f"  One-pass Transcript : {', '.join(j_parts)}" + (f" (n={j_n})" if j_n > 0 else "")
+        )
     if "accuracy_cache_hits" in metrics or "accuracy_cache_misses" in metrics:
         endpoint_lines.append(
             f"  Accuracy Eval Cache : {int(metrics.get('accuracy_cache_hits', {}).get('value', 0))} hits / "

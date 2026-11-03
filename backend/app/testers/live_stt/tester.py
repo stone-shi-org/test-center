@@ -1482,7 +1482,7 @@ class LiveSTTTester(TesterPlugin):
                     body=last_dres.body,
                     content_type=last_dres.content_type,
                     status_code=last_dres.status_code,
-                    expect_text=False,
+                    expect_text=m_info.produces_transcript,
                 )
                 d_status = "pass" if d_schema.valid else "fail"
                 d_mean_lat = round(float(statistics.mean(d_lats)), 2)
@@ -3212,6 +3212,29 @@ class LiveSTTTester(TesterPlugin):
         return ["grpc"]
 
     @staticmethod
+    def _one_pass_transcript_text(
+        words: list[dict[str, Any]],
+        segments: list[dict[str, Any]],
+    ) -> str:
+        """Time-ordered plain transcript from a one-pass diarization response (words, else segment text)."""
+        def _start(item: dict[str, Any]) -> float:
+            try:
+                return float(item.get("start_sec", item.get("start", 0.0)) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        toks = [
+            str(w.get("word", w.get("text", "")) or "").strip()
+            for w in sorted(words, key=_start)
+        ]
+        if not any(toks):
+            toks = [
+                str(seg.get("text", "") or "").strip()
+                for seg in sorted((s for s in segments if isinstance(s, dict)), key=_start)
+            ]
+        return " ".join(t for t in toks if t)
+
+    @staticmethod
     def _compute_case_cpwer(
         meeting: NotsofarMeeting,
         words: list[dict[str, Any]],
@@ -3278,7 +3301,15 @@ class LiveSTTTester(TesterPlugin):
                         "end_sec": round((idx + 1) * step, 3),
                     })
 
-            hyp_spk_texts = extract_speaker_transcripts_from_segments(diar_segments, norm_words)
+            # Diarization segments supply speaker turns only. A one-pass model (e.g. Nemotron
+            # Transcribe) fills segment text with its own transcript, which would otherwise
+            # win over the ASR words and get scored as this ASR model's cpWER.
+            turns_only = [
+                {k: v for k, v in seg.items() if k not in ("text", "words")}
+                for seg in diar_segments
+                if isinstance(seg, dict)
+            ]
+            hyp_spk_texts = extract_speaker_transcripts_from_segments(turns_only, norm_words)
 
         if not hyp_spk_texts:
             return None
@@ -3438,12 +3469,16 @@ class LiveSTTTester(TesterPlugin):
         )
         if needs_cpwer_diarization:
             n_meetings = len(meetings)
+            # Prefer plain diarizers for ASR speaker attribution so an ASR model's cpWER keeps
+            # meaning "this ASR + a diarizer"; one-pass transcribing models are a last resort
+            # (their turns are still usable; _compute_case_cpwer ignores their text).
+            attribution_models = sorted(diar_models, key=lambda m: m.produces_transcript)
             ctx.log(
                 f"Pre-computing diarization for cpWER speaker attribution on {n_meetings} meeting(s) "
-                f"(model={diar_models[0].id}, fallback={[m.id for m in diar_models[1:]] or 'none'})..."
+                f"(model={attribution_models[0].id}, fallback={[m.id for m in attribution_models[1:]] or 'none'})..."
             )
             for idx, meeting in enumerate(meetings, start=1):
-                for d_model in diar_models:
+                for d_model in attribution_models:
                     ctx.check_cancelled()
                     ctx.progress(
                         completed_cases,
@@ -3508,6 +3543,10 @@ class LiveSTTTester(TesterPlugin):
 
         der_list: list[DERResult] = []
         diar_cpwer_list: list[CPWERResult] = []
+        # One-pass transcribing diarization models (Nemotron Transcribe): own-transcript scores.
+        joint_der_list: list[DERResult] = []
+        joint_cpwer_list: list[CPWERResult] = []
+        joint_wer_list: list[WERResult] = []
         acc_diar_latencies: list[float] = []
         acc_diar_rtfs: list[float] = []
         diar_errored_cases = 0
@@ -4204,8 +4243,33 @@ class LiveSTTTester(TesterPlugin):
                     )
                     der_list.append(der_res)
 
+                    one_pass = d_info.produces_transcript
+                    if one_pass:
+                        joint_der_list.append(der_res)
+
                     cpwer_res = None
-                    if compute_cpwer_enabled:
+                    joint_wer_res: WERResult | None = None
+                    if one_pass:
+                        # One-pass model: score its own transcript, never another ASR's words.
+                        own_words = [
+                            w for w in (body.get("words") if isinstance(body, dict) and isinstance(body.get("words"), list) else [])
+                            if isinstance(w, dict)
+                        ]
+                        joint_hyp_text = self._one_pass_transcript_text(own_words, pred_segments)
+                        if meeting.reference_text.strip():
+                            joint_wer_res = compute_wer(meeting.reference_text, joint_hyp_text)
+                            joint_wer_list.append(joint_wer_res)
+                        if compute_cpwer_enabled:
+                            cpwer_res = self._compute_case_cpwer(
+                                meeting=meeting,
+                                words=own_words,
+                                segments_from_asr=pred_segments,
+                                diar_segments=None,
+                                full_text=joint_hyp_text,
+                            )
+                            if cpwer_res is not None:
+                                joint_cpwer_list.append(cpwer_res)
+                    elif compute_cpwer_enabled:
                         asr_words_for_mtg = meeting_asr_words.get(meeting.meeting_id, [])
                         cpwer_res = self._compute_case_cpwer(
                             meeting=meeting,
@@ -4238,6 +4302,9 @@ class LiveSTTTester(TesterPlugin):
                     if cpwer_res is not None:
                         case_metrics["cpwer"] = {"value": cpwer_res.cpwer, "unit": "ratio", "better": "lower"}
                         case_metrics["cpwer_pct"] = {"value": cpwer_res.cpwer_pct, "unit": "%", "better": "lower"}
+                    if joint_wer_res is not None:
+                        case_metrics["wer"] = {"value": joint_wer_res.wer, "unit": "ratio", "better": "lower"}
+                        case_metrics["wer_pct"] = {"value": joint_wer_res.wer_pct, "unit": "%", "better": "lower"}
 
                     eval_msg = (
                         f"DER={der_res.der_pct:.2f}% (miss={der_res.missed_rate * 100.0:.1f}%, "
@@ -4245,6 +4312,13 @@ class LiveSTTTester(TesterPlugin):
                         f"speakers={der_res.predicted_speakers}/{der_res.expected_speakers} "
                         f"(|err|={der_res.speaker_count_error})"
                     )
+                    if one_pass:
+                        eval_msg += (
+                            f", one-pass cpWER={cpwer_res.cpwer_pct:.2f}%" if cpwer_res is not None else ""
+                        ) + (
+                            f", WER={joint_wer_res.wer_pct:.2f}%" if joint_wer_res is not None else ""
+                        )
+                    server_warnings = body.get("warnings") if isinstance(body, dict) and isinstance(body.get("warnings"), list) else []
                     if not d_schema.valid:
                         eval_msg = f"{d_schema.summary_message}; {eval_msg}"
 
@@ -4282,6 +4356,9 @@ class LiveSTTTester(TesterPlugin):
                                 "speaker_error_rate": der_res.speaker_error_rate,
                             },
                             "cpwer": cpwer_res.to_dict() if cpwer_res is not None else None,
+                            "one_pass_transcript": one_pass,
+                            "wer": joint_wer_res.to_dict() if joint_wer_res is not None else None,
+                            "server_warnings": server_warnings,
                             "speaker_diagnostics": der_res.speaker_diagnostics,
                             "passed": passed,
                             "eval_message": eval_msg,
@@ -4386,7 +4463,10 @@ class LiveSTTTester(TesterPlugin):
             result.set_metric("corpus_wer", corpus_wer, unit="ratio", better="lower")
             result.set_metric("wer_evaluated_cases", len(all_wer_list), unit="cases", better="higher")
 
-        all_cpwer_list = (http_cpwer_list + stream_cpwer_list) or diar_cpwer_list
+        # Top-level cpWER stays ASR-attributed when any ASR suite produced it; otherwise it falls
+        # back to the diarization suite (pipeline and one-pass). One-pass scores also get their
+        # own joint_* metrics below so they are never hidden behind or blended into the ASR figure.
+        all_cpwer_list = (http_cpwer_list + stream_cpwer_list) or (diar_cpwer_list + joint_cpwer_list)
         if all_cpwer_list:
             tot_cp_all_ref = sum(c.ref_word_count for c in all_cpwer_list)
             tot_cp_all_ed = sum(c.edit_distance for c in all_cpwer_list)
@@ -4439,6 +4519,35 @@ class LiveSTTTester(TesterPlugin):
                 unit="x",
                 better="lower",
             )
+
+        if joint_cpwer_list:
+            tot_jcp_ref = sum(c.ref_word_count for c in joint_cpwer_list)
+            tot_jcp_ed = sum(c.edit_distance for c in joint_cpwer_list)
+            joint_cpwer = round(tot_jcp_ed / float(tot_jcp_ref), 4) if tot_jcp_ref > 0 else 0.0
+            result.set_metric("joint_cpwer", joint_cpwer, unit="ratio", better="lower")
+            result.set_metric("joint_cpwer_pct", round(joint_cpwer * 100.0, 2), unit="%", better="lower")
+            result.set_metric(
+                "joint_cpwer_mean",
+                round(float(statistics.mean(c.cpwer for c in joint_cpwer_list)), 4),
+                unit="ratio",
+                better="lower",
+            )
+            result.set_metric("joint_cpwer_evaluated_cases", len(joint_cpwer_list), unit="cases", better="higher")
+        if joint_wer_list:
+            tot_jw_ref = sum(w.ref_word_count for w in joint_wer_list)
+            tot_jw_ed = sum(w.edit_distance for w in joint_wer_list)
+            joint_wer = round(tot_jw_ed / float(tot_jw_ref), 4) if tot_jw_ref > 0 else 0.0
+            result.set_metric("joint_wer", joint_wer, unit="ratio", better="lower")
+            result.set_metric("joint_wer_pct", round(joint_wer * 100.0, 2), unit="%", better="lower")
+        if joint_der_list:
+            tot_jd_ref = sum(d.total_ref_speech_sec for d in joint_der_list)
+            tot_jd_err = sum(
+                d.missed_speech_sec + d.false_alarm_sec + d.speaker_confusion_sec for d in joint_der_list
+            )
+            joint_der = round(tot_jd_err / float(tot_jd_ref), 4) if tot_jd_ref > 0 else 0.0
+            result.set_metric("joint_der", joint_der, unit="ratio", better="lower")
+            result.set_metric("joint_der_pct", round(joint_der * 100.0, 2), unit="%", better="lower")
+            result.set_metric("joint_evaluated_cases", len(joint_der_list), unit="cases", better="higher")
 
         cache_stats = eval_cache.stats()
         result.set_metric("accuracy_meetings_evaluated", len(meetings), unit="meetings", better="higher")
