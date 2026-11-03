@@ -91,6 +91,22 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
     },
     {
         "tester": "live-stt",
+        "name": "pyannote.ai cloud diarization accuracy",
+        "description": (
+            "For a pyannote.ai target (kind 'pyannote-ai'): precision-2 with speaker-attributed "
+            "transcription on 3 full NOTSOFAR-1 meetings. Compare with a Nemotron Transcribe run "
+            "(accuracy_diarization) on the same meetings. Billed per job; repeat runs hit the cache."
+        ),
+        "suites": ["accuracy_diarization"],
+        "config": {
+            "models": ["pyannote.ai/precision-2"],
+            "max_meetings": 3,
+            "timeout_seconds": 120,
+            "pyannote_ai_transcribe_model": "parakeet-tdt-0.6b-v3",
+        },
+    },
+    {
+        "tester": "live-stt",
         "name": "gRPC long call",
         "description": "Long-duration gRPC streaming stability and memory growth test.",
         "suites": ["grpc_long_call"],

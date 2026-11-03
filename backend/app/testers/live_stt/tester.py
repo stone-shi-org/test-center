@@ -67,6 +67,14 @@ from backend.app.testers.live_stt.metrics import (
     compute_percentiles,
     compute_rtf,
 )
+from backend.app.testers.live_stt.pyannote_cloud import (
+    DEFAULT_JOB_TIMEOUT_SEC as PYANNOTE_AI_DEFAULT_JOB_TIMEOUT_SEC,
+    DEFAULT_POLL_INTERVAL_SEC as PYANNOTE_AI_DEFAULT_POLL_INTERVAL_SEC,
+    DEFAULT_TRANSCRIBE_MODEL as PYANNOTE_AI_DEFAULT_TRANSCRIBE_MODEL,
+    TRANSCRIBE_MODELS as PYANNOTE_AI_TRANSCRIBE_MODELS,
+    PyannoteCloudClient,
+    is_pyannote_ai_target,
+)
 from backend.app.testers.live_stt.report import format_live_stt_report
 from backend.app.testers.live_stt.streaming import execute_grpc_streaming_suites
 from backend.app.testers.live_stt.schemas import (
@@ -611,6 +619,30 @@ class LiveSTTTester(TesterPlugin):
                 "description": "Optional explicit path to the SQLite accuracy result cache file",
                 "x-advanced": True,
             },
+            "pyannote_ai_transcribe_model": {
+                "type": "string",
+                "enum": list(PYANNOTE_AI_TRANSCRIBE_MODELS),
+                "default": PYANNOTE_AI_DEFAULT_TRANSCRIBE_MODEL,
+                "description": (
+                    "pyannote.ai targets only: STT model pyannote.ai runs alongside precision-* "
+                    "diarization (transcriptionConfig.model)"
+                ),
+                "x-advanced": True,
+            },
+            "pyannote_ai_job_timeout_sec": {
+                "type": "number",
+                "default": PYANNOTE_AI_DEFAULT_JOB_TIMEOUT_SEC,
+                "minimum": 10.0,
+                "description": "pyannote.ai targets only: max wait for one cloud job (upload + queue + processing)",
+                "x-advanced": True,
+            },
+            "pyannote_ai_poll_interval_sec": {
+                "type": "number",
+                "default": PYANNOTE_AI_DEFAULT_POLL_INTERVAL_SEC,
+                "minimum": 0.0,
+                "description": "pyannote.ai targets only: seconds between GET /v1/jobs/{id} polls",
+                "x-advanced": True,
+            },
         },
     }
 
@@ -684,6 +716,8 @@ class LiveSTTTester(TesterPlugin):
         return api_key
 
     def _resolve_client(self, config: dict[str, Any], target: dict[str, Any]) -> LiveSTTHTTPClient:
+        if is_pyannote_ai_target(target, config):
+            return self._resolve_pyannote_ai_client(config, target)  # type: ignore[return-value]
         base_url = target.get("base_url") or config.get("base_url")
         extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
         grpc_target = (
@@ -708,6 +742,37 @@ class LiveSTTTester(TesterPlugin):
             timeout=timeout,
             transport=transport,
         )
+
+    @staticmethod
+    def _resolve_pyannote_ai_client(config: dict[str, Any], target: dict[str, Any]) -> PyannoteCloudClient:
+        """pyannote.ai cloud target. Its key comes only from the target's auth_env_var, the run
+        config's api_key, or PYANNOTE_AI_API_KEY -- never the live-stt/OpenAI fallbacks."""
+        extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
+        auth_env_var = target.get("auth_env_var")
+        api_key = (os.environ.get(auth_env_var) if isinstance(auth_env_var, str) and auth_env_var else None) or (
+            config.get("api_key") or os.environ.get("PYANNOTE_AI_API_KEY")
+        )
+        transcribe_model = str(
+            config.get("pyannote_ai_transcribe_model")
+            or extra.get("transcribe_model")
+            or PYANNOTE_AI_DEFAULT_TRANSCRIBE_MODEL
+        )
+        try:
+            return PyannoteCloudClient(
+                base_url=target.get("base_url") or config.get("base_url") or None,
+                api_key=api_key.strip() if isinstance(api_key, str) else None,
+                timeout=float(config.get("timeout_seconds", 120.0)),
+                transport=config.get("_transport"),
+                transcribe_model=transcribe_model,
+                poll_interval_sec=float(
+                    config.get("pyannote_ai_poll_interval_sec", PYANNOTE_AI_DEFAULT_POLL_INTERVAL_SEC)
+                ),
+                job_timeout_sec=float(
+                    config.get("pyannote_ai_job_timeout_sec", PYANNOTE_AI_DEFAULT_JOB_TIMEOUT_SEC)
+                ),
+            )
+        except LiveSTTClientError as e:
+            raise TesterConfigError(str(e)) from e
 
     def _resolve_speech_fixtures(
         self,
@@ -969,6 +1034,21 @@ class LiveSTTTester(TesterPlugin):
             suites_to_run = list(self.suites[:7])
         if bool(cfg.get("include_long_call", False)) and "grpc_long_call" not in suites_to_run:
             suites_to_run.append("grpc_long_call")
+
+        if isinstance(client, PyannoteCloudClient):
+            # A pyannote.ai cloud target only diarizes; every other suite targets live-stt endpoints.
+            cloud_skipped = [s for s in suites_to_run if s != "accuracy_diarization"]
+            suites_to_run = [s for s in suites_to_run if s == "accuracy_diarization"]
+            if not suites_to_run:
+                raise TesterConfigError(
+                    "pyannote.ai targets support only the accuracy_diarization suite "
+                    f"(selected: {cloud_skipped})"
+                )
+            if cloud_skipped:
+                ctx.log(
+                    f"pyannote.ai target: skipping {', '.join(cloud_skipped)} (only accuracy_diarization applies)",
+                    level="warning",
+                )
 
         repetitions = int(cfg.get("repetitions", 1))
         language = str(cfg.get("language", "en") or "en")
@@ -3399,6 +3479,9 @@ class LiveSTTTester(TesterPlugin):
             "duration_sec": round(meeting.duration_sec, 3),
             "use_num_speakers_hint": use_hint,
         }
+        cache_tag = getattr(client, "cache_tag", None)
+        if cache_tag:
+            cache_key["backend"] = cache_tag
         cached = eval_cache.get(cache_key)
         if cached is not None:
             return {

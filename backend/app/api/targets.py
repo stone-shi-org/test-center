@@ -31,6 +31,7 @@ from backend.app.testers.live_stt.client import (
     LiveSTTHTTPClient,
 )
 from backend.app.testers.live_stt.fixtures import make_pcm_wav_bytes
+from backend.app.testers.live_stt.pyannote_cloud import PyannoteCloudClient, is_pyannote_ai_target
 from backend.app.testers.live_stt.grpc_client import (
     LiveSTTGRPCClient,
     resolve_grpc_target,
@@ -424,6 +425,32 @@ def _probe_embedding_capability(
         )
 
 
+def _probe_pyannote_ai_capability(
+    base_url: str,
+    api_key: str | None,
+    timeout_seconds: float,
+    transport: httpx.BaseTransport | None,
+) -> CapabilityTestResult:
+    """pyannote.ai cloud: authenticate via POST /v1/media/input, which submits no (billed) job."""
+    client = PyannoteCloudClient(
+        base_url=base_url or None,
+        api_key=api_key,
+        timeout=timeout_seconds,
+        transport=transport,
+    )
+    ok, status_code, latency_ms, message = client.test_connection()
+    return CapabilityTestResult(
+        capability="diarization",
+        ok=ok,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        model=None,
+        message=message if ok else "pyannote.ai check failed",
+        error=None if ok else _redact_secret(message, api_key),
+        detail={"endpoint": f"{client.root_url}/media/input", "backend": "pyannote_ai"},
+    )
+
+
 def _probe_live_stt_capability(
     capability: str,
     base_url: str,
@@ -719,6 +746,15 @@ def _execute_target_test(
                 api_key=api_key,
                 extra=extra,
                 timeout_seconds=timeout_seconds,
+            )
+        elif cap == "diarization" and is_pyannote_ai_target(
+            {"kind": kind, "base_url": base_url, "extra": extra}
+        ):
+            res = _probe_pyannote_ai_capability(
+                base_url=base_url,
+                api_key=api_key,
+                timeout_seconds=timeout_seconds,
+                transport=transport,
             )
         elif cap in ("asr", "tts", "diarization"):
             res = _probe_live_stt_capability(

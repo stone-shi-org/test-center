@@ -546,3 +546,55 @@ def test_target_models_discovery_endpoint(app_and_client, monkeypatch):
     res_404 = client.get("/api/targets/999999/models")
     assert res_404.status_code == 404
 
+
+
+def test_target_test_pyannote_ai_checks_key_without_submitting_a_job(app_and_client, monkeypatch):
+    """A pyannote-ai target's Test button authenticates via POST /v1/media/input only (free),
+    never /v1/diarize (billed), and defaults to the diarization capability."""
+    import httpx
+    import backend.app.api.targets as targets_api
+
+    client, _, _ = app_and_client
+    secret_val = "sk-pyannote-secret-123"
+    monkeypatch.setenv("TEST_PYANNOTE_AI_KEY", secret_val)
+    seen: list[str] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.headers.get("Authorization") != f"Bearer {secret_val}":
+            return httpx.Response(401, json={"message": f"bad key {request.headers.get('Authorization')}"})
+        if request.url.path == "/v1/media/input":
+            return httpx.Response(201, json={"url": "https://uploads.example/put"})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(targets_api, "_get_http_transport", lambda: httpx.MockTransport(mock_handler))
+
+    res = client.post(
+        "/api/targets/test",
+        json={
+            "name": "pyannote.ai",
+            "kind": "pyannote-ai",
+            "base_url": "https://api.pyannote.ai/v1",
+            "auth_env_var": "TEST_PYANNOTE_AI_KEY",
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["capabilities_tested"] == ["diarization"]
+    assert body["ok"] is True, body
+    assert body["results"][0]["detail"]["backend"] == "pyannote_ai"
+    assert seen == ["/v1/media/input"]
+
+    monkeypatch.setenv("TEST_PYANNOTE_AI_KEY", "wrong")
+    res_bad = client.post(
+        "/api/targets/test",
+        json={
+            "name": "pyannote.ai",
+            "kind": "pyannote-ai",
+            "base_url": "https://api.pyannote.ai/v1",
+            "auth_env_var": "TEST_PYANNOTE_AI_KEY",
+        },
+    )
+    bad = res_bad.json()
+    assert bad["ok"] is False
+    assert bad["results"][0]["status_code"] == 401
