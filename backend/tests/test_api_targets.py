@@ -598,3 +598,42 @@ def test_target_test_pyannote_ai_checks_key_without_submitting_a_job(app_and_cli
     bad = res_bad.json()
     assert bad["ok"] is False
     assert bad["results"][0]["status_code"] == 401
+
+
+def test_target_models_pyannote_ai_returns_builtin_catalog_without_network(app_and_client, monkeypatch):
+    """pyannote.ai has no /v1/models: the model picker must get the fixed pyannote.ai catalog."""
+    import httpx
+    import backend.app.api.targets as targets_api
+
+    client, _, _ = app_and_client
+
+    def no_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    monkeypatch.setattr(targets_api, "_get_http_transport", lambda: httpx.MockTransport(no_network))
+
+    res_create = client.post(
+        "/api/targets",
+        json={
+            "name": "pyannote.ai cloud",
+            "kind": "pyannote-ai",
+            "base_url": "https://api.pyannote.ai/v1",
+            "auth_env_var": "PYANNOTE_AI_API_KEY",
+        },
+    )
+    assert res_create.status_code == 201
+    res = client.get(f"/api/targets/{res_create.json()['id']}/models")
+    assert res.status_code == 200, res.text
+    models = {m["id"]: m for m in res.json()}
+    assert set(models) == {"pyannote.ai/precision-2", "pyannote.ai/precision-3", "pyannote.ai/community-1"}
+    assert models["pyannote.ai/precision-2"]["is_default"] is True
+    assert all(m["type"] == "diarization" and m["engine"] == "pyannote_ai" for m in models.values())
+
+    # Ad-hoc discovery: detected by kind, or by host alone
+    for body in (
+        {"base_url": "https://example.invalid", "kind": "pyannote-ai"},
+        {"base_url": "https://api.pyannote.ai/v1"},
+    ):
+        res_adhoc = client.post("/api/targets/models", json=body)
+        assert res_adhoc.status_code == 200, res_adhoc.text
+        assert len(res_adhoc.json()) == 3

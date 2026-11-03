@@ -31,7 +31,11 @@ from backend.app.testers.live_stt.client import (
     LiveSTTHTTPClient,
 )
 from backend.app.testers.live_stt.fixtures import make_pcm_wav_bytes
-from backend.app.testers.live_stt.pyannote_cloud import PyannoteCloudClient, is_pyannote_ai_target
+from backend.app.testers.live_stt.pyannote_cloud import (
+    PyannoteCloudClient,
+    is_pyannote_ai_target,
+    pyannote_ai_models,
+)
 from backend.app.testers.live_stt.grpc_client import (
     LiveSTTGRPCClient,
     resolve_grpc_target,
@@ -293,6 +297,8 @@ class TargetModelInfoResponse(BaseModel):
 class AdHocTargetModelsRequest(BaseModel):
     base_url: str = Field(..., min_length=1, max_length=1024)
     auth_env_var: str | None = Field(default=None)
+    kind: str | None = Field(default=None, max_length=64)
+    extra: dict[str, Any] | None = Field(default=None)
     timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
 
     @field_validator("auth_env_var")
@@ -848,7 +854,13 @@ def _discover_target_models(
     base_url: str,
     auth_env_var: str | None,
     timeout_seconds: float = 10.0,
+    kind: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> list[TargetModelInfoResponse]:
+    if is_pyannote_ai_target({"kind": kind, "base_url": base_url, "extra": extra or {}}):
+        # pyannote.ai has no /v1/models; its `model` values are a fixed, built-in catalog.
+        return [TargetModelInfoResponse(**m.to_dict()) for m in pyannote_ai_models()]
+
     api_key: str | None = None
     if auth_env_var and auth_env_var.strip():
         raw_env = os.environ.get(auth_env_var.strip())
@@ -916,6 +928,8 @@ def get_adhoc_target_models(
         base_url=req.base_url,
         auth_env_var=req.auth_env_var,
         timeout_seconds=req.timeout_seconds,
+        kind=req.kind,
+        extra=req.extra,
     )
 
 
@@ -943,6 +957,8 @@ def get_target_models(
     return _discover_target_models(
         base_url=target.base_url,
         auth_env_var=target.auth_env_var,
+        kind=target.kind,
+        extra=target.extra if isinstance(target.extra, dict) else None,
     )
 
 

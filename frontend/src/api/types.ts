@@ -87,6 +87,8 @@ export interface AdHocTargetModelsRequest {
   base_url: string
   auth_env_var?: string | null
   timeout_seconds?: number
+  kind?: string | null
+  extra?: Record<string, unknown> | null
 }
 
 export interface JSONSchemaProperty {
