@@ -65,6 +65,8 @@ def infer_target_capabilities(kind: str | None, extra: dict[str, Any] | None = N
         return ["embedding"]
     if k in ("pyannote-ai", "pyannote_ai", "pyannoteai"):
         return ["diarization"]
+    if k in ("google-cloud", "google_cloud", "gcp", "vertex-ai", "vertex_ai"):
+        return ["diarization"]
     if k in ("live-stt", "live_stt", "stt", "asr"):
         return ["asr", "tts", "diarization", "grpc"]
     if k in ("openai-compatible", "llm", "chat"):

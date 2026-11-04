@@ -36,6 +36,11 @@ from backend.app.testers.live_stt.pyannote_cloud import (
     is_pyannote_ai_target,
     pyannote_ai_models,
 )
+from backend.app.testers.live_stt.google_cloud import (
+    GoogleCloudClient,
+    google_cloud_models,
+    is_google_cloud_target,
+)
 from backend.app.testers.live_stt.grpc_client import (
     LiveSTTGRPCClient,
     resolve_grpc_target,
@@ -457,6 +462,34 @@ def _probe_pyannote_ai_capability(
     )
 
 
+def _probe_google_cloud_capability(
+    api_key: str | None,
+    extra: dict[str, Any],
+    timeout_seconds: float,
+    transport: httpx.BaseTransport | None,
+) -> CapabilityTestResult:
+    """Google Cloud: mint a token from the service-account key and read the gemini-3.5-transcribe
+    model card. No audio is submitted, so nothing is billed."""
+    client = GoogleCloudClient(
+        credentials=api_key or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+        project=extra.get("project"),
+        gemini_location=str(extra.get("gemini_location") or "global"),
+        timeout=timeout_seconds,
+        transport=transport,
+    )
+    ok, status_code, latency_ms, message = client.test_connection()
+    return CapabilityTestResult(
+        capability="diarization",
+        ok=ok,
+        status_code=status_code,
+        latency_ms=latency_ms,
+        model=None,
+        message=message if ok else "Google Cloud check failed",
+        error=None if ok else _redact_secret(message, api_key),
+        detail={"endpoint": "aiplatform.googleapis.com publishers/google/models", "backend": "google_cloud"},
+    )
+
+
 def _probe_live_stt_capability(
     capability: str,
     base_url: str,
@@ -762,6 +795,15 @@ def _execute_target_test(
                 timeout_seconds=timeout_seconds,
                 transport=transport,
             )
+        elif cap == "diarization" and is_google_cloud_target(
+            {"kind": kind, "base_url": base_url, "extra": extra}
+        ):
+            res = _probe_google_cloud_capability(
+                api_key=api_key,
+                extra=extra,
+                timeout_seconds=timeout_seconds,
+                transport=transport,
+            )
         elif cap in ("asr", "tts", "diarization"):
             res = _probe_live_stt_capability(
                 capability=cap,
@@ -860,6 +902,9 @@ def _discover_target_models(
     if is_pyannote_ai_target({"kind": kind, "base_url": base_url, "extra": extra or {}}):
         # pyannote.ai has no /v1/models; its `model` values are a fixed, built-in catalog.
         return [TargetModelInfoResponse(**m.to_dict()) for m in pyannote_ai_models()]
+    if is_google_cloud_target({"kind": kind, "base_url": base_url, "extra": extra or {}}):
+        # Google Cloud: gemini-3.5-transcribe and chirp_3, a fixed built-in catalog.
+        return [TargetModelInfoResponse(**m.to_dict()) for m in google_cloud_models()]
 
     api_key: str | None = None
     if auth_env_var and auth_env_var.strip():

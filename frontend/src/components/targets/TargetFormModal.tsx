@@ -12,6 +12,7 @@ const COMMON_KINDS = [
   'embedding',
   'live-stt',
   'pyannote-ai',
+  'google-cloud',
   'llm',
   'rerank',
   'custom',
@@ -54,6 +55,7 @@ export function inferDefaultCapabilities(kind: string): string[] {
   const k = (kind || '').trim().toLowerCase()
   if (k === 'embedding' || k === 'embeddings') return ['embedding']
   if (k === 'pyannote-ai' || k === 'pyannote_ai') return ['diarization']
+  if (k === 'google-cloud' || k === 'google_cloud' || k === 'gcp' || k === 'vertex-ai') return ['diarization']
   if (k === 'live-stt' || k === 'live_stt' || k === 'stt' || k === 'asr') {
     return ['asr', 'tts', 'diarization', 'grpc']
   }

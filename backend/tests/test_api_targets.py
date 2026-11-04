@@ -637,3 +637,76 @@ def test_target_models_pyannote_ai_returns_builtin_catalog_without_network(app_a
         res_adhoc = client.post("/api/targets/models", json=body)
         assert res_adhoc.status_code == 200, res_adhoc.text
         assert len(res_adhoc.json()) == 3
+
+
+def test_target_test_google_cloud_checks_key_without_submitting_audio(app_and_client, monkeypatch):
+    """A google-cloud target's Test button mints a token and reads the model card only (free),
+    never generateContent/recognize (billed), and defaults to the diarization capability."""
+    import json as _json
+
+    import httpx
+    import backend.app.api.targets as targets_api
+    import backend.app.testers.live_stt.google_cloud as google_cloud
+
+    client, _, _ = app_and_client
+    sa = {"type": "service_account", "project_id": "demo-proj", "private_key": "-----BEGIN PRIVATE KEY-----\nx\n",
+          "client_email": "sa@demo-proj.iam.gserviceaccount.com"}
+    monkeypatch.setenv("TEST_GOOGLE_SA_JSON", _json.dumps(sa))
+    monkeypatch.setattr(google_cloud, "_service_account_token_provider", lambda info: (lambda: "ya29.ok"))
+    seen: list[str] = []
+
+    def mock_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.url.host}{request.url.path}")
+        if request.headers.get("Authorization") != "Bearer ya29.ok":
+            return httpx.Response(401, json={"error": {"message": "invalid authentication"}})
+        if request.url.path == "/v1beta1/publishers/google/models/gemini-3.5-transcribe":
+            return httpx.Response(200, json={"name": "publishers/google/models/gemini-3.5-transcribe"})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(targets_api, "_get_http_transport", lambda: httpx.MockTransport(mock_handler))
+    payload = {"name": "Google Cloud", "kind": "google-cloud", "base_url": "https://aiplatform.googleapis.com",
+               "auth_env_var": "TEST_GOOGLE_SA_JSON"}
+    res = client.post("/api/targets/test", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["capabilities_tested"] == ["diarization"]
+    assert body["ok"] is True, body
+    assert body["results"][0]["detail"]["backend"] == "google_cloud"
+    assert "demo-proj" in body["results"][0]["message"]
+    assert seen == ["aiplatform.googleapis.com/v1beta1/publishers/google/models/gemini-3.5-transcribe"]
+
+    monkeypatch.setenv("TEST_GOOGLE_SA_JSON", "/nope/missing.json")
+    bad = client.post("/api/targets/test", json=payload).json()
+    assert bad["ok"] is False
+    assert "neither an existing key file" in bad["results"][0]["error"]
+
+
+def test_target_models_google_cloud_returns_builtin_catalog_without_network(app_and_client, monkeypatch):
+    import httpx
+    import backend.app.api.targets as targets_api
+
+    client, _, _ = app_and_client
+
+    def no_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    monkeypatch.setattr(targets_api, "_get_http_transport", lambda: httpx.MockTransport(no_network))
+    res_create = client.post(
+        "/api/targets",
+        json={"name": "Google Cloud speech", "kind": "google-cloud", "base_url": "https://aiplatform.googleapis.com",
+              "auth_env_var": "GOOGLE_APPLICATION_CREDENTIALS"},
+    )
+    assert res_create.status_code == 201
+    res = client.get(f"/api/targets/{res_create.json()['id']}/models")
+    assert res.status_code == 200, res.text
+    models = {m["id"]: m for m in res.json()}
+    assert set(models) == {"google/gemini-3.5-transcribe", "google/chirp_3"}
+    assert models["google/gemini-3.5-transcribe"]["is_default"] is True
+    assert all(m["type"] == "diarization" and m["engine"] == "google_cloud" for m in models.values())
+    for body in (
+        {"base_url": "https://example.invalid", "kind": "google-cloud"},
+        {"base_url": "https://us-central1-aiplatform.googleapis.com"},
+    ):
+        res_adhoc = client.post("/api/targets/models", json=body)
+        assert res_adhoc.status_code == 200, res_adhoc.text
+        assert len(res_adhoc.json()) == 2

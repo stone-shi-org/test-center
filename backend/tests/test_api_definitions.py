@@ -271,7 +271,8 @@ def test_starter_templates_endpoint(app_and_client):
     res_stt = client.get("/api/test-definitions/starters?tester=live-stt")
     assert res_stt.status_code == 200
     stt_starters = res_stt.json()
-    assert len(stt_starters) == 8
+    assert len(stt_starters) == 9
+    assert "Google Cloud diarization accuracy" in [s["name"] for s in stt_starters]
     assert "pyannote.ai cloud diarization accuracy" in [s["name"] for s in stt_starters]
     assert all(s["tester"] == "live-stt" for s in stt_starters)
     stt_names = [s["name"] for s in stt_starters]

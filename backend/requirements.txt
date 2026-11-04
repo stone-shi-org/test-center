@@ -9,3 +9,5 @@ numpy>=1.26.0
 grpcio==1.83.1
 grpcio-tools==1.83.1
 protobuf>=5.28.0
+google-auth>=2.30.0
+requests>=2.31.0

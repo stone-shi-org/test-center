@@ -75,6 +75,13 @@ from backend.app.testers.live_stt.pyannote_cloud import (
     PyannoteCloudClient,
     is_pyannote_ai_target,
 )
+from backend.app.testers.live_stt.google_cloud import (
+    DEFAULT_CHIRP_LOCATION as GOOGLE_DEFAULT_CHIRP_LOCATION,
+    DEFAULT_GEMINI_LOCATION as GOOGLE_DEFAULT_GEMINI_LOCATION,
+    DEFAULT_JOB_TIMEOUT_SEC as GOOGLE_DEFAULT_JOB_TIMEOUT_SEC,
+    GoogleCloudClient,
+    is_google_cloud_target,
+)
 from backend.app.testers.live_stt.report import format_live_stt_report
 from backend.app.testers.live_stt.streaming import execute_grpc_streaming_suites
 from backend.app.testers.live_stt.schemas import (
@@ -643,6 +650,47 @@ class LiveSTTTester(TesterPlugin):
                 "description": "pyannote.ai targets only: seconds between GET /v1/jobs/{id} polls",
                 "x-advanced": True,
             },
+            "google_project": {
+                "type": "string",
+                "description": (
+                    "Google Cloud targets only: GCP project ID; defaults to the target's extra.project, "
+                    "then the service-account key's project_id"
+                ),
+                "x-advanced": True,
+            },
+            "google_gemini_location": {
+                "type": "string",
+                "default": GOOGLE_DEFAULT_GEMINI_LOCATION,
+                "description": (
+                    "Google Cloud targets only: Vertex AI location for gemini-3.5-transcribe "
+                    "(global, us, eu); overrides the target's extra.gemini_location"
+                ),
+                "x-advanced": True,
+            },
+            "google_chirp_location": {
+                "type": "string",
+                "default": GOOGLE_DEFAULT_CHIRP_LOCATION,
+                "description": (
+                    "Google Cloud targets only: Speech-to-Text V2 location for chirp_3 (e.g. us, eu); "
+                    "overrides the target's extra.chirp_location"
+                ),
+                "x-advanced": True,
+            },
+            "google_gcs_bucket": {
+                "type": "string",
+                "description": (
+                    "Google Cloud targets only: GCS bucket for Chirp 3 batch mode, needed for audio over 60 s; "
+                    "overrides the target's extra.gcs_bucket"
+                ),
+                "x-advanced": True,
+            },
+            "google_job_timeout_sec": {
+                "type": "number",
+                "default": GOOGLE_DEFAULT_JOB_TIMEOUT_SEC,
+                "minimum": 10.0,
+                "description": "Google Cloud targets only: max wait for one Chirp 3 batch operation",
+                "x-advanced": True,
+            },
         },
     }
 
@@ -718,6 +766,8 @@ class LiveSTTTester(TesterPlugin):
     def _resolve_client(self, config: dict[str, Any], target: dict[str, Any]) -> LiveSTTHTTPClient:
         if is_pyannote_ai_target(target, config):
             return self._resolve_pyannote_ai_client(config, target)  # type: ignore[return-value]
+        if is_google_cloud_target(target, config):
+            return self._resolve_google_cloud_client(config, target)  # type: ignore[return-value]
         base_url = target.get("base_url") or config.get("base_url")
         extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
         grpc_target = (
@@ -770,6 +820,37 @@ class LiveSTTTester(TesterPlugin):
                 job_timeout_sec=float(
                     config.get("pyannote_ai_job_timeout_sec", PYANNOTE_AI_DEFAULT_JOB_TIMEOUT_SEC)
                 ),
+            )
+        except LiveSTTClientError as e:
+            raise TesterConfigError(str(e)) from e
+
+    @staticmethod
+    def _resolve_google_cloud_client(config: dict[str, Any], target: dict[str, Any]) -> GoogleCloudClient:
+        """Google Cloud (Vertex AI Gemini 3.5 Transcribe / Speech-to-Text Chirp 3) target. Credentials
+        come from the target's auth_env_var (key file path, JSON, or base64 JSON), the run config's
+        api_key, or GOOGLE_APPLICATION_CREDENTIALS -- never the live-stt/OpenAI fallbacks."""
+        extra = target.get("extra") if isinstance(target.get("extra"), dict) else {}
+        auth_env_var = target.get("auth_env_var")
+        credentials = (
+            os.environ.get(auth_env_var) if isinstance(auth_env_var, str) and auth_env_var else None
+        ) or config.get("api_key") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
+        def pick(cfg_key: str, extra_key: str, default: Any = None) -> Any:
+            return config.get(cfg_key) or extra.get(extra_key) or default
+
+        try:
+            return GoogleCloudClient(
+                credentials=credentials,
+                project=pick("google_project", "project"),
+                gemini_location=str(pick("google_gemini_location", "gemini_location", GOOGLE_DEFAULT_GEMINI_LOCATION)),
+                chirp_location=str(pick("google_chirp_location", "chirp_location", GOOGLE_DEFAULT_CHIRP_LOCATION)),
+                gcs_bucket=pick("google_gcs_bucket", "gcs_bucket"),
+                language=str(config.get("language") or "en"),
+                timeout=max(float(config.get("timeout_seconds", 600.0)), 60.0),
+                transport=config.get("_transport"),
+                poll_interval_sec=float(config.get("google_poll_interval_sec", 5.0)),
+                job_timeout_sec=float(config.get("google_job_timeout_sec", GOOGLE_DEFAULT_JOB_TIMEOUT_SEC)),
+                token_provider=config.get("_google_token_provider"),
             )
         except LiveSTTClientError as e:
             raise TesterConfigError(str(e)) from e
@@ -1035,18 +1116,19 @@ class LiveSTTTester(TesterPlugin):
         if bool(cfg.get("include_long_call", False)) and "grpc_long_call" not in suites_to_run:
             suites_to_run.append("grpc_long_call")
 
-        if isinstance(client, PyannoteCloudClient):
-            # A pyannote.ai cloud target only diarizes; every other suite targets live-stt endpoints.
+        if isinstance(client, (PyannoteCloudClient, GoogleCloudClient)):
+            # A cloud diarization target only diarizes; every other suite targets live-stt endpoints.
+            cloud_name = "pyannote.ai" if isinstance(client, PyannoteCloudClient) else "Google Cloud"
             cloud_skipped = [s for s in suites_to_run if s != "accuracy_diarization"]
             suites_to_run = [s for s in suites_to_run if s == "accuracy_diarization"]
             if not suites_to_run:
                 raise TesterConfigError(
-                    "pyannote.ai targets support only the accuracy_diarization suite "
+                    f"{cloud_name} targets support only the accuracy_diarization suite "
                     f"(selected: {cloud_skipped})"
                 )
             if cloud_skipped:
                 ctx.log(
-                    f"pyannote.ai target: skipping {', '.join(cloud_skipped)} (only accuracy_diarization applies)",
+                    f"{cloud_name} target: skipping {', '.join(cloud_skipped)} (only accuracy_diarization applies)",
                     level="warning",
                 )
 

@@ -107,6 +107,23 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
     },
     {
         "tester": "live-stt",
+        "name": "Google Cloud diarization accuracy",
+        "description": (
+            "For a Google Cloud target (kind 'google-cloud'): Gemini 3.5 Transcribe and Chirp 3, both "
+            "with speaker diarization, on 3 NOTSOFAR-1 meetings capped at 59 s (Chirp 3's synchronous "
+            "limit; set the target's extra.gcs_bucket and drop the cap for full meetings). Billed per "
+            "audio second; repeat runs hit the cache."
+        ),
+        "suites": ["accuracy_diarization"],
+        "config": {
+            "models": ["google/gemini-3.5-transcribe", "google/chirp_3"],
+            "max_meetings": 3,
+            "max_audio_duration_sec": 59,
+            "timeout_seconds": 600,
+        },
+    },
+    {
+        "tester": "live-stt",
         "name": "gRPC long call",
         "description": "Long-duration gRPC streaming stability and memory growth test.",
         "suites": ["grpc_long_call"],
