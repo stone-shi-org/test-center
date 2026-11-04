@@ -1473,18 +1473,39 @@ def test_one_pass_diarizer_scored_on_own_transcript_and_not_leaked_into_asr_cpwe
     assert events.count("diarization") == 1
 
 
-def test_one_pass_transcript_text_orders_words_and_falls_back_to_segments():
-    words = [
-        {"text": "world", "start": 1.0, "end": 1.2, "speaker": "SPEAKER_01"},
-        {"text": "hello", "start": 0.1, "end": 0.3, "speaker": "SPEAKER_00"},
-    ]
-    assert LiveSTTTester._one_pass_transcript_text(words, []) == "hello world"
+def test_one_pass_transcript_text_orders_turns_and_falls_back_to_words():
     segments = [
         {"speaker": "SPEAKER_01", "start": 2.0, "end": 3.0, "text": "second"},
         {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0, "text": "first"},
         {"speaker": "SPEAKER_00", "start": 1.5, "end": 1.6, "text": ""},
     ]
     assert LiveSTTTester._one_pass_transcript_text([], segments) == "first second"
+    # Segments without text (e.g. a plain diarizer shape): time-ordered words.
+    words = [
+        {"text": "world", "start": 1.0, "end": 1.2, "speaker": "SPEAKER_01"},
+        {"text": "hello", "start": 0.1, "end": 0.3, "speaker": "SPEAKER_00"},
+    ]
+    assert LiveSTTTester._one_pass_transcript_text(words, []) == "hello world"
+    assert LiveSTTTester._one_pass_transcript_text(
+        words, [{"speaker": "SPEAKER_00", "start": 0.0, "end": 2.0, "text": ""}]
+    ) == "hello world"
+
+
+def test_one_pass_transcript_text_keeps_overlapping_turns_whole():
+    """Two speakers talking over each other: each turn's text stays contiguous (as in the
+    reference), instead of being interleaved word by word by start time."""
+    words = [
+        {"text": "i", "start": 0.0, "end": 0.2, "speaker": "SPEAKER_00"},
+        {"text": "asked", "start": 0.4, "end": 0.6, "speaker": "SPEAKER_00"},
+        {"text": "you", "start": 0.8, "end": 1.0, "speaker": "SPEAKER_00"},
+        {"text": "yeah", "start": 0.3, "end": 0.5, "speaker": "SPEAKER_01"},
+        {"text": "sure", "start": 0.7, "end": 0.9, "speaker": "SPEAKER_01"},
+    ]
+    segments = [
+        {"speaker": "SPEAKER_00", "start": 0.0, "end": 1.0, "text": "i asked you"},
+        {"speaker": "SPEAKER_01", "start": 0.3, "end": 0.9, "text": "yeah sure"},
+    ]
+    assert LiveSTTTester._one_pass_transcript_text(words, segments) == "i asked you yeah sure"
 
 
 def test_report_shows_one_pass_transcript_line():

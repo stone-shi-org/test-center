@@ -3327,7 +3327,15 @@ class LiveSTTTester(TesterPlugin):
         words: list[dict[str, Any]],
         segments: list[dict[str, Any]],
     ) -> str:
-        """Time-ordered plain transcript from a one-pass diarization response (words, else segment text)."""
+        """Plain transcript of a one-pass diarization response, for speaker-agnostic WER.
+
+        Built turn by turn: each speaker turn's text kept whole, turns in start-time order.
+        That mirrors how the reference is built (ground-truth utterances, chronological), so
+        overlapped speech is not penalised. Sorting individual words by start time instead
+        interleaves two speakers talking over each other word by word; on NOTSOFAR eval_small
+        that inflated Nemotron Transcribe's WER from 39.2% to 46.7% (pyannote.ai: 35.3% vs 35.8%).
+        Falls back to time-ordered words when no segment carries text.
+        """
         def _start(item: dict[str, Any]) -> float:
             try:
                 return float(item.get("start_sec", item.get("start", 0.0)) or 0.0)
@@ -3335,13 +3343,13 @@ class LiveSTTTester(TesterPlugin):
                 return 0.0
 
         toks = [
-            str(w.get("word", w.get("text", "")) or "").strip()
-            for w in sorted(words, key=_start)
+            str(seg.get("text", "") or "").strip()
+            for seg in sorted((s for s in segments if isinstance(s, dict)), key=_start)
         ]
         if not any(toks):
             toks = [
-                str(seg.get("text", "") or "").strip()
-                for seg in sorted((s for s in segments if isinstance(s, dict)), key=_start)
+                str(w.get("word", w.get("text", "")) or "").strip()
+                for w in sorted((w for w in words if isinstance(w, dict)), key=_start)
             ]
         return " ".join(t for t in toks if t)
 

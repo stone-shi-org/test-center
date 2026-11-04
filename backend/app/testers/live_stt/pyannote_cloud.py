@@ -16,7 +16,8 @@ needs no cloud branch:
     for DER, unlike the merged ``turnLevelTranscription``. Each ``wordLevelTranscription`` word
     is put into the best-overlapping turn of the *same* speaker, so per-speaker text (cpWER) is
     exactly pyannote.ai's own attribution.
-  - ``words`` carries the word-level speaker labels (plain WER, time-ordered).
+  - ``words`` carries the word-level speaker labels. Plain WER is scored on the segment text in
+    turn order (``LiveSTTTester._one_pass_transcript_text``), not on words sorted by time.
 
 pyannote.ai bills every succeeded job (20 s minimum), so the tester's SQLite result cache matters:
 re-runs over the same meetings are free. Uploaded media and job outputs are deleted by pyannote.ai
