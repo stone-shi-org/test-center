@@ -76,7 +76,8 @@ export function Header() {
           {loading && <span className="health-badge loading">Checking...</span>}
           {!loading && error && (
             <span className="health-badge error" title={error}>
-              <span className="status-dot red" /> Backend Disconnected
+              <span className="status-dot red" />
+              <span className="health-label">Backend Disconnected</span>
             </span>
           )}
           {!loading && !error && health && (
@@ -84,7 +85,8 @@ export function Header() {
               className="health-badge healthy"
               title={`App: ${health.app || 'Test Center'} v${health.version || '0.1.0'}`}
             >
-              <span className="status-dot green" /> System Healthy
+              <span className="status-dot green" />
+              <span className="health-label">System Healthy</span>
             </span>
           )}
           <button

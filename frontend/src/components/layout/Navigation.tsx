@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { Link, useRouter, type RouteName } from '../../router/index.ts'
 
 interface NavTab {
@@ -19,6 +20,13 @@ const TABS: NavTab[] = [
 
 export function Navigation() {
   const { route } = useRouter()
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  // On narrow screens the tab strip scrolls horizontally; keep the active tab visible.
+  useEffect(() => {
+    const active = containerRef.current?.querySelector<HTMLElement>('.nav-link.active')
+    active?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+  }, [route.name])
 
   const isActive = (tab: NavTab) => {
     if (tab.name === 'runs' && route.name === 'run-detail') {
@@ -29,7 +37,7 @@ export function Navigation() {
 
   return (
     <nav className="main-nav" aria-label="Main Navigation">
-      <div className="nav-container">
+      <div className="nav-container" ref={containerRef}>
         {TABS.map((tab) => (
           <Link
             key={tab.name}

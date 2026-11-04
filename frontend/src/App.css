@@ -3215,3 +3215,348 @@
 .model-picker-manual-input {
   flex: 1;
 }
+
+/* ==========================================================================
+   Responsive / Mobile
+   ========================================================================== */
+
+/* Grids whose minimum column width exceeds a phone's viewport would force
+   horizontal page scrolling; clamp the minimum to the container width. */
+.stats-row { grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); }
+.tester-cards-grid { grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
+.suites-selector-grid { grid-template-columns: repeat(auto-fill, minmax(min(180px, 100%), 1fr)); }
+.compare-runs-grid { grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
+.charts-grid { grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); }
+.starters-grid { grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); }
+.model-picker-groups { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+
+.app-main {
+  min-width: 0;
+}
+
+img,
+video,
+iframe {
+  max-width: 100%;
+}
+
+.table-responsive {
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 768px) {
+  /* Shell */
+  .app-header {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+  .brand-sub {
+    display: none;
+  }
+  .brand-text h1 {
+    font-size: 16px;
+  }
+  .logo-icon {
+    font-size: 20px;
+  }
+
+  /* Tab strip scrolls horizontally instead of overflowing the page */
+  .main-nav {
+    padding: 0;
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+  .nav-container {
+    gap: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 6px;
+  }
+  .nav-container::-webkit-scrollbar {
+    display: none;
+  }
+  .nav-link {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 12px 12px;
+    gap: 6px;
+  }
+  .nav-icon {
+    font-size: 15px;
+  }
+
+  .app-main {
+    padding: 14px 12px;
+  }
+
+  .app-footer {
+    padding: 12px 14px;
+  }
+  .footer-content {
+    flex-direction: column;
+    gap: 4px;
+    text-align: center;
+  }
+
+  /* Headers stack; action groups wrap */
+  .view-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .view-header h2,
+  .detail-title-group h2 {
+    font-size: 19px;
+  }
+  .view-container {
+    gap: 14px;
+  }
+
+  .header-actions,
+  .row-actions,
+  .detail-title-group,
+  .detail-header-actions,
+  .modal-actions,
+  .section-header,
+  .schema-form-header,
+  .field-header,
+  .tester-card-header,
+  .tester-card-footer,
+  .latest-run-row,
+  .suite-quick-actions,
+  .form-submit-bar,
+  .log-status-indicator,
+  .log-controls,
+  .result-summary-card,
+  .summary-left,
+  .drawer-header,
+  .compare-selection-actions,
+  .btn-group,
+  .compare-summary-status,
+  .compare-run-card-header,
+  .compare-run-card-actions,
+  .chart-controls,
+  .chart-card-badges,
+  .artifact-drawer-badges,
+  .artifact-col-header,
+  .job-editor-header,
+  .job-add-def-bar,
+  .inline-def-actions,
+  .grouped-result-title-bar,
+  .trend-meta-badges,
+  .artifact-viewer-actions,
+  .artifact-audio-meta,
+  .starter-card-top,
+  .model-picker-manual-add,
+  .filter-group,
+  .compare-section-header {
+    flex-wrap: wrap;
+  }
+
+  .header-actions > .btn {
+    flex: 1 1 auto;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  /* Run detail tabs scroll horizontally like the main nav */
+  .detail-nav-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .detail-nav-tabs::-webkit-scrollbar {
+    display: none;
+  }
+  .tab-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  /* Filters take full width */
+  .filter-bar {
+    gap: 10px;
+    align-items: stretch;
+  }
+  .search-input-wrapper {
+    min-width: 0;
+    flex: 1 1 100%;
+    max-width: none !important;
+  }
+  .filter-group {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+  .filter-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* iOS Safari zooms on focus when inputs are < 16px */
+  input[type='text'],
+  input[type='search'],
+  input[type='number'],
+  input[type='email'],
+  input[type='url'],
+  input[type='password'],
+  input:not([type]),
+  select,
+  textarea,
+  .form-input,
+  .form-select,
+  .form-textarea,
+  .search-input,
+  .filter-select,
+  .log-filter-input {
+    font-size: 16px;
+  }
+
+  .log-filter-input {
+    width: auto !important;
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+
+  /* Bigger tap targets */
+  .btn {
+    min-height: 38px;
+  }
+  .btn-sm {
+    min-height: 32px;
+  }
+  .action-btn {
+    padding: 6px 10px;
+    min-height: 32px;
+  }
+  .icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  /* Tables: denser cells, keep horizontal scroll inside the wrapper */
+  .data-table {
+    font-size: 12px;
+  }
+  .data-table th {
+    padding: 8px 10px;
+  }
+  .data-table td {
+    padding: 9px 10px;
+  }
+
+  /* Modals become near full-screen sheets */
+  .modal-backdrop {
+    padding: 0;
+    align-items: flex-end;
+  }
+  .modal-content {
+    max-width: 100% !important;
+    max-height: 100vh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+  @supports (height: 100dvh) {
+    .modal-content {
+      max-height: 100dvh;
+    }
+  }
+  .modal-header {
+    padding: 12px 14px;
+  }
+  .modal-body {
+    padding: 14px;
+  }
+  .modal-close-btn {
+    font-size: 28px;
+    padding: 0 4px;
+  }
+  .modal-actions {
+    margin-top: 16px;
+  }
+  .modal-actions > .btn {
+    flex: 1 1 auto;
+  }
+
+  /* Multi-column side-by-side layouts collapse to a single column.
+     Several are sized via inline styles, hence !important. */
+  .drawer-grid,
+  .artifacts-side-by-side-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .form-row {
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .detail-meta-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metrics-grid,
+  .stats-row {
+    grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
+  }
+
+  /* Shorter terminals / viewers so the page stays navigable */
+  .log-terminal {
+    height: 60vh;
+  }
+  .artifact-log-terminal {
+    height: 55vh;
+  }
+  .artifact-sandbox-iframe {
+    height: 60vh;
+  }
+
+  .shareable-url-box {
+    max-width: 100%;
+    min-width: 0;
+  }
+  .shareable-url-code {
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+
+  .json-block,
+  .artifact-code-view,
+  .log-line-content {
+    overflow-wrap: anywhere;
+  }
+
+  .selected-run-pill {
+    max-width: 100%;
+  }
+
+  .compare-meta-val {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 480px) {
+  /* Collapse the health badge to just its status dot */
+  .health-label {
+    display: none;
+  }
+  .health-badge {
+    padding: 6px;
+  }
+
+  .nav-label {
+    font-size: 12px;
+  }
+
+  .stat-number {
+    font-size: 22px;
+  }
+
+  .detail-meta-grid {
+    grid-template-columns: 1fr;
+  }
+}
