@@ -1459,6 +1459,11 @@ def test_one_pass_diarizer_scored_on_own_transcript_and_not_leaked_into_asr_cpwe
     assert diar_case.metrics["cpwer"]["value"] == 0.0
     assert diar_case.metrics["wer"]["value"] == 0.0
     assert "one-pass cpWER=0.00%" in diar_case.detail["eval_message"]
+    # A complete response is not flagged as truncated.
+    assert diar_case.detail["output_truncated"] is False
+    assert diar_case.detail["output_coverage"]["coverage"] >= 0.85
+    assert res.metrics["accuracy_diarization_truncated_cases"]["value"] == 0
+    assert "OUTPUT TRUNCATED" not in diar_case.detail["eval_message"]
 
     asr_case = by_cid["accuracy_wer:parakeet-tdt-0.6b-v3:MTG_90001"]
     assert asr_case.metrics["cpwer"]["value"] >= 0.8  # the ASR's own (wrong) words, not Nemotron's text
@@ -1506,6 +1511,40 @@ def test_one_pass_transcript_text_keeps_overlapping_turns_whole():
         {"speaker": "SPEAKER_01", "start": 0.3, "end": 0.9, "text": "yeah sure"},
     ]
     assert LiveSTTTester._one_pass_transcript_text(words, segments) == "i asked you yeah sure"
+
+
+def test_output_coverage_flags_one_pass_response_that_stops_early():
+    """MTG_32008 shape (Gemini): the transcript stops halfway through the meeting."""
+    words = [{"text": "w", "start": float(t), "end": float(t) + 0.3, "speaker": "SPEAKER_00"} for t in range(0, 228)]
+    segments = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 227.9, "text": "w " * 228}]
+    cov = LiveSTTTester._diarization_output_coverage(words, segments, 433.0, one_pass=True)
+    assert cov["truncated"] is True
+    assert cov["output_end_sec"] == 227.3 and cov["ref_speech_end_sec"] == 433.0
+    assert round(cov["coverage"], 2) == 0.52
+
+
+def test_output_coverage_uses_transcript_not_timeline_for_one_pass():
+    # Speaker turns run to the end, but the words stop early: still truncated for a one-pass model.
+    words = [{"text": "w", "start": 10.0, "end": 100.0, "speaker": "SPEAKER_00"}]
+    segments = [
+        {"speaker": "SPEAKER_00", "start": 0.0, "end": 100.0, "text": "w"},
+        {"speaker": "SPEAKER_01", "start": 100.0, "end": 400.0, "text": ""},
+    ]
+    assert LiveSTTTester._diarization_output_coverage(words, segments, 400.0, one_pass=True)["truncated"] is True
+    # A plain diarizer is judged on its speaker timeline.
+    assert LiveSTTTester._diarization_output_coverage([], segments, 400.0, one_pass=False)["truncated"] is False
+
+
+def test_output_coverage_complete_and_edge_cases():
+    words = [{"text": "end", "start": 395.0, "end": 396.0}]
+    cov = LiveSTTTester._diarization_output_coverage(words, [], 400.0, one_pass=True)
+    assert cov["truncated"] is False and cov["coverage"] == 0.99
+    # No words: falls back to segments that carry text.
+    segs = [{"speaker": "SPEAKER_00", "start": 0.0, "end": 390.0, "text": "hello"}]
+    assert LiveSTTTester._diarization_output_coverage([], segs, 400.0, one_pass=True)["truncated"] is False
+    # Nothing returned at all counts as fully truncated; no reference speech means no verdict.
+    assert LiveSTTTester._diarization_output_coverage([], [], 400.0, one_pass=True)["coverage"] == 0.0
+    assert LiveSTTTester._diarization_output_coverage(words, [], 0.0, one_pass=True) is None
 
 
 def test_report_shows_one_pass_transcript_line():

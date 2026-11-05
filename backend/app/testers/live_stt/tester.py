@@ -105,6 +105,10 @@ from backend.app.testers.live_stt.schemas import (
     validate_version_response,
 )
 
+# A diarization response whose output ends before this share of the last reference speech is
+# flagged as truncated (see LiveSTTTester._diarization_output_coverage).
+TRUNCATION_MIN_COVERAGE = 0.85
+
 
 _SUITE_EXPANSIONS: dict[str, list[str]] = {
     "transcriptions_json": ["transcriptions_json"],
@@ -2384,6 +2388,11 @@ class LiveSTTTester(TesterPlugin):
                 f"errored_cases={errored_cases}{suite_err_str} "
                 f"({errored_cases} cases errored; aggregates exclude them)"
             )
+        truncated_n = result.metrics.get("accuracy_diarization_truncated_cases", {}).get("value") or 0
+        if truncated_n > 0:
+            acc_summary_parts.append(
+                f"truncated_outputs={truncated_n} (output ends early; scored as returned)"
+            )
         acc_suffix = f" | {', '.join(acc_summary_parts)}" if acc_summary_parts else ""
 
         result.summary = (
@@ -3436,6 +3445,52 @@ class LiveSTTTester(TesterPlugin):
         return " ".join(t for t in toks if t)
 
     @staticmethod
+    def _diarization_output_coverage(
+        words: list[dict[str, Any]],
+        segments: list[dict[str, Any]],
+        ref_speech_end_sec: float,
+        *,
+        one_pass: bool,
+    ) -> dict[str, Any] | None:
+        """How far into the meeting a diarization response reaches, against the last reference speech.
+
+        Catches responses that silently stop early (HTTP 200, no error): on NOTSOFAR eval_small,
+        Gemini 3.5 Transcribe returned MTG_32008 and MTG_32006 ending at 53% and 66% of the speech,
+        text included. Every complete response from Nemotron, pyannote.ai and Gemini reached at least
+        98.6%, so TRUNCATION_MIN_COVERAGE leaves a wide margin. One-pass models are measured on their
+        transcript (words, else segments with text), so a full speaker timeline with the words cut off
+        still counts as truncated; plain diarizers on their segments.
+        """
+        if ref_speech_end_sec <= 0:
+            return None
+
+        def _end(item: dict[str, Any]) -> float | None:
+            try:
+                return float(item.get("end_sec", item.get("end")))
+            except (TypeError, ValueError):
+                return None
+
+        def _has_text(item: dict[str, Any]) -> bool:
+            return bool(str(item.get("word", item.get("text", "")) or "").strip())
+
+        ends: list[float | None] = []
+        if one_pass:
+            ends = [_end(w) for w in words if isinstance(w, dict) and _has_text(w)]
+            if not any(e is not None for e in ends):
+                ends = [_end(s) for s in segments if isinstance(s, dict) and _has_text(s)]
+        else:
+            ends = [_end(s) for s in segments if isinstance(s, dict) and str(s.get("speaker", "") or "").strip()]
+        valid = [e for e in ends if e is not None]
+        output_end = max(valid) if valid else 0.0
+        coverage = round(output_end / ref_speech_end_sec, 4)
+        return {
+            "output_end_sec": round(output_end, 3),
+            "ref_speech_end_sec": round(ref_speech_end_sec, 3),
+            "coverage": coverage,
+            "truncated": coverage < TRUNCATION_MIN_COVERAGE,
+        }
+
+    @staticmethod
     def _compute_case_cpwer(
         meeting: NotsofarMeeting,
         words: list[dict[str, Any]],
@@ -3754,6 +3809,7 @@ class LiveSTTTester(TesterPlugin):
         acc_diar_latencies: list[float] = []
         acc_diar_rtfs: list[float] = []
         diar_errored_cases = 0
+        diar_truncated_cases: list[str] = []
 
         # -------------------------------------------------------------------
         # Suite 8: accuracy_wer (Batch HTTP transcription WER & cpWER on NOTSOFAR-1)
@@ -4523,6 +4579,25 @@ class LiveSTTTester(TesterPlugin):
                             f", WER={joint_wer_res.wer_pct:.2f}%" if joint_wer_res is not None else ""
                         )
                     server_warnings = body.get("warnings") if isinstance(body, dict) and isinstance(body.get("warnings"), list) else []
+                    ref_speech_end = max(
+                        (seg.end_time for seg in meeting.segments if seg.words), default=0.0
+                    )
+                    coverage = self._diarization_output_coverage(
+                        [
+                            w for w in (body.get("words") if isinstance(body, dict) and isinstance(body.get("words"), list) else [])
+                            if isinstance(w, dict)
+                        ],
+                        pred_segments,
+                        ref_speech_end,
+                        one_pass=one_pass,
+                    )
+                    truncated = bool(coverage and coverage["truncated"])
+                    if truncated:
+                        diar_truncated_cases.append(meeting.meeting_id)
+                        eval_msg += (
+                            f"; OUTPUT TRUNCATED: ends at {coverage['output_end_sec']:.0f}s of "
+                            f"{coverage['ref_speech_end_sec']:.0f}s of speech ({coverage['coverage'] * 100.0:.0f}%)"
+                        )
                     if not d_schema.valid:
                         eval_msg = f"{d_schema.summary_message}; {eval_msg}"
 
@@ -4563,6 +4638,8 @@ class LiveSTTTester(TesterPlugin):
                             "one_pass_transcript": one_pass,
                             "wer": joint_wer_res.to_dict() if joint_wer_res is not None else None,
                             "server_warnings": server_warnings,
+                            "output_coverage": coverage,
+                            "output_truncated": truncated,
                             "speaker_diagnostics": der_res.speaker_diagnostics,
                             "passed": passed,
                             "eval_message": eval_msg,
@@ -4587,6 +4664,9 @@ class LiveSTTTester(TesterPlugin):
         if "accuracy_diarization" in suites_to_run:
             result.set_metric("accuracy_diarization_errored_cases", diar_errored_cases, unit="cases", better="lower")
             result.set_metric("accuracy_diarization_evaluated_cases", len(der_list), unit="cases", better="higher")
+            result.set_metric(
+                "accuracy_diarization_truncated_cases", len(diar_truncated_cases), unit="cases", better="lower"
+            )
 
         if http_wer_list:
             tot_ref = sum(w.ref_word_count for w in http_wer_list)
