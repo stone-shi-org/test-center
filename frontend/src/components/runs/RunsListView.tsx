@@ -131,7 +131,7 @@ export function RunsListView() {
   const [selectedRunIds, setSelectedRunIds] = useState<number[]>([])
   const [showTrendChart, setShowTrendChart] = useState(true)
   const [showRetention, setShowRetention] = useState(false)
-  const [clearingCancelled, setClearingCancelled] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
 
   const toggleRunSelection = (runId: number) => {
@@ -170,40 +170,50 @@ export function RunsListView() {
     }
   }
 
-  const handleClearCancelled = async () => {
+  // Preview (dry run) -> confirm -> delete. Active and baselined runs are skipped server-side.
+  const runBulkDelete = async (
+    request: { status?: string; run_ids?: number[] },
+    label: string
+  ) => {
     try {
-      setClearingCancelled(true)
+      setBulkDeleting(true)
       setError(null)
       setNotice(null)
-      const preview = await api.runs.bulkDelete({ status: 'cancelled', dry_run: true })
-      if (preview.deleted_count === 0) {
-        setNotice(
-          preview.skipped.length > 0
-            ? `No cancelled runs can be deleted (${preview.skipped.length} are baselines).`
-            : 'No cancelled runs to delete.'
-        )
-        return
-      }
+      const preview = await api.runs.bulkDelete({ ...request, dry_run: true })
       const skippedNote =
         preview.skipped.length > 0
-          ? `\n${preview.skipped.length} baselined run(s) will be kept.`
+          ? `\n\nKept (${preview.skipped.length}): ${preview.skipped
+              .map((sk) => `#${sk.id} ${sk.reason}`)
+              .join(', ')}`
           : ''
+      if (preview.deleted_count === 0) {
+        setNotice(`No ${label} runs can be deleted.${skippedNote.replace(/\n+/g, ' ')}`)
+        return
+      }
       if (
         !window.confirm(
-          `Delete ${preview.deleted_count} cancelled run(s) and their artifacts? This cannot be undone.${skippedNote}`
+          `Delete ${preview.deleted_count} ${label} run(s) and their artifacts? This cannot be undone.${skippedNote}`
         )
       ) {
         return
       }
-      const res = await api.runs.bulkDelete({ status: 'cancelled' })
+      const res = await api.runs.bulkDelete(request)
       setSelectedRunIds((prev) => prev.filter((id) => !res.deleted.includes(id)))
-      setNotice(`Deleted ${res.deleted_count} cancelled run(s).`)
+      setNotice(
+        `Deleted ${res.deleted_count} ${label} run(s).` +
+          (res.skipped.length > 0 ? ` Kept ${res.skipped.length} (active or baseline).` : '')
+      )
       await fetchRuns(false)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setClearingCancelled(false)
+      setBulkDeleting(false)
     }
+  }
+
+  const handleClearCancelled = () => runBulkDelete({ status: 'cancelled' }, 'cancelled')
+  const handleDeleteSelected = () => {
+    if (selectedRunIds.length > 0) runBulkDelete({ run_ids: selectedRunIds }, 'selected')
   }
 
   const cancelledCount = runs.filter((r) => r.status === 'cancelled').length
@@ -394,11 +404,25 @@ export function RunsListView() {
             type="button"
             className="btn btn-secondary"
             data-testid="clear-cancelled-btn"
-            disabled={clearingCancelled}
+            disabled={bulkDeleting}
             title="Delete all cancelled runs (baselined runs are kept)"
             onClick={handleClearCancelled}
           >
-            🧹 {clearingCancelled ? 'Clearing…' : `Clear Cancelled${cancelledCount > 0 ? ` (${cancelledCount})` : ''}`}
+            🧹 Clear Cancelled{cancelledCount > 0 ? ` (${cancelledCount})` : ''}
+          </button>
+          <button
+            type="button"
+            className="btn btn-danger"
+            data-testid="delete-selected-btn"
+            disabled={bulkDeleting || selectedRunIds.length === 0}
+            title={
+              selectedRunIds.length === 0
+                ? 'Tick runs in the table to select them'
+                : 'Delete the selected runs (active and baselined runs are kept)'
+            }
+            onClick={handleDeleteSelected}
+          >
+            🗑️ Delete Selected{selectedRunIds.length > 0 ? ` (${selectedRunIds.length})` : ''}
           </button>
           <button className="btn btn-secondary" onClick={() => fetchRuns(true)}>
             ↻ Refresh
