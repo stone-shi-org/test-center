@@ -97,7 +97,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
         api.definitions.list(),
         api.testers.list(),
         api.targets.list(),
-        api.runs.list({ limit: 100 }),
+        api.runs.list({ limit: 100, view: 'summary' }),
       ])
       setJobs(jobsData)
       setDefinitions(defsData)
@@ -186,7 +186,7 @@ export function JobsView({ initialJobId }: { initialJobId?: number }) {
       api.definitions.list(),
       api.testers.list(),
       api.targets.list(),
-      api.runs.list({ limit: 100 }),
+      api.runs.list({ limit: 100, view: 'summary' }),
     ])
       .then(([jobsData, defsData, testersData, targetsData, runsData]) => {
         if (ignore) return

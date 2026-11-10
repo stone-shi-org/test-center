@@ -797,6 +797,21 @@ export interface RunsFilterParams {
   date?: string
   limit?: number
   offset?: number
+  /** 'summary' omits heavy per-case metrics/detail payloads (list views). */
+  view?: 'full' | 'summary'
+}
+
+export interface BulkDeleteRunsRequest {
+  status?: string
+  run_ids?: number[]
+  dry_run?: boolean
+}
+
+export interface BulkDeleteRunsResponse {
+  dry_run: boolean
+  deleted: number[]
+  deleted_count: number
+  skipped: { id: number; reason: string }[]
 }
 
 export interface TrendMetricOption {

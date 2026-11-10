@@ -30,7 +30,7 @@ export function DashboardView() {
       setError(null)
       const [testersData, runsData, targetsData] = await Promise.all([
         api.testers.list(),
-        api.runs.list({ limit: 50 }),
+        api.runs.list({ limit: 50, view: 'summary' }),
         api.targets.list(),
       ])
       setTesters(testersData)
@@ -47,7 +47,7 @@ export function DashboardView() {
     let ignore = false
     Promise.all([
       api.testers.list(),
-      api.runs.list({ limit: 50 }),
+      api.runs.list({ limit: 50, view: 'summary' }),
       api.targets.list(),
     ])
       .then(([testersData, runsData, targetsData]) => {

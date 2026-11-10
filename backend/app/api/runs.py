@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 
 from backend.app.api.artifacts import (
     build_artifact_content_payload,
@@ -386,8 +386,14 @@ def _matches_run_filters(
 def _format_run_detail(
     run: Run,
     previous_baselines: list[dict[str, Any]] | None = None,
+    slim_case_details: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Helper to serialize a Run with its nested results, cases, and artifacts."""
+    """Helper to serialize a Run with its nested results, cases, and artifacts.
+
+    When ``slim_case_details`` is given (summary view), case ``metrics``/``detail`` columns are assumed
+    unloaded: cases are emitted slim, with ``detail`` holding only ``model``/``effort`` (if any).
+    """
+    summary = slim_case_details is not None
     def_names_by_id: dict[int, str] = {}
     job_id, job_name = _extract_run_job_info(run)
     if isinstance(run.config_snapshot, dict):
@@ -402,18 +408,36 @@ def _format_run_detail(
 
     results_list = []
     for r in run.results:
-        item_meta = _extract_item_metadata(ComparedItem(run=run, result=r), is_baseline=False)
-        cases_list = [
-            {
-                "id": c.id,
-                "suite": c.suite,
-                "case_id": c.case_id,
-                "status": c.status,
-                "metrics": c.metrics,
-                "detail": c.detail,
-            }
-            for c in r.cases
-        ]
+        if summary:
+            cases_list = [
+                {
+                    "id": c.id,
+                    "suite": c.suite,
+                    "case_id": c.case_id,
+                    "status": c.status,
+                    "metrics": {},
+                    "detail": slim_case_details.get(c.id, {}),
+                }
+                for c in r.cases
+            ]
+            item_meta = _extract_item_metadata(
+                ComparedItem(run=run, result=r),
+                is_baseline=False,
+                case_details=[c["detail"] for c in cases_list],
+            )
+        else:
+            item_meta = _extract_item_metadata(ComparedItem(run=run, result=r), is_baseline=False)
+            cases_list = [
+                {
+                    "id": c.id,
+                    "suite": c.suite,
+                    "case_id": c.case_id,
+                    "status": c.status,
+                    "metrics": c.metrics,
+                    "detail": c.detail,
+                }
+                for c in r.cases
+            ]
         artifacts_list = [
             format_artifact_metadata(a, run_id=run.id, result_id=r.id)
             for a in r.artifacts
@@ -597,6 +621,10 @@ def list_runs(
     date: str | None = Query(None, description="Filter runs on a specific date (YYYY-MM-DD)"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    view: Literal["full", "summary"] = Query(
+        "full",
+        description="'summary' omits per-case metrics/detail payloads (cases keep id/suite/case_id/status and detail.model only)",
+    ),
     db: Session = Depends(get_db),
 ) -> list[dict[str, Any]]:
     """List runs ordered by creation time descending, with optional filtering by tester, target, job, status, baseline, and date."""
@@ -618,12 +646,20 @@ def list_runs(
         status is not None and status.strip().lower() in ("pass", "fail", "failed"),
     ])
 
+    # The model filter inspects case detail, so it needs the full case rows.
+    summary = view == "summary" and model is None
+    cases_loader = selectinload(Run.results).selectinload(Result.cases)
+    if summary:
+        cases_loader = cases_loader.load_only(
+            CaseResult.id, CaseResult.result_id, CaseResult.suite, CaseResult.case_id, CaseResult.status
+        )
+
     stmt = (
         select(Run)
         .options(
             selectinload(Run.job),
             selectinload(Run.baselines),
-            selectinload(Run.results).selectinload(Result.cases),
+            cases_loader,
             selectinload(Run.results).selectinload(Result.artifacts),
             selectinload(Run.results).selectinload(Result.test_definition),
         )
@@ -642,10 +678,17 @@ def list_runs(
 
     prev_by_run = get_previous_baselines_by_run_id(db)
 
+    def _serialize(runs: list[Run]) -> list[dict[str, Any]]:
+        slim = _fetch_slim_case_details(db, runs) if summary else None
+        return [
+            _format_run_detail(r, previous_baselines=prev_by_run.get(r.id), slim_case_details=slim)
+            for r in runs
+        ]
+
     if not has_memory_filters:
         stmt = stmt.offset(offset).limit(limit)
         runs = db.execute(stmt).scalars().all()
-        return [_format_run_detail(r, previous_baselines=prev_by_run.get(r.id)) for r in runs]
+        return _serialize(list(runs))
 
     all_runs = db.execute(stmt).scalars().all()
     filtered = [
@@ -665,8 +708,33 @@ def list_runs(
             baseline=baseline,
         )
     ]
-    sliced = filtered[offset : offset + limit]
-    return [_format_run_detail(r, previous_baselines=prev_by_run.get(r.id)) for r in sliced]
+    return _serialize(filtered[offset : offset + limit])
+
+
+def _fetch_slim_case_details(db: Session, runs: list[Run]) -> dict[int, dict[str, Any]]:
+    """Return {case_result_id: {model?, effort?}} via JSON-path extraction, without loading full case detail JSON."""
+    result_ids = [res.id for r in runs for res in (r.results or [])]
+    if not result_ids:
+        return {}
+    model_expr = CaseResult.detail["model"].as_string()
+    effort_expr = CaseResult.detail["effort"].as_string()
+    out: dict[int, dict[str, Any]] = {}
+    chunk = 500
+    for i in range(0, len(result_ids), chunk):
+        rows = db.execute(
+            select(CaseResult.id, model_expr, effort_expr)
+            .where(CaseResult.result_id.in_(result_ids[i : i + chunk]))
+            .where((model_expr.is_not(None)) | (effort_expr.is_not(None)))
+        ).all()
+        for case_pk, m, e in rows:
+            slim: dict[str, Any] = {}
+            if isinstance(m, str) and m.strip():
+                slim["model"] = m
+            if e is not None:
+                slim["effort"] = e
+            if slim:
+                out[case_pk] = slim
+    return out
 
 
 @router.get("/trends")
@@ -942,6 +1010,58 @@ def trigger_runs_retention_cleanup(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+
+class BulkDeleteRunsRequest(BaseModel):
+    status: str | None = Field(default=None, description="Delete all runs with this run status (e.g. 'cancelled')")
+    run_ids: list[int] | None = Field(default=None, description="Delete these specific runs")
+    dry_run: bool = Field(default=False, description="When true, report what would be deleted without deleting")
+
+
+@router.post("/bulk-delete")
+def bulk_delete_runs(
+    req: BulkDeleteRunsRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Delete many finished runs at once (by status and/or explicit IDs). Active and baselined runs are skipped."""
+    if not req.status and not req.run_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide 'status' and/or 'run_ids'")
+    if req.status and req.status in ACTIVE_RUN_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot bulk-delete active runs (status '{req.status}')",
+        )
+
+    stmt = select(Run).options(selectinload(Run.baselines)).order_by(Run.id.asc())
+    if req.status:
+        stmt = stmt.where(Run.status == req.status)
+    if req.run_ids:
+        stmt = stmt.where(Run.id.in_(req.run_ids))
+    candidates = db.execute(stmt).scalars().all()
+
+    deleted: list[int] = []
+    skipped: list[dict[str, Any]] = []
+    for run in candidates:
+        if run.status in ACTIVE_RUN_STATUSES:
+            skipped.append({"id": run.id, "reason": f"active ({run.status})"})
+        elif run.baselines:
+            first_baseline = sorted(run.baselines, key=lambda b: b.id)[0]
+            skipped.append({"id": run.id, "reason": f"baseline '{first_baseline.name}'"})
+        else:
+            deleted.append(run.id)
+
+    if not req.dry_run and deleted:
+        artifacts_dir = get_settings().ARTIFACTS_DIR
+        by_id = {r.id: r for r in candidates}
+        for run_id in deleted:
+            db.delete(by_id[run_id])
+        db.commit()
+        for run_id in deleted:
+            run_dir = artifacts_dir / str(run_id)
+            if run_dir.exists():
+                shutil.rmtree(run_dir, ignore_errors=True)
+
+    return {"dry_run": req.dry_run, "deleted": deleted, "deleted_count": len(deleted), "skipped": skipped}
 
 
 from backend.app.api.baselines import (

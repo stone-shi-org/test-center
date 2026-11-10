@@ -770,8 +770,16 @@ def align_and_compare_cases(
     return aligned_cases
 
 
-def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, Any]:
-    """Extract target, model, config, and artifact metadata for a compared run/result."""
+def _extract_item_metadata(
+    item: ComparedItem,
+    is_baseline: bool,
+    case_details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Extract target, model, config, and artifact metadata for a compared run/result.
+
+    ``case_details`` optionally replaces ``[c.detail for c in result.cases]`` so callers that
+    deferred the heavy case ``detail`` column can pass just the keys needed here (model, effort).
+    """
     run = item.run
     result = item.result
 
@@ -834,13 +842,14 @@ def _extract_item_metadata(item: ComparedItem, is_baseline: bool) -> dict[str, A
 
     # Resolve model identifier across config, target.extra, target, or case details
     case_models: list[str] = []
-    for c in result.cases:
-        if isinstance(c.detail, dict):
-            cm = c.detail.get("model")
+    details_iter = case_details if case_details is not None else (c.detail for c in result.cases)
+    for detail in details_iter:
+        if isinstance(detail, dict):
+            cm = detail.get("model")
             if isinstance(cm, str) and cm.strip() and cm not in case_models:
                 case_models.append(cm.strip())
-            if "effort" not in inner_config and c.detail.get("effort") is not None:
-                inner_config["effort"] = c.detail["effort"]
+            if "effort" not in inner_config and detail.get("effort") is not None:
+                inner_config["effort"] = detail["effort"]
 
     explicit_models_cfg = (
         [str(m).strip() for m in inner_config["models"] if str(m).strip()]

@@ -131,6 +131,8 @@ export function RunsListView() {
   const [selectedRunIds, setSelectedRunIds] = useState<number[]>([])
   const [showTrendChart, setShowTrendChart] = useState(true)
   const [showRetention, setShowRetention] = useState(false)
+  const [clearingCancelled, setClearingCancelled] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const toggleRunSelection = (runId: number) => {
     setSelectedRunIds((prev) =>
@@ -159,7 +161,7 @@ export function RunsListView() {
     try {
       if (showLoadingSpinner) setLoading(true)
       setError(null)
-      const data = await api.runs.list({ limit: 100 })
+      const data = await api.runs.list({ limit: 100, view: 'summary' })
       setRuns(data)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
@@ -168,10 +170,48 @@ export function RunsListView() {
     }
   }
 
+  const handleClearCancelled = async () => {
+    try {
+      setClearingCancelled(true)
+      setError(null)
+      setNotice(null)
+      const preview = await api.runs.bulkDelete({ status: 'cancelled', dry_run: true })
+      if (preview.deleted_count === 0) {
+        setNotice(
+          preview.skipped.length > 0
+            ? `No cancelled runs can be deleted (${preview.skipped.length} are baselines).`
+            : 'No cancelled runs to delete.'
+        )
+        return
+      }
+      const skippedNote =
+        preview.skipped.length > 0
+          ? `\n${preview.skipped.length} baselined run(s) will be kept.`
+          : ''
+      if (
+        !window.confirm(
+          `Delete ${preview.deleted_count} cancelled run(s) and their artifacts? This cannot be undone.${skippedNote}`
+        )
+      ) {
+        return
+      }
+      const res = await api.runs.bulkDelete({ status: 'cancelled' })
+      setSelectedRunIds((prev) => prev.filter((id) => !res.deleted.includes(id)))
+      setNotice(`Deleted ${res.deleted_count} cancelled run(s).`)
+      await fetchRuns(false)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setClearingCancelled(false)
+    }
+  }
+
+  const cancelledCount = runs.filter((r) => r.status === 'cancelled').length
+
   useEffect(() => {
     let ignore = false
     api.runs
-      .list({ limit: 100 })
+      .list({ limit: 100, view: 'summary' })
       .then((data) => {
         if (!ignore) {
           setRuns(data)
@@ -350,6 +390,16 @@ export function RunsListView() {
           <button className="btn btn-secondary" onClick={handleCompareSelected}>
             ⚖️ {selectedRunIds.length >= 2 ? `Compare Selected (${selectedRunIds.length})` : 'Compare Runs'}
           </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            data-testid="clear-cancelled-btn"
+            disabled={clearingCancelled}
+            title="Delete all cancelled runs (baselined runs are kept)"
+            onClick={handleClearCancelled}
+          >
+            🧹 {clearingCancelled ? 'Clearing…' : `Clear Cancelled${cancelledCount > 0 ? ` (${cancelledCount})` : ''}`}
+          </button>
           <button className="btn btn-secondary" onClick={() => fetchRuns(true)}>
             ↻ Refresh
           </button>
@@ -360,6 +410,11 @@ export function RunsListView() {
       </div>
 
       {error && <div className="banner error-banner">{error}</div>}
+      {notice && (
+        <div className="banner success-banner" data-testid="runs-notice">
+          {notice}
+        </div>
+      )}
 
       {showRetention && (
         <RetentionSettingsPanel

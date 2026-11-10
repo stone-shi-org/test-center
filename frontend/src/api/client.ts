@@ -6,6 +6,8 @@ import type {
   BambooIntegrationInfo,
   Baseline,
   BaselinesFilterParams,
+  BulkDeleteRunsRequest,
+  BulkDeleteRunsResponse,
   CaseResult,
   CompareParams,
   CompareResponse,
@@ -293,6 +295,7 @@ export const api = {
       if (params?.date) query.set('date', params.date)
       if (params?.limit) query.set('limit', String(params.limit))
       if (params?.offset) query.set('offset', String(params.offset))
+      if (params?.view) query.set('view', params.view)
       const qs = query.toString()
       return request<Run[]>(`/runs${qs ? `?${qs}` : ''}`)
     },
@@ -310,6 +313,11 @@ export const api = {
     delete: (id: number) =>
       request<void>(`/runs/${id}`, {
         method: 'DELETE',
+      }),
+    bulkDelete: (data: BulkDeleteRunsRequest) =>
+      request<BulkDeleteRunsResponse>('/runs/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify(data),
       }),
     cancel: (id: number) =>
       request<{ status: string; message: string }>(`/runs/${id}/cancel`, {
