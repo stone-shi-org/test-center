@@ -38,6 +38,7 @@ from backend.app.testers.llm_coding.judge import (
     evaluate_with_coding_judge,
 )
 from backend.app.testers.llm_coding.piston import (
+    STATUS_TRUNCATED,
     JudgeRunResult,
     PistonClient,
     judge_java_solution,
@@ -677,19 +678,50 @@ class LLMCodingTester(TesterPlugin):
                         attempt_ttfts.append(cur_ttft)
                     response_text = str(getattr(stream_res, "content", "") or "")
                     messages.append({"role": "assistant", "content": response_text})
+                    finish_reason = getattr(stream_res, "finish_reason", None)
+                    truncated = bool(getattr(stream_res, "truncated", False))
 
-                    extracted_code = extract_java_code(response_text)
-                    judge_run = judge_java_solution(
-                        client=piston_client,
-                        code=extracted_code,
-                        harness=problem.harness_java,
-                        test_cases=problem.tests,
-                        sample_case_idx=problem.sample_case_idx,
-                        timeout_ms=eff_timeout_ms,
-                        cpu_limit_ms=eff_cpu_limit_ms,
-                        stop_on_first_failure=False,
-                        extract_from_markdown=False,
-                    )
+                    if truncated:
+                        # The stream was cut off (e.g. a gateway request timeout) partway
+                        # through, usually mid-reasoning. Grading that partial text would
+                        # pull fragments out of the reasoning as "code" and report a bogus
+                        # Compile Error, so record it as truncated and stop: retrying the
+                        # same prompt would hit the same limit.
+                        stream_error = getattr(stream_res, "stream_error", None)
+                        latency_s = float(getattr(stream_res, "latency_ms", 0.0) or 0.0) / 1000.0
+                        reason = (
+                            f"Response stream was cut off after {latency_s:.0f}s "
+                            f"({len(response_text)} chars received) without [DONE] or a finish_reason"
+                            + (f": {stream_error}" if stream_error else "")
+                            + ". Likely an upstream/gateway request timeout."
+                        )
+                        ctx.log(f"[{problem.id}] Attempt {attempt_num}: {reason}", level="warning")
+                        extracted_code = None
+                        n_tests = len(problem.tests)
+                        n_samples = len(problem.sample_case_idx)
+                        judge_run = JudgeRunResult(
+                            status=STATUS_TRUNCATED,
+                            passed=False,
+                            correct=0,
+                            compilation_failed=False,
+                            compile_error_output=reason,
+                            total_cases=n_tests,
+                            sample_total=n_samples,
+                            hidden_total=max(0, n_tests - n_samples),
+                        )
+                    else:
+                        extracted_code = extract_java_code(response_text)
+                        judge_run = judge_java_solution(
+                            client=piston_client,
+                            code=extracted_code,
+                            harness=problem.harness_java,
+                            test_cases=problem.tests,
+                            sample_case_idx=problem.sample_case_idx,
+                            timeout_ms=eff_timeout_ms,
+                            cpu_limit_ms=eff_cpu_limit_ms,
+                            stop_on_first_failure=False,
+                            extract_from_markdown=False,
+                        )
                     final_code = extracted_code or ""
                     final_judge_run = judge_run
 
@@ -712,7 +744,13 @@ class LLMCodingTester(TesterPlugin):
                         "compile_error_output": judge_run.compile_error_output,
                         "run_time_ms": judge_run.run_time_ms,
                         "max_cpu_time_ms": judge_run.max_cpu_time_ms,
+                        "finish_reason": finish_reason,
+                        "truncated": truncated,
                     }
+
+                    if truncated:
+                        attempts.append(attempt_entry)
+                        break
 
                     if judge_run.passed:
                         solved = True
@@ -743,6 +781,9 @@ class LLMCodingTester(TesterPlugin):
                 tools_enabled=tools_enabled,
             )
             c_detail["attempts"] = attempts
+            # Keep whatever the model produced so the failure is debuggable (an
+            # exception mid-judge used to drop the response and transcript).
+            c_detail["transcript"] = messages
             c_detail["tool_events"] = tool_events
             c_detail["tool_call_count"] = tool_call_count
             c_detail["prompt_tokens"] = prompt_tokens
@@ -770,7 +811,6 @@ class LLMCodingTester(TesterPlugin):
                 sample_total=len(problem.sample_case_idx),
                 hidden_passed=0,
                 hidden_total=max(0, len(problem.tests) - len(problem.sample_case_idx)),
-                cases=[],
             )
 
         # Optional LLM Judge evaluation (Section 6)

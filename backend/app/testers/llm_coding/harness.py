@@ -26,6 +26,22 @@ MAIN_JAVA_LINE_RE = re.compile(r"Main\.java:(\d+)")
 FENCED_BLOCK_RE = re.compile(r"```([a-zA-Z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
 CLASS_SOLUTION_RE = re.compile(r"\bclass\s+Solution\b")
 
+# Unfenced fallback: a line that *declares* ``class Solution`` (not prose that
+# merely mentions it), and other top-level type declarations that may follow it.
+_ANNOTATIONS = r"(?:@\w+(?:\([^)]*\))?\s+)*"
+SOLUTION_DECL_LINE_RE = re.compile(
+    r"^\s*" + _ANNOTATIONS + r"(?:(?:public|final|abstract|static)\s+)*class\s+Solution\b"
+    r"(?:\s+(?:extends|implements)\s+[\w<>,.\s]+?)?\s*(?:\{.*)?$"
+)
+TOP_LEVEL_DECL_LINE_RE = re.compile(
+    r"^\s*" + _ANNOTATIONS
+    + r"(?:(?:public|private|protected|final|abstract|static|sealed|non-sealed)\s+)*"
+    + r"(?:class|interface|enum|record)\s+\w+"
+)
+# A real solution is a few KB. Anything far larger from the unfenced path is
+# reasoning prose, and would also exceed Piston's 100 KiB request-body limit.
+MAX_UNFENCED_CODE_CHARS = 64_000
+
 
 @dataclass(frozen=True)
 class MergedJavaSource:
@@ -150,24 +166,103 @@ def extract_java_code(response_text: str | None) -> str | None:
 
         return None
 
-    # No fenced block: check if raw response directly provides `class Solution`.
-    if CLASS_SOLUTION_RE.search(text) and "{" in text and "}" in text:
-        lines = text.splitlines()
-        start_idx = 0
-        for idx, line in enumerate(lines):
-            if (
-                IMPORT_LINE_RE.match(line)
-                or PACKAGE_LINE_RE.match(line)
-                or CLASS_SOLUTION_RE.search(line)
-            ):
-                start_idx = idx
-                break
-        # Trim trailing prose after the last closing brace
-        end_idx = len(lines) - 1
-        while end_idx > start_idx and "}" not in lines[end_idx]:
-            end_idx -= 1
-        candidate = "\n".join(lines[start_idx : end_idx + 1]).strip()
-        if candidate:
-            return candidate
+    # No fenced block: accept raw text only if it holds a real, brace-balanced
+    # ``class Solution`` declaration (see ``_extract_unfenced_solution``).
+    return _extract_unfenced_solution(text)
 
+
+def _block_end(lines: list[str], start: int) -> int | None:
+    """Index of the line closing the brace block opened at/after ``lines[start]``.
+
+    Skips braces inside ``//`` and ``/* */`` comments and string/char literals.
+    Returns ``None`` if the block never opens or never closes (e.g. a response cut
+    off mid-code, or prose that only looks like a declaration).
+    """
+    depth = 0
+    opened = False
+    in_block_comment = False
+    for i in range(start, len(lines)):
+        line = lines[i]
+        j = 0
+        quote: str | None = None
+        while j < len(line):
+            ch = line[j]
+            nxt = line[j + 1] if j + 1 < len(line) else ""
+            if in_block_comment:
+                if ch == "*" and nxt == "/":
+                    in_block_comment = False
+                    j += 1
+            elif quote:
+                if ch == "\\":
+                    j += 1
+                elif ch == quote:
+                    quote = None
+            elif ch == "/" and nxt == "/":
+                break
+            elif ch == "/" and nxt == "*":
+                in_block_comment = True
+                j += 1
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "{":
+                depth += 1
+                opened = True
+            elif ch == "}":
+                depth -= 1
+                if opened and depth == 0:
+                    return i
+                if depth < 0:
+                    return None
+            j += 1
+        if not opened and i > start + 2:
+            return None
     return None
+
+
+def _is_preamble_line(line: str) -> bool:
+    stripped = line.strip()
+    return (
+        not stripped
+        or bool(IMPORT_LINE_RE.match(line))
+        or bool(PACKAGE_LINE_RE.match(line))
+        or stripped.startswith("//")
+        or stripped.startswith("@")
+    )
+
+
+def _extract_unfenced_solution(text: str) -> str | None:
+    """Extract an unfenced ``class Solution`` (plus imports and trailing helper types).
+
+    Only a line that actually declares ``class Solution`` starts a candidate, and the
+    candidate ends at its matching closing brace (extended over any top-level helper
+    types right after it). The last balanced candidate wins, mirroring the fenced
+    path. Truncated or oversized candidates are rejected, so unfinished reasoning
+    that merely mentions ``class Solution`` yields ``None`` instead of a huge blob.
+    """
+    lines = text.splitlines()
+    best: str | None = None
+    for decl_idx, line in enumerate(lines):
+        if not SOLUTION_DECL_LINE_RE.match(line):
+            continue
+        end = _block_end(lines, decl_idx)
+        if end is None:
+            continue
+        start = decl_idx
+        while start > 0 and _is_preamble_line(lines[start - 1]):
+            start -= 1
+        nxt = end + 1
+        while nxt < len(lines):
+            if not lines[nxt].strip():
+                nxt += 1
+                continue
+            if not TOP_LEVEL_DECL_LINE_RE.match(lines[nxt]):
+                break
+            helper_end = _block_end(lines, nxt)
+            if helper_end is None:
+                break
+            end = helper_end
+            nxt = helper_end + 1
+        candidate = "\n".join(lines[start : end + 1]).strip()
+        if candidate and len(candidate) <= MAX_UNFENCED_CODE_CHARS:
+            best = candidate
+    return best

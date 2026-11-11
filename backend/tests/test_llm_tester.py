@@ -278,6 +278,45 @@ def test_chat_client_streaming_sse_and_think_stripping():
     assert res.chunk_count == 3
 
 
+def _stream_with(lines: list[str]):
+    payload = "".join(lines).encode("utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, content=payload)
+
+    client = OpenAIChatClient(base_url="http://localhost:8000/v1", transport=httpx.MockTransport(handler))
+    return client.stream_chat(messages=[{"role": "user", "content": "hi"}], model="m")
+
+
+def test_chat_client_flags_truncated_streams():
+    piece = 'data: {"choices": [{"index": 0, "delta": {"reasoning_content": "Thinking about class Solution"}}]}\n\n'
+
+    # Stream closed mid-generation: no [DONE], no finish_reason (run 92: gateway cut at 600s)
+    res = _stream_with([piece, piece])
+    assert res.truncated is True
+    assert res.finish_reason is None
+
+    # In-band error event from the gateway counts as truncated too
+    res = _stream_with([piece, 'data: {"error": {"message": "upstream terminated"}}\n\n'])
+    assert res.truncated is True
+    assert res.stream_error == "upstream terminated"
+
+    # finish_reason without [DONE] is a complete response
+    stop = 'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}\n\n'
+    res = _stream_with([piece, stop])
+    assert res.truncated is False
+    assert res.finish_reason == "stop"
+
+    # max_tokens hit is a complete (if cut short by the model budget) response, not truncation
+    length = 'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]}\n\n'
+    res = _stream_with([piece, length, "data: [DONE]\n\n"])
+    assert res.truncated is False
+    assert res.finish_reason == "length"
+
+    # [DONE] alone is complete
+    assert _stream_with([piece, "data: [DONE]\n\n"]).truncated is False
+
+
 def test_judge_helpers_and_score_coercion():
     """Verify coerce_judge_score and parse_judge_response handle edge cases safely."""
     assert coerce_judge_score(5) == 5

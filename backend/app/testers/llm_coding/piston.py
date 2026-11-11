@@ -47,10 +47,30 @@ STATUS_RUNTIME_ERROR = "Runtime Error"
 STATUS_TLE = "Time Limit Exceeded"
 STATUS_PERFORMANCE_LIMIT = "Performance Limit Exceeded"
 STATUS_NO_CODE = "no_code_extracted"
+# The model's response was cut off mid-stream (no ``[DONE]`` / ``finish_reason``),
+# typically by an upstream or gateway request timeout. Not graded: it is not an answer.
+STATUS_TRUNCATED = "Truncated Response"
+# Merged source + stdin would exceed Piston's request-body limit (express ``body-parser``
+# default of 100 KiB), so it was never sent. Almost always prose mis-extracted as code.
+STATUS_CODE_TOO_LARGE = "Code Too Large"
+
+
+# Piston parses request bodies with express ``body_parser.json()`` and its default
+# ``limit: "100kb"`` (102400 bytes); bigger bodies fail with HTTP 400 PayloadTooLargeError.
+PISTON_MAX_REQUEST_BODY_BYTES = 100 * 1024
 
 
 class RunnerConnectionError(RuntimeError):
     """Raised when the Piston sidecar cannot be reached or returns an HTTP error."""
+
+
+class PistonPayloadTooLargeError(RunnerConnectionError):
+    """Raised before sending an execute request whose body exceeds Piston's limit."""
+
+
+def piston_request_body_bytes(payload: dict[str, Any]) -> int:
+    """Size of ``payload`` as sent on the wire (``json.dumps`` default separators)."""
+    return len(json.dumps(payload).encode("utf-8"))
 
 
 @dataclass
@@ -416,6 +436,13 @@ class PistonClient:
             "stdin": stdin or "",
             "run_timeout": clamp_piston_timeout_ms(timeout_ms),
         }
+        body_bytes = piston_request_body_bytes(payload)
+        if body_bytes > PISTON_MAX_REQUEST_BODY_BYTES:
+            raise PistonPayloadTooLargeError(
+                f"Piston execute request is {body_bytes} bytes (source {len(main_java_source)} chars, "
+                f"stdin {len(stdin or '')} chars); Piston rejects bodies over "
+                f"{PISTON_MAX_REQUEST_BODY_BYTES} bytes"
+            )
         if self._execute_hook is not None:
             return self._execute_hook(payload)
         res = self._request_json("POST", "/api/v2/execute", payload)
@@ -488,6 +515,46 @@ def judge_java_solution(
         )
 
     merged = merge_java_solution_with_harness(candidate_code, harness)
+
+    # Check the largest request up front: Piston would reject it (HTTP 400
+    # PayloadTooLargeError), and failing as a verdict keeps the attempt and response
+    # instead of aborting the whole case with an exception.
+    largest_body = max(
+        (
+            piston_request_body_bytes(
+                {
+                    "language": "java",
+                    "version": getattr(client, "java_version", DEFAULT_JAVA_VERSION),
+                    "files": [{"name": "Main.java", "content": merged.code}],
+                    "stdin": tc.input or "",
+                    "run_timeout": clamp_piston_timeout_ms(timeout_ms),
+                }
+            )
+            for tc in normalized_cases
+        ),
+        default=0,
+    )
+    if largest_body > PISTON_MAX_REQUEST_BODY_BYTES:
+        return JudgeRunResult(
+            status=STATUS_CODE_TOO_LARGE,
+            passed=False,
+            correct=0,
+            compilation_failed=False,
+            compile_error_output=(
+                f"Extracted code is {len(candidate_code)} chars; the Piston request would be "
+                f"{largest_body} bytes, over its {PISTON_MAX_REQUEST_BODY_BYTES}-byte limit. "
+                "Not executed."
+            ),
+            test_results=[],
+            total_cases=total_cases,
+            passed_cases=0,
+            test_case_pass_rate=0.0,
+            sample_total=sample_total,
+            sample_passed=0,
+            hidden_total=hidden_total,
+            hidden_passed=0,
+        )
+
     test_results: list[TestCaseResult] = []
     compilation_failed = False
     compile_error_output = ""

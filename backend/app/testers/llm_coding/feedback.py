@@ -10,6 +10,7 @@ from __future__ import annotations
 from backend.app.testers.llm_coding.piston import (
     STATUS_COMPILE_ERROR,
     STATUS_NO_CODE,
+    STATUS_CODE_TOO_LARGE,
     JudgeRunResult,
     TestCaseResult,
 )
@@ -58,6 +59,14 @@ def build_attempt_feedback(
             f"{header}\n\n"
             "No valid Java code block containing `class Solution` could be extracted from your response. "
             "Please return your complete solution inside a single fenced ```java block containing `class Solution` (no `Main`)."
+        )
+
+    if judge_result.status == STATUS_CODE_TOO_LARGE:
+        return (
+            f"{header}\n\n"
+            "The code extracted from your response is far too large to run, so it was not executed. "
+            "Please return only your complete solution inside a single fenced ```java block containing "
+            "`class Solution` (no `Main`), with no reasoning inside the block."
         )
 
     sample_failures = [

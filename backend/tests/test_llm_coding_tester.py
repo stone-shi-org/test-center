@@ -42,12 +42,15 @@ from backend.app.testers.llm_coding.judge import (
     render_coding_judge_prompt,
 )
 from backend.app.testers.llm_coding.piston import (
+    PISTON_MAX_REQUEST_BODY_BYTES,
     STATUS_ACCEPTED,
+    STATUS_CODE_TOO_LARGE,
     STATUS_COMPILE_ERROR,
     STATUS_NO_CODE,
     STATUS_PERFORMANCE_LIMIT,
     STATUS_RUNTIME_ERROR,
     STATUS_TLE,
+    STATUS_TRUNCATED,
     STATUS_WRONG_ANSWER,
     PistonClient,
     clamp_piston_timeout_ms,
@@ -164,6 +167,10 @@ class FakeStreamResp:
     completion_tokens: int = 80
     tokens_per_sec: float = 75.0
     ttft_ms: float = 45.0
+    latency_ms: float = 600_000.0
+    finish_reason: str | None = "stop"
+    truncated: bool = False
+    stream_error: str | None = None
 
 
 class FakeChatClient:
@@ -340,6 +347,64 @@ def test_extract_java_code_variants():
     assert extract_java_code("I cannot solve this problem right now.") is None
     assert extract_java_code("") is None
     assert extract_java_code(None) is None
+
+
+def test_extract_java_code_unfenced_rejects_reasoning_prose():
+    # Run 92 / problem 5489: a response cut off mid-reasoning that mentions
+    # `class Solution` in prose used to be returned (from that line to the last
+    # `}`) as ~130 KB of "code", which then broke Piston's 100 KiB body limit.
+    prose = (
+        "We need answer with class Solution { ... } containing method solve.\n"
+        + "Consider map.get(k) { maybe } and edge cases. Hmm.\n" * 4000
+        + "Potential issue: if dist == -1 then {skip}. Good. Now, possible"
+    )
+    assert extract_java_code(prose) is None
+
+    # Unfenced but cut off mid-class (unbalanced braces) -> None
+    assert extract_java_code("import java.util.*;\nclass Solution {\n    int f() {\n        return 1;\n") is None
+
+    # Unfenced code after prose, with a trailing helper type and prose after it
+    resp = (
+        "Final code below.\n\n"
+        "import java.util.*;\n"
+        "public class Solution {\n"
+        "    String s = \"}{\"; // brace in string } and comment\n"
+        "    int f() { return new Helper().v; }\n"
+        "}\n\n"
+        "class Helper {\n    int v = 3;\n}\n"
+        "That's it, the complexity is O(1) {trivially}.\n"
+    )
+    code = extract_java_code(resp)
+    assert code is not None
+    assert code.startswith("import java.util.*;")
+    assert "class Helper" in code
+    assert code.endswith("}")
+    assert "complexity" not in code and "Final code" not in code
+
+    # Oversized unfenced class -> None
+    huge = "class Solution {\n" + "    int x;\n" * 20000 + "}\n"
+    assert extract_java_code(huge) is None
+
+
+def test_judge_rejects_payload_over_piston_body_limit():
+    calls: list[dict[str, Any]] = []
+    client = PistonClient(execute_hook=lambda p: calls.append(p) or {"run": {"stdout": "", "code": 0}})
+    big = "class Solution {\n" + "    // filler\n" * 10000 + "    int add(int a, int b) { return a + b; }\n}\n"
+    assert len(big) > PISTON_MAX_REQUEST_BODY_BYTES
+    res = judge_java_solution(
+        client=client,
+        code=big,
+        harness=SAMPLE_HARNESS_JAVA,
+        test_cases=[{"input": "2 3\n", "expected_output": "5\n"}],
+        sample_case_idx=[0],
+    )
+    assert res.status == STATUS_CODE_TOO_LARGE
+    assert res.passed is False and res.total_cases == 1
+    assert "limit" in res.compile_error_output
+    assert calls == []  # never sent to Piston
+
+    fb = build_attempt_feedback(judge_result=res, feedback_level="first_failure", attempt_number=1, max_attempts=2)
+    assert "too large" in fb
 
 
 # ==============================================================================
@@ -1013,6 +1078,51 @@ def test_tester_concurrency_execution(tmp_path):
     assert len(res.cases) == 4
     assert [c.case_id for c in res.cases] == ["prob-1", "prob-2", "prob-3", "prob-4"]
     assert max_concurrent >= 2, f"Expected concurrent execution, but max concurrency was {max_concurrent}"
+
+
+def test_tester_marks_truncated_stream_and_skips_grading(tmp_path):
+    """A response cut off mid-stream (gateway timeout) is not graded or retried."""
+    tester = get_tester("llm_coding")
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+
+    class TruncatingLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            self.calls += 1
+            return FakeStreamResp(
+                content="We need class Solution { int add(int a, int b) { return a + b; } } but first",
+                finish_reason=None,
+                truncated=True,
+            )
+
+    piston_calls: list[dict[str, Any]] = []
+    llm = TruncatingLLM()
+    ctx = TestContext(run_id=204, artifacts_dir=tmp_path / "artifacts", emit_stdout=False)
+    res = tester.run(
+        config={
+            "dataset_dir": str(ds_dir),
+            "model": "test-coder-7b",
+            "max_attempts": 3,
+            "_chat_client": llm,
+            "_piston_execute_hook": lambda p: piston_calls.append(p) or {"run": {"stdout": "", "code": 0}},
+        },
+        target={"name": "local-llm", "kind": "llm", "base_url": "http://fake-llm:8000/v1"},
+        ctx=ctx,
+    )
+
+    case = res.cases[0]
+    assert case.status == "fail"
+    assert case.detail["verdict"] == STATUS_TRUNCATED
+    assert llm.calls == 1  # no retry against the same limit
+    assert piston_calls == []
+    assert len(case.detail["attempts"]) == 1
+    attempt = case.detail["attempts"][0]
+    assert attempt["truncated"] is True
+    assert attempt["code"] == ""
+    assert "cut off after 600s" in attempt["compile_error_output"]
+    assert attempt["response"].startswith("We need class Solution")
 
 
 def test_tester_survives_single_case_error_and_continues_execution(tmp_path):

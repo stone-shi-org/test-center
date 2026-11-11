@@ -44,6 +44,14 @@ class ChatStreamResult:
     completion_tokens: int
     total_tokens: int
     chunk_count: int
+    # ``finish_reason`` of the last choice seen (``stop``, ``length``, ...), if any.
+    finish_reason: str | None = None
+    # True when an SSE stream ended without ``[DONE]`` or any ``finish_reason``:
+    # the upstream (or a proxy in between, e.g. a gateway request timeout) cut the
+    # response off, so ``content`` is partial and must not be graded as an answer.
+    truncated: bool = False
+    # Error payload sent in-band on the stream (``data: {"error": ...}``), if any.
+    stream_error: str | None = None
 
 
 class OpenAIChatClient:
@@ -143,6 +151,9 @@ class OpenAIChatClient:
         usage_raw: dict[str, Any] | None = None
         chunk_count = 0
         saw_sse = False
+        saw_done = False
+        finish_reason: str | None = None
+        stream_error: str | None = None
         fallback_lines: list[str] = []
 
         try:
@@ -168,6 +179,7 @@ class OpenAIChatClient:
                             saw_sse = True
                             data_str = line[5:].strip()
                             if data_str == "[DONE]":
+                                saw_done = True
                                 break
                             try:
                                 chunk = json.loads(data_str)
@@ -180,9 +192,17 @@ class OpenAIChatClient:
                             if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
                                 usage_raw = chunk["usage"]
 
+                            if chunk.get("error"):
+                                err = chunk["error"]
+                                if isinstance(err, dict):
+                                    err = err.get("message") or json.dumps(err)
+                                stream_error = str(err)
+
                             choices = chunk.get("choices")
                             if isinstance(choices, list) and len(choices) > 0:
                                 choice = choices[0] if isinstance(choices[0], dict) else {}
+                                if choice.get("finish_reason"):
+                                    finish_reason = str(choice["finish_reason"])
                                 delta = choice.get("delta") or choice.get("message") or {}
                                 if not isinstance(delta, dict):
                                     delta = {}
@@ -222,6 +242,8 @@ class OpenAIChatClient:
                 choices = body.get("choices")
                 if isinstance(choices, list) and len(choices) > 0:
                     msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+                    if isinstance(choices[0], dict) and choices[0].get("finish_reason"):
+                        finish_reason = str(choices[0]["finish_reason"])
                     c_text = msg.get("content") or ""
                     r_text = msg.get("reasoning") or msg.get("reasoning_content") or ""
                     if c_text:
@@ -234,6 +256,7 @@ class OpenAIChatClient:
 
         raw_content = "".join(content_parts)
         raw_reasoning = "".join(reasoning_parts)
+        truncated = bool(stream_error) or (saw_sse and not saw_done and finish_reason is None)
 
         if raw_content:
             cleaned_content = strip_think_blocks(raw_content)
@@ -287,6 +310,9 @@ class OpenAIChatClient:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             chunk_count=chunk_count,
+            finish_reason=finish_reason,
+            truncated=truncated,
+            stream_error=stream_error,
         )
 
     def chat(
