@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -26,6 +27,13 @@ from backend.app.testers.base import (
     TestContext,
 )
 from backend.app.testers.llm.client import ChatClientError, OpenAIChatClient
+from backend.app.testers.llm_coding.cache import (
+    CACHE_SCHEMA_VERSION,
+    DEFAULT_CACHE_FILENAME,
+    CodingResultCache,
+    is_cacheable,
+    sha256_text,
+)
 from backend.app.testers.llm_coding.dataset import (
     LoadedDataset,
     ProblemSpec,
@@ -58,7 +66,7 @@ from backend.app.testers.llm_coding.scoring import (
     compute_case_score,
     parse_attempt_factors,
 )
-from backend.app.testers.llm_coding.tools import run_agent_tool_loop
+from backend.app.testers.llm_coding.tools import CODING_TOOLS_SCHEMA, run_agent_tool_loop
 
 
 class LLMCodingTester(TesterPlugin):
@@ -262,6 +270,27 @@ class LLMCodingTester(TesterPlugin):
                 "description": "Per-HTTP request timeout in seconds per LLM API turn (recommend 300s-600s for local reasoning models with effort=high)",
                 "x-advanced": True,
             },
+            # Advanced: SQLite result cache (same pattern as live_stt)
+            "use_cache": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Reuse cached per-problem results when the problem, model, endpoint, and "
+                    "generation/judge/scoring settings are unchanged (turn off to sample fresh)"
+                ),
+                "x-advanced": True,
+            },
+            "skip_cache": {
+                "type": "boolean",
+                "default": False,
+                "description": "Bypass reading from the result cache while still writing fresh results",
+                "x-advanced": True,
+            },
+            "cache_path": {
+                "type": "string",
+                "description": "Optional explicit path to the SQLite llm_coding result cache file",
+                "x-advanced": True,
+            },
             "run_timeout": {
                 "type": "number",
                 "minimum": 60.0,
@@ -282,7 +311,7 @@ class LLMCodingTester(TesterPlugin):
                     continue
                 if v is None:
                     continue
-                if k in ("effort", "runner_url", "dataset_dir", "judge_model") and isinstance(v, str) and not v.strip():
+                if k in ("effort", "runner_url", "dataset_dir", "judge_model", "cache_path") and isinstance(v, str) and not v.strip():
                     continue
                 if k in ("ids", "topics", "difficulty", "suites") and isinstance(v, str):
                     cleaned[k] = [item.strip() for item in v.split(",") if item.strip()]
@@ -815,6 +844,7 @@ class LLMCodingTester(TesterPlugin):
 
         # Optional LLM Judge evaluation (Section 6)
         judge_result: CodingJudgeResult | None = None
+        judge_error: str | None = None
         should_run_judge = (
             judge_client is not None
             and judge_model is not None
@@ -838,6 +868,7 @@ class LLMCodingTester(TesterPlugin):
             except Exception as j_exc:
                 ctx.log(f"[{problem.id}] LLM judge evaluation failed: {j_exc}", level="warning")
                 judge_result = None
+                judge_error = f"{type(j_exc).__name__}: {j_exc}"
 
         if tools_enabled:
             case_tps = tool_outcome.mean_tps if "tool_outcome" in locals() else 0.0
@@ -916,6 +947,7 @@ class LLMCodingTester(TesterPlugin):
             "attempts": attempts,
             "transcript": messages,
             "judge": judge_result.to_dict() if judge_result is not None else None,
+            "judge_error": judge_error,
             "tools_enabled": tools_enabled,
             "tool_call_count": tool_call_count,
             "tool_events": tool_events,
@@ -944,6 +976,50 @@ class LLMCodingTester(TesterPlugin):
         }
 
         return case_metrics, case_detail, agg_record
+
+    @staticmethod
+    def _build_cache_key_base(
+        config: dict[str, Any],
+        model: str,
+        endpoint_url: str,
+        judge_model: str | None,
+        judge_info: dict[str, Any],
+        dataset: LoadedDataset,
+    ) -> dict[str, Any]:
+        """Run-level part of the per-problem cache key: everything that can change a problem's result.
+
+        ``runner_url`` is deliberately excluded (any Piston sidecar with the same Java runtime grades
+        identically); grading-logic changes are covered by bumping ``CACHE_SCHEMA_VERSION``.
+        """
+        tools_enabled = bool(config.get("tools_enabled", False))
+        judge_enabled = bool(judge_info.get("enabled"))
+        key: dict[str, Any] = {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "model": model,
+            "endpoint_url": endpoint_url,
+            "effort": config.get("effort"),
+            "max_tokens": int(config.get("max_tokens", 4096)),
+            "max_attempts": max(1, int(config.get("max_attempts", 1))),
+            "feedback_level": str(config.get("feedback_level", "first_failure")),
+            "tools_enabled": tools_enabled,
+            "system_prompt_sha256": sha256_text(SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD),
+            "per_case_timeout_ms": config.get("per_case_timeout_ms"),
+            "cpu_limit_ms": config.get("cpu_limit_ms"),
+            "judge_enabled": judge_enabled,
+            "attempt_factors": parse_attempt_factors(config.get("attempt_factors", DEFAULT_ATTEMPT_FACTORS)),
+            "weight_correctness": float(config.get("weight_correctness", DEFAULT_WEIGHT_CORRECTNESS)),
+            "weight_judge": float(config.get("weight_judge", DEFAULT_WEIGHT_JUDGE)),
+        }
+        if tools_enabled:
+            key["max_tool_calls"] = int(config.get("max_tool_calls", 12))
+            key["max_total_tokens"] = int(config.get("max_total_tokens", 32768))
+            key["tools_schema_sha256"] = sha256_text(json.dumps(CODING_TOOLS_SCHEMA, sort_keys=True))
+        if judge_enabled:
+            key["judge_model"] = judge_model
+            key["judge_endpoint_url"] = str(judge_info.get("endpoint_url") or "")
+            key["judge_prompt_sha256"] = sha256_text(dataset.judge_prompt_md or "")
+            key["judge_failed_solutions"] = bool(config.get("judge_failed_solutions", False))
+        return key
 
     def _update_result_metrics(
         self,
@@ -1021,6 +1097,73 @@ class LLMCodingTester(TesterPlugin):
             f"dataset_version={dataset.manifest.version} (sha256={dataset.manifest.manifest_sha256[:12]})"
         )
 
+        endpoint_url = getattr(chat_client, "endpoint_url", None) or str(target.get("base_url") or "")
+        default_cache_path = ctx.artifacts_dir.parent / DEFAULT_CACHE_FILENAME
+        cache_path = Path(str(config["cache_path"])) if config.get("cache_path") else default_cache_path
+        try:
+            result_cache = CodingResultCache(
+                cache_path=cache_path,
+                enabled=bool(config.get("use_cache", True)),
+                skip_read=bool(config.get("skip_cache", False)),
+            )
+        except Exception as exc:  # cache is best-effort; never block a run on it
+            ctx.log(f"Result cache unavailable at {cache_path}: {exc}; continuing without cache", level="warning")
+            result_cache = CodingResultCache(cache_path=cache_path, enabled=False)
+        cache_key_base = self._build_cache_key_base(
+            config=config,
+            model=model,
+            endpoint_url=endpoint_url,
+            judge_model=judge_model,
+            judge_info=judge_info,
+            dataset=dataset,
+        )
+        if result_cache.enabled:
+            ctx.log(
+                f"Result cache: {cache_path} ({'write-only, skip_cache=true' if result_cache.skip_read else 'read/write'})"
+            )
+
+        def _evaluate(prob: ProblemSpec) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+            key = dict(cache_key_base)
+            key["problem_id"] = prob.id
+            key["problem_sha256"] = prob.sha256
+            key["user_prompt_sha256"] = sha256_text(build_problem_prompt(prob, tools_enabled=tools_enabled))
+
+            cached = result_cache.get(key)
+            if cached is not None:
+                try:
+                    c_metrics = cached["case_metrics"]
+                    c_detail = cached["case_detail"]
+                    agg_rec = cached["agg_record"]
+                except (KeyError, TypeError):
+                    cached = None
+                else:
+                    c_detail["cache_hit"] = True
+                    c_detail["cached_at"] = cached.get("cached_at")
+                    # Report against the dataset actually loaded for this run.
+                    c_detail["dataset_version"] = dataset.manifest.version
+                    c_detail["manifest_sha256"] = dataset.manifest.manifest_sha256
+                    return c_metrics, c_detail, agg_rec
+
+            c_metrics, c_detail, agg_rec = self._evaluate_single_problem(
+                problem=prob,
+                dataset=dataset,
+                chat_client=chat_client,
+                model=model,
+                piston_client=piston_client,
+                judge_client=judge_client,
+                judge_model=judge_model,
+                judge_info=judge_info,
+                config=config,
+                ctx=ctx,
+            )
+            c_detail["cache_hit"] = False
+            if result_cache.enabled and is_cacheable(c_detail):
+                result_cache.put(
+                    key,
+                    {"case_metrics": c_metrics, "case_detail": c_detail, "agg_record": agg_rec},
+                )
+            return c_metrics, c_detail, agg_rec
+
         result = TesterResult(status="pass")
         completed_records: list[dict[str, Any]] = []
         lock = threading.Lock()
@@ -1053,6 +1196,7 @@ class LLMCodingTester(TesterPlugin):
                     f"[{done_count}/{n_problems}] {prob.id} ({prob.difficulty}) -> {c_detail['verdict']} "
                     f"(attempts={c_detail['attempts_used']}, tests={c_detail['passed_cases']}/{c_detail['total_cases']}, "
                     f"score={c_detail['case_score_100']:.1f})"
+                    + (" [cached]" if c_detail.get("cache_hit") else "")
                 )
                 ctx.progress(
                     done_count,
@@ -1063,37 +1207,11 @@ class LLMCodingTester(TesterPlugin):
         if concurrency == 1:
             for prob in problems:
                 ctx.check_cancelled()
-                c_metrics, c_detail, agg_rec = self._evaluate_single_problem(
-                    problem=prob,
-                    dataset=dataset,
-                    chat_client=chat_client,
-                    model=model,
-                    piston_client=piston_client,
-                    judge_client=judge_client,
-                    judge_model=judge_model,
-                    judge_info=judge_info,
-                    config=config,
-                    ctx=ctx,
-                )
+                c_metrics, c_detail, agg_rec = _evaluate(prob)
                 _record_problem_completion(prob, c_metrics, c_detail, agg_rec)
         else:
             pool = ThreadPoolExecutor(max_workers=concurrency)
-            future_to_prob = {
-                pool.submit(
-                    self._evaluate_single_problem,
-                    prob,
-                    dataset,
-                    chat_client,
-                    model,
-                    piston_client,
-                    judge_client,
-                    judge_model,
-                    judge_info,
-                    config,
-                    ctx,
-                ): prob
-                for prob in problems
-            }
+            future_to_prob = {pool.submit(_evaluate, prob): prob for prob in problems}
             try:
                 for fut in as_completed(future_to_prob):
                     if ctx.is_cancelled:
@@ -1149,7 +1267,11 @@ class LLMCodingTester(TesterPlugin):
             f"({solved_count}/{n_problems} solved), test_cases={tc_val:.1f}%"
         )
 
-        endpoint_url = getattr(chat_client, "endpoint_url", str(target.get("base_url") or ""))
+        if result_cache.enabled:
+            ctx.log(
+                f"Result cache: hits={result_cache.hits}, misses={result_cache.misses}, "
+                f"writes={result_cache.writes}"
+            )
         report_text = format_llm_coding_report(
             model=model,
             endpoint_url=endpoint_url,
@@ -1184,6 +1306,7 @@ class LLMCodingTester(TesterPlugin):
                 k: v for k, v in config.items() if not k.startswith("_")
             },
             "judge": judge_info,
+            "cache": result_cache.stats(),
             "status": result.status,
             "summary": result.summary,
             "metrics": result.metrics,

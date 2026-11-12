@@ -1369,3 +1369,133 @@ def test_exported_iqb_java_dataset_and_sidecar_piston():
             f"status={res.status}, passed={res.passed_cases}/{res.total_cases}"
         )
         assert res.passed_cases == res.total_cases
+
+
+# ---------------------------------------------------------------------------
+# SQLite result cache
+# ---------------------------------------------------------------------------
+
+
+def _piston_all_pass_hook(payload: dict[str, Any]) -> dict[str, Any]:
+    stdin = payload.get("stdin", "")
+    if "2 3" in stdin:
+        return {"run": {"stdout": "5\n", "stderr": "", "code": 0, "cpu_time": 50}}
+    if "10 20" in stdin:
+        return {"run": {"stdout": "30\n", "stderr": "", "code": 0, "cpu_time": 50}}
+    if "SECRET_IN_1" in stdin:
+        return {"run": {"stdout": "SECRET_OUT_101\n", "stderr": "", "code": 0, "cpu_time": 50}}
+    return {"run": {"stdout": "SECRET_OUT_202\n", "stderr": "", "code": 0, "cpu_time": 50}}
+
+
+def _cached_run(tmp_path, ds_dir, llm, run_id, cache_path, **extra):
+    piston_calls: list[dict[str, Any]] = []
+
+    def _hook(payload: dict[str, Any]) -> dict[str, Any]:
+        piston_calls.append(payload)
+        return _piston_all_pass_hook(payload)
+
+    config = {
+        "dataset_dir": str(ds_dir),
+        "model": "test-coder-7b",
+        "_chat_client": llm,
+        "_piston_execute_hook": _hook,
+        "cache_path": str(cache_path),
+    }
+    config.update(extra)
+    res = get_tester("llm_coding").run(
+        config=config,
+        target={"name": "local-llm", "kind": "llm", "base_url": "http://fake-llm:8000/v1"},
+        ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"art-{run_id}", emit_stdout=False),
+    )
+    payload = json.loads((tmp_path / f"art-{run_id}" / "llm_coding_results.json").read_text())
+    return res, piston_calls, payload["cache"]
+
+
+def test_result_cache_reuses_unchanged_problems_and_respects_switches(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=2)
+    cache_path = tmp_path / "cache.sqlite3"
+
+    llm1 = FakeChatClient()
+    res1, piston1, stats1 = _cached_run(tmp_path, ds_dir, llm1, 301, cache_path)
+    assert len(llm1.stream_calls) == 2 and piston1
+    assert stats1["hits"] == 0 and stats1["writes"] == 2
+    assert all(c.detail["cache_hit"] is False for c in res1.cases)
+
+    # Same config again: no LLM or Piston calls, identical scores.
+    llm2 = FakeChatClient()
+    res2, piston2, stats2 = _cached_run(tmp_path, ds_dir, llm2, 302, cache_path)
+    assert llm2.stream_calls == [] and piston2 == []
+    assert stats2["hits"] == 2 and stats2["writes"] == 0
+    assert all(c.detail["cache_hit"] is True for c in res2.cases)
+    assert [c.case_id for c in res2.cases] == ["prob-1", "prob-2"]
+    assert res2.metrics["score"]["value"] == res1.metrics["score"]["value"] == 100.0
+
+    # A different model, or changed generation settings, is a different result.
+    llm3 = FakeChatClient()
+    _, _, stats3 = _cached_run(tmp_path, ds_dir, llm3, 303, cache_path, model="other-model")
+    assert len(llm3.stream_calls) == 2 and stats3["hits"] == 0
+    llm3b = FakeChatClient()
+    _, _, stats3b = _cached_run(tmp_path, ds_dir, llm3b, 307, cache_path, max_tokens=1024)
+    assert len(llm3b.stream_calls) == 2 and stats3b["hits"] == 0
+
+    # use_cache=false: fresh sample, nothing read or written.
+    llm4 = FakeChatClient()
+    _, _, stats4 = _cached_run(tmp_path, ds_dir, llm4, 304, cache_path, use_cache=False)
+    assert len(llm4.stream_calls) == 2
+    assert stats4["enabled"] is False and stats4["hits"] == 0 and stats4["writes"] == 0
+
+    # skip_cache=true: fresh sample, result still written.
+    llm5 = FakeChatClient()
+    _, _, stats5 = _cached_run(tmp_path, ds_dir, llm5, 305, cache_path, skip_cache=True)
+    assert len(llm5.stream_calls) == 2
+    assert stats5["hits"] == 0 and stats5["writes"] == 2
+
+    # A re-exported but identical dataset in another directory still hits.
+    ds_copy = _write_synthetic_dataset(tmp_path / "ds-copy", num_problems=2)
+    llm6 = FakeChatClient()
+    _, _, stats6 = _cached_run(tmp_path, ds_copy, llm6, 306, cache_path)
+    assert llm6.stream_calls == [] and stats6["hits"] == 2
+
+
+def test_result_cache_skips_errors_and_truncated_responses(tmp_path):
+    from backend.app.testers.llm.client import ChatClientError
+
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=2)
+    cache_path = tmp_path / "cache.sqlite3"
+
+    class FlakyLLM:
+        """prob-1 errors, prob-2 is truncated."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            self.calls += 1
+            if "prob-1" in messages[-1].get("content", "") or "Problem 1" in messages[-1].get("content", ""):
+                raise ChatClientError("HTTP request failed: Timeout after 180s")
+            return FakeStreamResp(content="partial", finish_reason=None, truncated=True)
+
+    res1, _, stats1 = _cached_run(tmp_path, ds_dir, FlakyLLM(), 311, cache_path)
+    assert {c.detail["verdict"] for c in res1.cases} == {"Error", STATUS_TRUNCATED}
+    assert stats1["writes"] == 0
+
+    llm2 = FakeChatClient()
+    res2, _, stats2 = _cached_run(tmp_path, ds_dir, llm2, 312, cache_path)
+    assert len(llm2.stream_calls) == 2 and stats2["hits"] == 0
+    assert all(c.status == "pass" for c in res2.cases)
+
+
+def test_result_cache_key_tracks_problem_content(tmp_path):
+    from backend.app.testers.llm_coding.cache import CodingResultCache, is_cacheable
+
+    cache = CodingResultCache(tmp_path / "c.sqlite3")
+    key = {"problem_id": "p", "problem_sha256": "aaa", "model": "m"}
+    cache.put(key, {"case_metrics": {}, "case_detail": {}, "agg_record": {}})
+    assert cache.get(key) is not None
+    assert cache.get({**key, "problem_sha256": "bbb"}) is None
+    assert cache.clear() == 1 and cache.get(key) is None
+
+    assert is_cacheable({"attempts": [{"truncated": False}]})
+    assert not is_cacheable({"error": "boom"})
+    assert not is_cacheable({"judge_error": "RuntimeError: x"})
+    assert not is_cacheable({"attempts": [{"truncated": True}]})
