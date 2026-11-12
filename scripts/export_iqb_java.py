@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import re
 import types
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -47,6 +48,7 @@ from backend.app.testers.llm_coding.dataset import (  # noqa: E402
     compute_problems_Rollup_sha256,
     pick_sample_case_indices,
     split_solutions,
+    strip_answer_sections,
 )
 from backend.app.testers.llm_coding.piston import (  # noqa: E402
     PistonClient,
@@ -167,6 +169,62 @@ const { Client } = require("pg");
     return json.loads(proc.stdout)
 
 
+TOP_LEVEL_TYPE_RE = re.compile(
+    r"^(?:(?:public|final|abstract|static)\s+)*(?:class|interface|enum|record)\s+(\w+)", re.MULTILINE
+)
+
+
+def _mask_java_comments(src: str) -> str:
+    """Blank out comments and string literals (same length) so scans ignore their contents."""
+    return re.sub(
+        r'/\*.*?\*/|//[^\n]*|"(?:\\.|[^"\\\n])*"',
+        lambda m: re.sub(r"[^\n]", " ", m.group(0)),
+        src,
+        flags=re.DOTALL,
+    )
+
+
+def drop_types_defined_by_harness(reference: str, harness: str) -> tuple[str, list[str]]:
+    """Remove top-level types from a submission that the harness already defines.
+
+    A submission made while the harness lacked e.g. ``ListNode`` had to declare it; once the
+    harness provides it, the duplicate would fail with ``duplicate class``. Only real (not
+    commented-out) top-level declarations at column 0 are removed, by brace matching;
+    ``Solution`` never is.
+    """
+    harness_types = set(TOP_LEVEL_TYPE_RE.findall(_mask_java_comments(harness)))
+    masked = _mask_java_comments(reference)
+    spans: list[tuple[int, int]] = []
+    removed: list[str] = []
+    for m in TOP_LEVEL_TYPE_RE.finditer(masked):
+        name = m.group(1)
+        if name == "Solution" or name not in harness_types:
+            continue
+        brace = masked.find("{", m.end())
+        if brace < 0:
+            continue
+        depth, i = 0, brace
+        while i < len(masked):
+            if masked[i] == "{":
+                depth += 1
+            elif masked[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            continue
+        end = i + 1
+        while end < len(reference) and reference[end] == "\n":
+            end += 1
+        spans.append((m.start(), end))
+        removed.append(name)
+    out = reference
+    for start, end in reversed(spans):
+        out = out[:start] + out[end:]
+    return out, removed
+
+
 def _parse_json_field(val: Any, default: Any) -> Any:
     if val is None:
         return default
@@ -265,7 +323,11 @@ def export_dataset(
 
         raw_content = str(row.get("content") or "")
         split_res = split_solutions(raw_content)
-        statement_md = split_res.body.strip()
+        statement_md, stripped_answer_sections = strip_answer_sections(split_res.body.strip())
+
+        reference_java, dropped_ref_types = drop_types_defined_by_harness(reference_java, harness_java)
+        if dropped_ref_types:
+            print(f"  [{idx:02d}/{len(rows):02d}] note {qid}: removed {dropped_ref_types} from reference (defined by harness)")
 
         # Verify no solution heading remains in statement_md
         if "\n## Solution" in statement_md or "\n## Optimal Solution" in statement_md:
@@ -385,6 +447,8 @@ def export_dataset(
                 "max_cpu_time_ms": judge_res.max_cpu_time_ms,
                 "sha256": prob_sha,
                 "stripped_solutions_count": len(split_res.solutions),
+                "stripped_answer_sections": stripped_answer_sections,
+                "reference_types_removed": dropped_ref_types,
             }
         )
         print(
@@ -477,6 +541,7 @@ def main() -> int:
         default=os.getenv("POSTGRES_PASSWORD", "736fea418879e23b24c09570d4f4c557"),
     )
     parser.add_argument("--email", default="stonexp@gmail.com")
+    parser.add_argument("--dataset-version", default="1.0", help="Version recorded in manifest.json")
     args = parser.parse_args()
 
     export_dataset(
@@ -488,6 +553,7 @@ def main() -> int:
         pg_user=args.pg_user,
         pg_password=args.pg_password,
         user_email=args.email,
+        dataset_version=args.dataset_version,
     )
     return 0
 

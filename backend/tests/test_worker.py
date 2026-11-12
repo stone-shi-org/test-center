@@ -373,3 +373,48 @@ def test_recover_stale_runs_on_restart(tmp_path: Path, test_db_session):
     assert db.get(Run, completed_id).status == "completed"
     assert db.get(Run, queued_id).status == "queued"
     db.close()
+
+
+def test_recover_stale_runs_loads_checkpointed_cases(tmp_path: Path, test_db_session):
+    """A restart mid-run keeps the cases the tester already checkpointed to result.json."""
+    import json
+
+    artifacts_dir = tmp_path / "artifacts"
+    db: Session = test_db_session()
+    single = Run(status="running", started_at=utc_now(), config_snapshot={"tester": "llm_coding"}, target_snapshot={})
+    multi = Run(status="running", started_at=utc_now(), config_snapshot={"tester": "dummy"}, target_snapshot={})
+    db.add_all([single, multi])
+    db.commit()
+    single_id, multi_id = single.id, multi.id
+    db.close()
+
+    def _ckpt(d: Path, tester: str, statuses: list[str]) -> None:
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "payload.json").write_text(json.dumps({"tester": tester}))
+        (d / "result.json").write_text(json.dumps({
+            "status": "pass", "summary": None, "metrics": {"score": {"value": 50.0}}, "artifacts": [],
+            "cases": [{"case_id": f"c{i}", "suite": "easy", "status": s, "metrics": {}, "detail": {"i": i}}
+                      for i, s in enumerate(statuses)],
+        }))
+
+    _ckpt(artifacts_dir / str(single_id), "llm_coding", ["pass", "fail", "pass"])
+    _ckpt(artifacts_dir / str(multi_id) / "step_1_dummy", "dummy", ["pass"])
+    _ckpt(artifacts_dir / str(multi_id) / "step_2_other", "other", ["fail", "fail"])
+
+    db = test_db_session()
+    assert sorted(recover_stale_runs(db, artifacts_dir)) == sorted([single_id, multi_id])
+
+    r = db.get(Run, single_id)
+    assert r.status == "error" and len(r.results) == 1
+    res = r.results[0]
+    assert res.status == "error" and res.tester == "llm_coding"
+    assert [c.case_id for c in res.cases] == ["c0", "c1", "c2"]
+    assert "3 completed cases recovered (2 passed)" in res.summary
+    assert res.metrics["score"]["value"] == 50.0
+    assert {a.name for a in res.artifacts} >= {"run.log", "result.json"}
+    assert "Recovered 3 completed cases" in (artifacts_dir / str(single_id) / "run.log").read_text()
+
+    m = db.get(Run, multi_id)
+    assert [x.tester for x in m.results] == ["dummy", "other"]
+    assert [len(x.cases) for x in m.results] == [1, 2]
+    db.close()

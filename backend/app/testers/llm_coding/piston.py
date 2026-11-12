@@ -39,12 +39,19 @@ PISTON_MAX_RUN_TIMEOUT_MS = 3000
 JAVA_SOURCE_LAUNCH_COMPILE_ERROR_RE = re.compile(
     r"^error: compilation failed\s*$", re.MULTILINE
 )
+# A javac diagnostic line (``Main.java:38: error: cannot find symbol``). When the
+# compiler's output is long enough to hit Piston's output limit, the process is
+# killed before it prints ``error: compilation failed``, so match the diagnostics.
+JAVAC_DIAGNOSTIC_RE = re.compile(r"^\S+\.java:\d+: error: ", re.MULTILINE)
+# Piston's status when stdout/stderr exceeded its output limit (process SIGKILLed).
+PISTON_STATUS_OUTPUT_LIMIT = "EL"
 
 STATUS_ACCEPTED = "Accepted"
 STATUS_WRONG_ANSWER = "Wrong Answer"
 STATUS_COMPILE_ERROR = "Compile Error"
 STATUS_RUNTIME_ERROR = "Runtime Error"
 STATUS_TLE = "Time Limit Exceeded"
+STATUS_OUTPUT_LIMIT = "Output Limit Exceeded"
 STATUS_PERFORMANCE_LIMIT = "Performance Limit Exceeded"
 STATUS_NO_CODE = "no_code_extracted"
 # The model's response was cut off mid-stream (no ``[DONE]`` / ``finish_reason``),
@@ -238,7 +245,17 @@ def map_piston_response_to_case_result(
     signal = run_stage.get("signal")
     run_status = run_stage.get("status")
 
-    if run_code != 0 and JAVA_SOURCE_LAUNCH_COMPILE_ERROR_RE.search(stderr):
+    # Piston SIGKILLs a process whose output exceeds its limit (status "EL"); that is
+    # not a timeout. A flood of javac diagnostics is the usual cause: a compile error.
+    output_limited = run_status == PISTON_STATUS_OUTPUT_LIMIT or "length exceeded" in str(
+        run_stage.get("message") or ""
+    )
+    compile_failed = run_code != 0 and (
+        JAVA_SOURCE_LAUNCH_COMPILE_ERROR_RE.search(stderr)
+        or (output_limited and JAVAC_DIAGNOSTIC_RE.search(raw_stderr))
+    )
+
+    if compile_failed:
         return (
             True,
             stderr,
@@ -279,7 +296,11 @@ def map_piston_response_to_case_result(
         )
     )
 
-    if timed_out:
+    if output_limited:
+        is_passed = False
+        status_description = STATUS_RUNTIME_ERROR
+        status_detail = STATUS_OUTPUT_LIMIT
+    elif timed_out:
         is_passed = False
         status_description = STATUS_TLE
         status_detail = STATUS_TLE

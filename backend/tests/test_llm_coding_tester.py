@@ -1499,3 +1499,146 @@ def test_result_cache_key_tracks_problem_content(tmp_path):
     assert not is_cacheable({"error": "boom"})
     assert not is_cacheable({"judge_error": "RuntimeError: x"})
     assert not is_cacheable({"attempts": [{"truncated": True}]})
+
+
+# ---------------------------------------------------------------------------
+# Grader: Piston output-limit kills, gateway streams cut short mid code block
+# ---------------------------------------------------------------------------
+
+
+def test_piston_output_limit_is_compile_error_or_ole_not_tle():
+    tests = [{"input": "2 3\n", "expected_output": "5\n"}]
+    javac_flood = (
+        "Main.java:38: error: cannot find symbol\n    static ListNode buildList(...) {\n           ^\n"
+        "  symbol:   class ListNode\n" * 200
+        + "Sandbox keeper received fatal signal 6\n"
+    )
+    killed = {
+        "run": {
+            "stdout": "", "stderr": javac_flood, "code": None, "signal": "SIGKILL",
+            "status": "EL", "message": "stderr length exceeded", "cpu_time": 1080, "wall_time": 401,
+        }
+    }
+    res = judge_java_solution(
+        client=PistonClient(execute_hook=lambda p: killed),
+        code=SAMPLE_REFERENCE_JAVA, harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0],
+    )
+    assert res.status == STATUS_COMPILE_ERROR
+    assert res.compilation_failed is True
+
+    # Output flood that is not javac diagnostics: runtime output limit, still not a TLE.
+    spam = {"run": {"stdout": "x" * 1000, "stderr": "", "code": None, "signal": "SIGKILL",
+                    "status": "EL", "message": "stdout length exceeded", "cpu_time": 50}}
+    res2 = judge_java_solution(
+        client=PistonClient(execute_hook=lambda p: spam),
+        code=SAMPLE_REFERENCE_JAVA, harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0],
+    )
+    assert res2.status == STATUS_RUNTIME_ERROR
+    assert res2.test_results[0].status_detail == "Output Limit Exceeded"
+
+    # A genuine timeout still maps to TLE.
+    slow = {"run": {"stdout": "", "stderr": "", "code": None, "signal": "SIGKILL", "status": "TO", "wall_time": 3000}}
+    res3 = judge_java_solution(
+        client=PistonClient(execute_hook=lambda p: slow),
+        code=SAMPLE_REFERENCE_JAVA, harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0],
+    )
+    assert res3.status == STATUS_TLE
+
+
+def test_stream_ending_mid_code_block_without_finish_reason_is_truncated(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+
+    class CutShortLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            self.calls += 1
+            # [DONE] arrived (truncated=False) but no finish_reason, mid code block.
+            return FakeStreamResp(content="```java\nimport java.util.*;\n\npublic class Solution {\n    /**",
+                                  finish_reason=None, truncated=False)
+
+    piston_calls: list[dict[str, Any]] = []
+    res = get_tester("llm_coding").run(
+        config={
+            "dataset_dir": str(ds_dir), "model": "m", "max_attempts": 2, "use_cache": False,
+            "_chat_client": CutShortLLM(),
+            "_piston_execute_hook": lambda p: piston_calls.append(p) or {"run": {"stdout": "", "code": 0}},
+        },
+        target={"name": "t", "kind": "llm", "base_url": "http://fake-llm:8000/v1"},
+        ctx=TestContext(run_id=401, artifacts_dir=tmp_path / "a", emit_stdout=False),
+    )
+    case = res.cases[0]
+    assert case.detail["verdict"] == STATUS_TRUNCATED
+    assert piston_calls == []
+    assert "mid code block" in case.detail["attempts"][0]["compile_error_output"]
+
+    # A complete answer that merely lacks finish_reason is still graded.
+    class NoFinishReasonLLM:
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            return FakeStreamResp(content="```java\n" + SAMPLE_REFERENCE_JAVA + "\n```", finish_reason=None)
+
+    res2 = get_tester("llm_coding").run(
+        config={"dataset_dir": str(ds_dir), "model": "m", "use_cache": False,
+                "_chat_client": NoFinishReasonLLM(), "_piston_execute_hook": _piston_all_pass_hook},
+        target={"name": "t", "kind": "llm", "base_url": "http://fake-llm:8000/v1"},
+        ctx=TestContext(run_id=402, artifacts_dir=tmp_path / "b", emit_stdout=False),
+    )
+    assert res2.cases[0].detail["verdict"] == STATUS_ACCEPTED
+
+
+# ---------------------------------------------------------------------------
+# Statement stripping: interviewer-guide answers and solution code
+# ---------------------------------------------------------------------------
+
+
+def test_strip_answer_sections_removes_answers_keeps_problem():
+    from backend.app.testers.llm_coding.dataset import strip_answer_sections
+
+    md = "\n".join([
+        "# Problem", "", "Given X, compute Y.", "",
+        "## Question Text", "Implement `solve(x)`.", "",
+        "```java", "interface Api {", "  int solve(int x);", "}", "```", "",
+        "## Follow-up Questions", "",
+        "### Follow-up Question 1: Will your solution run in a reasonable amount of time?", "Discuss.", "",
+        "## Answer", "", "### Summarize the solution", "Use a heap.", "",
+        "```python", "def solve(x):", "    return x + 1", "```", "",
+        "### Rating guidance", "L4: does it.", "",
+        "## Linear Solution", "Walk once.",
+        "## Notes", "Keep me.", "",
+        "### C++", "```cpp", "int solve(int x) {", "  for (int i = 0; i < x; i++) {}", "  return x;", "}", "```",
+        "",
+        "```", "# heading inside a fence is not a heading", "```",
+    ])
+    body, removed = strip_answer_sections(md)
+    assert "Given X, compute Y." in body
+    assert "interface Api" in body  # stub without control flow is kept
+    assert "Follow-up Question 1: Will your solution run" in body  # question heading kept
+    assert "## Notes" in body and "Keep me." in body
+    assert "# heading inside a fence" in body
+    for leaked in ("Use a heap", "def solve", "Rating guidance", "L4: does it", "Walk once", "for (int i"):
+        assert leaked not in body, leaked
+    # "## Linear Solution" follows inside the section already being stripped, so only "## Answer" is listed.
+    assert "## Answer" in removed
+    assert any(r.startswith("code block") for r in removed)
+
+
+def test_export_drops_reference_types_the_harness_defines():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "export_iqb_java", Path(__file__).resolve().parents[2] / "scripts" / "export_iqb_java.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    harness = "class ListNode {\n    int val; ListNode next;\n    ListNode(int v) { val = v; }\n}\npublic class Main {}\n"
+    reference = (
+        "import java.util.*;\n\nclass ListNode {\n    int val;\n    ListNode next;\n    ListNode() {}\n"
+        "    ListNode(int val) { this.val = val; }\n}\n\nclass Solution {\n    ListNode f(ListNode h) { return h; }\n}\n"
+    )
+    out, removed = mod.drop_types_defined_by_harness(reference, harness)
+    assert removed == ["ListNode"]
+    assert "class ListNode" not in out and "class Solution" in out and "import java.util.*;" in out
+    # Nothing to drop when the harness does not define it.
+    out2, removed2 = mod.drop_types_defined_by_harness(reference, "public class Main {}")
+    assert removed2 == [] and out2 == reference

@@ -69,6 +69,12 @@ from backend.app.testers.llm_coding.scoring import (
 from backend.app.testers.llm_coding.tools import CODING_TOOLS_SCHEMA, run_agent_tool_loop
 
 
+def _has_unclosed_code_fence(text: str) -> bool:
+    """True when the text opens a ``` fence that is never closed."""
+    fences = sum(1 for line in text.splitlines() if line.lstrip().startswith("```"))
+    return fences % 2 == 1
+
+
 class LLMCodingTester(TesterPlugin):
     """Tester plugin for Java coding benchmarks judged on Piston."""
 
@@ -708,7 +714,11 @@ class LLMCodingTester(TesterPlugin):
                     response_text = str(getattr(stream_res, "content", "") or "")
                     messages.append({"role": "assistant", "content": response_text})
                     finish_reason = getattr(stream_res, "finish_reason", None)
-                    truncated = bool(getattr(stream_res, "truncated", False))
+                    truncated = bool(getattr(stream_res, "truncated", False)) or (
+                        # Some gateways send [DONE] after cutting the upstream stream short:
+                        # no finish_reason and a code fence that was opened but never closed.
+                        finish_reason is None and _has_unclosed_code_fence(response_text)
+                    )
 
                     if truncated:
                         # The stream was cut off (e.g. a gateway request timeout) partway
@@ -720,7 +730,12 @@ class LLMCodingTester(TesterPlugin):
                         latency_s = float(getattr(stream_res, "latency_ms", 0.0) or 0.0) / 1000.0
                         reason = (
                             f"Response stream was cut off after {latency_s:.0f}s "
-                            f"({len(response_text)} chars received) without [DONE] or a finish_reason"
+                            f"({len(response_text)} chars received) "
+                            + (
+                                "without [DONE] or a finish_reason"
+                                if getattr(stream_res, "truncated", False)
+                                else "mid code block, with no finish_reason"
+                            )
                             + (f": {stream_error}" if stream_error else "")
                             + ". Likely an upstream/gateway request timeout."
                         )

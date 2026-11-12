@@ -150,6 +150,86 @@ def split_solutions(markdown: str | None) -> SplitSolutionsResult:
     )
 
 
+# Interviewer-guide sections that give the answer away: "## Answer", "### Sample solutions",
+# "### Rating guidance", "## Linear Solution", "### Parsing approach", "## Reference
+# Implementation". Solution code under other headings ("### C++") is caught per code block.
+# Headings that pose a question ("Follow-up Question 2: Will your solution run ...") are kept.
+ANSWER_HEADING_RE = re.compile(
+    r"\b(?:answers?|solutions?|rating\s+guidance|approach(?:es)?|implementations?|alternative\s+formulation)\b",
+    re.IGNORECASE,
+)
+QUESTION_HEADING_RE = re.compile(r"^\s*follow[-\s]?up\b", re.IGNORECASE)
+MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+FENCE_RE = re.compile(r"^\s*(```|~~~)")
+# A fenced block is treated as solution code when it both defines a function/method and has
+# control flow. Interface declarations and example I/O have no control flow, so they stay.
+CODE_CONTROL_FLOW_RE = re.compile(
+    r"\breturn\b|\bfor\s*\(|\bwhile\s*\(|\bfor\s+\w+(?:\s*,\s*\w+)*\s+in\b|\bwhile\s+\S|\bforEach\b"
+)
+CODE_DEFINITION_RE = re.compile(
+    r"\b(?:def|function|func|fun|fn)\s+\w+\s*\(|\)\s*(?:const\s*)?(?:->\s*[\w:<>\[\]]+\s*)?\{|\)\s*:\s*$|=>",
+    re.MULTILINE,
+)
+
+
+def _is_answer_heading(text: str) -> bool:
+    if QUESTION_HEADING_RE.match(text):
+        return False
+    return bool(ANSWER_HEADING_RE.search(text))
+
+
+def _is_solution_code(block_body: str) -> bool:
+    return bool(CODE_CONTROL_FLOW_RE.search(block_body) and CODE_DEFINITION_RE.search(block_body))
+
+
+def strip_answer_sections(markdown: str) -> tuple[str, list[str]]:
+    """Remove answers, sample solutions, and solution code from an interview-guide statement.
+
+    1. A section runs from an answer-like heading to the next heading of the same or higher
+       level that is not itself answer-like (headings inside code fences are ignored).
+    2. Any remaining fenced code block that implements logic (see ``_is_solution_code``).
+
+    Returns ``(body, removed)`` where ``removed`` lists the dropped headings / code blocks.
+    """
+    lines = markdown.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    removed: list[str] = []
+    strip_level: int | None = None
+    fence: list[str] | None = None  # lines of the open code block (incl. opening fence)
+    for line in lines:
+        if fence is not None:
+            fence.append(line)
+            if FENCE_RE.match(line):
+                body = "\n".join(fence[1:-1])
+                if strip_level is None:
+                    if _is_solution_code(body):
+                        removed.append(f"code block ({len(fence) - 2} lines)")
+                    else:
+                        out.extend(fence)
+                fence = None
+            continue
+        if FENCE_RE.match(line):
+            fence = [line]
+            continue
+        m = MD_HEADING_RE.match(line)
+        if m:
+            level, text = len(m.group(1)), m.group(2)
+            answer_like = _is_answer_heading(text)
+            if strip_level is not None and level <= strip_level and not answer_like:
+                strip_level = None
+            if strip_level is None and answer_like:
+                strip_level = level
+                removed.append(line.strip())
+                continue
+        if strip_level is None:
+            out.append(line)
+    if fence is not None and strip_level is None:  # unterminated fence: keep as-is
+        out.extend(fence)
+    body = TRAILING_HR_RE.sub("", "\n".join(out).rstrip()).strip()
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    return body, removed
+
+
 def pick_sample_case_indices(
     statement_md: str,
     test_cases: list[dict[str, Any]],
