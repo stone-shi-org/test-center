@@ -126,7 +126,7 @@ def evaluate_with_coding_judge(
     problem: ProblemSpec,
     candidate_code: str,
     judge_run: JudgeRunResult,
-    max_tokens: int = 1024,
+    max_tokens: int = 8192,
 ) -> CodingJudgeResult:
     """Invoke the configured LLM judge for a candidate Java solution."""
     prompt = render_coding_judge_prompt(

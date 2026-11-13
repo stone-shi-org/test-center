@@ -1788,3 +1788,42 @@ def test_no_code_at_token_limit_or_content_filter_gets_specific_verdict(tmp_path
             assert phrase in d["attempts"][0]["compile_error_output"]
             # Retry feedback explains the stop instead of asking for `class Solution`.
             assert "token limit" in llm.calls[1][-1]["content"] or "content filter" in llm.calls[1][-1]["content"]
+
+
+def test_judge_placeholder_replies_are_retried_and_never_cached(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+    good = json.dumps({"approach_correctness": 5, "complexity_vs_reference": 5, "readability_idiom": 5,
+                       "overall": 5, "justification": "ok"})
+
+    class Judge(FakeChatClient):
+        def __init__(self, replies):
+            super().__init__(chat_responses=replies)
+            self.max_tokens_seen: list[int] = []
+
+        def chat(self, messages, model, max_tokens=1024, **kwargs):
+            self.max_tokens_seen.append(max_tokens)
+            return super().chat(messages, model, max_tokens=max_tokens, **kwargs)
+
+    def _run(judge, run_id, cache):
+        res = get_tester("llm_coding").run(
+            config={"dataset_dir": str(ds_dir), "model": "m", "judge_enabled": True, "_chat_client": FakeChatClient(),
+                    "_judge_client": judge, "_piston_execute_hook": _piston_all_pass_hook, "cache_path": str(cache)},
+            target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False),
+        )
+        stats = json.loads((tmp_path / f"r{run_id}" / "llm_coding_results.json").read_text())["cache"]
+        return res.cases[0].detail, stats
+
+    # Empty, then truncated JSON, then a real verdict: retried, real score kept, cached.
+    j1 = Judge(["", '{"approach_correctness": 5, "justification": "unterminated', good])
+    d1, s1 = _run(j1, 701, tmp_path / "c1.sqlite3")
+    assert d1["judge"]["overall"] == 5 and d1["judge_error"] is None
+    assert len(j1.chat_calls) == 3 and set(j1.max_tokens_seen) == {8192}
+    assert s1["writes"] == 1
+
+    # Always empty: placeholder kept for this run, but flagged and not cached.
+    j2 = Judge(["", "", ""])
+    d2, s2 = _run(j2, 702, tmp_path / "c2.sqlite3")
+    assert len(j2.chat_calls) == 3
+    assert d2["judge_error"].startswith("parse_error")
+    assert s2["writes"] == 0

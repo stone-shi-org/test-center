@@ -45,6 +45,9 @@ from backend.app.testers.llm_coding.judge import (
     CodingJudgeResult,
     evaluate_with_coding_judge,
 )
+
+DEFAULT_JUDGE_MAX_TOKENS = 8192
+DEFAULT_JUDGE_RETRIES = 2
 from backend.app.testers.llm_coding.piston import (
     STATUS_CONTENT_FILTERED,
     STATUS_NO_CODE,
@@ -229,6 +232,25 @@ class LLMCodingTester(TesterPlugin):
             "judge_model": {
                 "type": "string",
                 "description": "Optional model identifier override for the LLM Judge",
+                "x-advanced": True,
+            },
+            "judge_max_tokens": {
+                "type": "integer",
+                "default": DEFAULT_JUDGE_MAX_TOKENS,
+                "minimum": 256,
+                "maximum": 65536,
+                "description": (
+                    "Maximum completion tokens for each LLM judge call (reasoning judges need room "
+                    "before the JSON verdict)"
+                ),
+                "x-advanced": True,
+            },
+            "judge_retries": {
+                "type": "integer",
+                "default": DEFAULT_JUDGE_RETRIES,
+                "minimum": 0,
+                "maximum": 5,
+                "description": "Extra LLM judge attempts when the reply is empty, unparseable, or the call fails",
                 "x-advanced": True,
             },
             "judge_failed_solutions": {
@@ -910,23 +932,37 @@ class LLMCodingTester(TesterPlugin):
             and bool(final_code.strip())
         )
         if should_run_judge:
-            ctx.check_cancelled()
-            try:
-                judge_result = evaluate_with_coding_judge(
-                    judge_client=judge_client,
-                    judge_model=str(judge_model),
-                    judge_target_name=str(judge_info.get("target_name", "judge-target")),
-                    judge_prompt_md=dataset.judge_prompt_md,
-                    problem=problem,
-                    candidate_code=final_code,
-                    judge_run=final_judge_run,
+            judge_max_tokens = int(config.get("judge_max_tokens", DEFAULT_JUDGE_MAX_TOKENS))
+            judge_retries = max(0, int(config.get("judge_retries", DEFAULT_JUDGE_RETRIES)))
+            for judge_attempt in range(judge_retries + 1):
+                ctx.check_cancelled()
+                try:
+                    judge_result = evaluate_with_coding_judge(
+                        judge_client=judge_client,
+                        judge_model=str(judge_model),
+                        judge_target_name=str(judge_info.get("target_name", "judge-target")),
+                        judge_prompt_md=dataset.judge_prompt_md,
+                        problem=problem,
+                        candidate_code=final_code,
+                        judge_run=final_judge_run,
+                        max_tokens=judge_max_tokens,
+                    )
+                    # evaluate_with_coding_judge does not raise: a failed request scores 1/5 and an
+                    # empty/unparseable reply 3/5, with ``error`` set. Those are placeholders, not
+                    # judgements: retry, and if it keeps failing record a judge error so the case
+                    # is not cached (the next run judges it again).
+                    judge_error = judge_result.error or None
+                except TesterCancelledError:
+                    raise
+                except Exception as j_exc:
+                    judge_result = None
+                    judge_error = f"{type(j_exc).__name__}: {j_exc}"
+                if not judge_error:
+                    break
+                ctx.log(
+                    f"[{problem.id}] LLM judge attempt {judge_attempt + 1}/{judge_retries + 1} failed: {judge_error}",
+                    level="warning",
                 )
-            except TesterCancelledError:
-                raise
-            except Exception as j_exc:
-                ctx.log(f"[{problem.id}] LLM judge evaluation failed: {j_exc}", level="warning")
-                judge_result = None
-                judge_error = f"{type(j_exc).__name__}: {j_exc}"
 
         if tools_enabled:
             case_tps = tool_outcome.mean_tps if "tool_outcome" in locals() else 0.0
