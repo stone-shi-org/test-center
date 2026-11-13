@@ -1642,3 +1642,116 @@ def test_export_drops_reference_types_the_harness_defines():
     # Nothing to drop when the harness does not define it.
     out2, removed2 = mod.drop_types_defined_by_harness(reference, "public class Main {}")
     assert removed2 == [] and out2 == reference
+
+
+# ---------------------------------------------------------------------------
+# Gateway retries, template-class prompt rules, public top-level types
+# ---------------------------------------------------------------------------
+
+
+def test_transient_gateway_errors_are_retried_and_stream_errors_reported_as_error(tmp_path):
+    from backend.app.testers.llm.client import ChatClientError
+
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+
+    class FlakyGateway(FakeChatClient):
+        def __init__(self, failures):
+            super().__init__()
+            self.failures = list(failures)
+
+        def stream_chat(self, *args, **kwargs):
+            if self.failures:
+                f = self.failures.pop(0)
+                if isinstance(f, Exception):
+                    raise f
+                return f
+            return super().stream_chat(*args, **kwargs)
+
+    def _run(llm, run_id, **extra):
+        cfg = {"dataset_dir": str(ds_dir), "model": "m", "use_cache": False, "_chat_client": llm,
+               "_piston_execute_hook": _piston_all_pass_hook, "gateway_retry_base_seconds": 0}
+        cfg.update(extra)
+        ctx = TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False)
+        return get_tester("llm_coding").run(config=cfg, target={"name": "t", "kind": "llm", "base_url": "http://x/v1"}, ctx=ctx)
+
+    sse_502 = FakeStreamResp(content="", finish_reason=None, truncated=True,
+                             stream_error='[502]: fetch failed (cause: ECONNREFUSED: connect ECONNREFUSED)')
+    llm = FlakyGateway([
+        ChatClientError("Chat request failed with status 502: fetch failed (ECONNREFUSED)"),
+        ChatClientError('Chat request failed with status 429: {"error":{"message":"Service temporarily unavailable: all targets were skipped"}}'),
+        sse_502,
+    ])
+    res = _run(llm, 501)
+    assert res.cases[0].detail["verdict"] == STATUS_ACCEPTED  # recovered after 3 retries
+    assert len(llm.stream_calls) == 1
+
+    # Retries exhausted on an error-only stream: reported as Error (not Truncated Response), not cached.
+    res2 = _run(FlakyGateway([sse_502] * 3), 502, gateway_max_retries=2)
+    assert res2.cases[0].detail["verdict"] == "Error"
+    assert "Upstream error in response stream" in res2.cases[0].detail["error"]
+
+    # Timeouts are never retried.
+    llm3 = FlakyGateway([ChatClientError("HTTP request failed: Timeout after 180s"), sse_502])
+    res3 = _run(llm3, 503)
+    assert res3.cases[0].detail["verdict"] == "Error" and len(llm3.failures) == 1
+
+
+def test_retrying_client_wait_stops_on_cancel():
+    from backend.app.testers.llm.client import ChatClientError
+    from backend.app.testers.llm_coding.retry import RetryingChatClient, is_transient_error
+
+    assert is_transient_error("failed with status 503: upstream")
+    assert not is_transient_error("failed with status 504: Combo global timeout (600000ms)")
+    assert not is_transient_error("failed with status 400: bad request")
+
+    class Down:
+        endpoint_url = "http://x"
+
+        def chat(self, *a, **k):
+            raise ChatClientError("failed with status 502")
+
+    cancelled = {"v": False}
+    slept: list[float] = []
+
+    def fake_sleep(s):
+        slept.append(s)
+        cancelled["v"] = True
+
+    client = RetryingChatClient(Down(), max_retries=3, base_delay_s=100, should_cancel=lambda: cancelled["v"], sleep=fake_sleep)
+    assert client.endpoint_url == "http://x"
+    with pytest.raises(ChatClientError):
+        client.chat()
+    assert len(slept) == 1  # first wait aborted by cancel; no further retries
+
+
+def test_prompt_names_template_classes_when_not_just_solution(tmp_path):
+    import dataclasses
+
+    from backend.app.testers.llm_coding.prompts import build_problem_prompt
+
+    ds = load_iqb_java_dataset(_write_synthetic_dataset(tmp_path / "ds", num_problems=1))
+    base = ds.problems[0]
+    plain = build_problem_prompt(base)
+    assert plain.endswith("- Return **exactly one** fenced ```java code block containing `class Solution`.")
+
+    no_solution = dataclasses.replace(base, template_java="class MovingAverage {\n  public MovingAverage(int n) {}\n}\n",
+                                      harness_java="public class Main {}\nclass Solution {}\n")
+    p1 = build_problem_prompt(no_solution)
+    assert "has **no** `class Solution`" in p1 and "containing the `MovingAverage` class." in p1
+
+    helper = dataclasses.replace(base, template_java="// class Fake {}\nclass Node {\n  int v;\n}\n\nclass Solution {\n  public static class Inner {}\n}\n",
+                                 harness_java="public class Main {}\n")
+    p2 = build_problem_prompt(helper)
+    assert "must also contain the template's `Node` class" in p2
+    assert "Fake" not in p2.split("## Rules")[1] and "Inner" not in p2.split("## Rules")[1]
+    assert p2.endswith("containing `class Solution`.")
+
+
+def test_merge_demotes_public_top_level_types_except_main():
+    merged = merge_java_solution_with_harness(
+        "import java.util.*;\npublic class LRUCache {\n    public static class Node {}\n}\n",
+        "public class Main {\n    public static void main(String[] a) {}\n}\n",
+    )
+    assert "public class LRUCache" not in merged.code and "class LRUCache {" in merged.code
+    assert "public static class Node" in merged.code
+    assert "public class Main" in merged.code

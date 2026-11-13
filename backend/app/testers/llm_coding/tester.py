@@ -66,6 +66,11 @@ from backend.app.testers.llm_coding.scoring import (
     compute_case_score,
     parse_attempt_factors,
 )
+from backend.app.testers.llm_coding.retry import (
+    DEFAULT_BASE_DELAY_S,
+    DEFAULT_MAX_RETRIES,
+    RetryingChatClient,
+)
 from backend.app.testers.llm_coding.tools import CODING_TOOLS_SCHEMA, run_agent_tool_loop
 
 
@@ -274,6 +279,26 @@ class LLMCodingTester(TesterPlugin):
                 "minimum": 5.0,
                 "maximum": 1800.0,
                 "description": "Per-HTTP request timeout in seconds per LLM API turn (recommend 300s-600s for local reasoning models with effort=high)",
+                "x-advanced": True,
+            },
+            # Advanced: transient gateway failures (not part of the cache key)
+            "gateway_max_retries": {
+                "type": "integer",
+                "default": DEFAULT_MAX_RETRIES,
+                "minimum": 0,
+                "maximum": 10,
+                "description": (
+                    "Retries per LLM call on transient gateway errors (HTTP 429/5xx, connection refused, "
+                    "'all targets were skipped'); timeouts are never retried"
+                ),
+                "x-advanced": True,
+            },
+            "gateway_retry_base_seconds": {
+                "type": "number",
+                "default": DEFAULT_BASE_DELAY_S,
+                "minimum": 0.0,
+                "maximum": 300.0,
+                "description": "First retry delay in seconds; doubles each retry (30 -> 30, 60, 120, 240s)",
                 "x-advanced": True,
             },
             # Advanced: SQLite result cache (same pattern as live_stt)
@@ -1074,6 +1099,20 @@ class LLMCodingTester(TesterPlugin):
             raw_config, config, target, chat_client, model
         )
         piston_client, runner_url = self._resolve_piston_client(config, target)
+
+        # Ride out short gateway outages instead of zeroing every problem that hits one.
+        def _retrying(client: Any, label: str) -> Any:
+            return RetryingChatClient(
+                client,
+                max_retries=int(config.get("gateway_max_retries", DEFAULT_MAX_RETRIES)),
+                base_delay_s=float(config.get("gateway_retry_base_seconds", DEFAULT_BASE_DELAY_S)),
+                should_cancel=lambda: ctx.is_cancelled,
+                log=lambda msg: ctx.log(f"[{label}] {msg}", level="warning"),
+            )
+
+        chat_client = _retrying(chat_client, "model")
+        if judge_client is not None:
+            judge_client = _retrying(judge_client, "judge")
 
         suites_cfg = config.get("suites") or ["all"]
         diff_cfg = list(config.get("difficulty") or [])

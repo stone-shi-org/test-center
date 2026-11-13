@@ -20,6 +20,12 @@ PUBLIC_SOLUTION_RE = re.compile(
     r"(^|\s)public\s+((?:final\s+|abstract\s+)?class\s+Solution\b)",
     re.MULTILINE,
 )
+# Any other public top-level type (column 0), e.g. ``public class LRUCache`` for a template
+# without ``Solution``: single-file source launch only allows the public class ``Main``.
+PUBLIC_TOP_LEVEL_TYPE_RE = re.compile(
+    r"^public\s+((?:final\s+|abstract\s+)?(?:class|interface|enum|record)\s+(?!Main\b)\w+)",
+    re.MULTILINE,
+)
 
 MAIN_JAVA_LINE_RE = re.compile(r"Main\.java:(\d+)")
 
@@ -56,7 +62,7 @@ def merge_java_solution_with_harness(solution: str, harness: str) -> MergedJavaS
     - Hoists user ``import`` lines above the harness (deduplicated, order-preserved)
       and blanks their original lines so line numbers in ``Solution`` stay aligned.
     - Blanks any ``package ...;`` declaration in the user code.
-    - Demotes ``public class Solution`` to package-private ``class Solution``.
+    - Demotes ``public class Solution`` (and any other public top-level type except ``Main``) to package-private.
     """
     normalized_solution = (solution or "").replace("\r\n", "\n")
     normalized_harness = (harness or "").replace("\r\n", "\n")
@@ -83,6 +89,7 @@ def merge_java_solution_with_harness(solution: str, harness: str) -> MergedJavaS
             unique_imports.append(imp)
 
     cleaned_solution = PUBLIC_SOLUTION_RE.sub(r"\1\2", "\n".join(stripped_lines))
+    cleaned_solution = PUBLIC_TOP_LEVEL_TYPE_RE.sub(r"\1", cleaned_solution)
     harness_trimmed = normalized_harness.rstrip()
 
     prefix_parts: list[str] = []
