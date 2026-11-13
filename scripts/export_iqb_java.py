@@ -225,6 +225,17 @@ def drop_types_defined_by_harness(reference: str, harness: str) -> tuple[str, li
     return out, removed
 
 
+EXCLUDED_PROBLEMS_FILE = Path(__file__).resolve().parent / "iqb_java_excluded.json"
+
+
+def load_excluded_problems(path: Path = EXCLUDED_PROBLEMS_FILE) -> dict[str, str]:
+    """Problem id -> reason for problems deliberately left out of the benchmark."""
+    if not path.is_file():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {str(k): str(v) for k, v in data.items()}
+
+
 def _parse_json_field(val: Any, default: Any) -> Any:
     if val is None:
         return default
@@ -276,6 +287,7 @@ def export_dataset(
         judge_prompt_path.read_bytes().replace(b"\r\n", b"\n")
     ).hexdigest()
 
+    excluded = load_excluded_problems()
     exported_problems: dict[str, str] = {}
     problem_summaries: list[dict[str, Any]] = []
     dropped_problems: list[dict[str, Any]] = []
@@ -292,6 +304,10 @@ def export_dataset(
         harness_java = str((harness_map or {}).get("java") or "").strip()
         reference_java = str(row.get("reference_code") or "").strip()
 
+        if qid in excluded:
+            dropped_problems.append({"id": qid, "title": title, "reason": f"Excluded: {excluded[qid]}"})
+            print(f"  [{idx:02d}/{len(rows):02d}] SKIP {qid}: excluded ({EXCLUDED_PROBLEMS_FILE.name})")
+            continue
         if is_coding != 1:
             dropped_problems.append({"id": qid, "title": title, "reason": "is_coding != 1"})
             continue

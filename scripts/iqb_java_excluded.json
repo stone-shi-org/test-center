@@ -1,0 +1,3 @@
+{
+  "5553": "Open-ended design question (Elevator Central Control System): the statement covers a single elevator, but the tests encode one specific multi-elevator assignment heuristic and treat same-floor requests as invalid, neither of which is specified, so no model can reliably reproduce the expected output."
+}
