@@ -1755,3 +1755,36 @@ def test_merge_demotes_public_top_level_types_except_main():
     assert "public class LRUCache" not in merged.code and "class LRUCache {" in merged.code
     assert "public static class Node" in merged.code
     assert "public class Main" in merged.code
+
+
+def test_no_code_at_token_limit_or_content_filter_gets_specific_verdict(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+
+    class Stopped:
+        def __init__(self, finish):
+            self.finish = finish
+            self.calls = []
+
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            self.calls.append([dict(m) for m in messages])
+            return FakeStreamResp(content="Considering the constraints, the key observation is ...",
+                                  completion_tokens=16384, finish_reason=self.finish)
+
+    for finish, verdict, phrase in (
+        ("length", "Token Limit Reached", "output token limit (16384 completion tokens, max_tokens=64000)"),
+        ("content_filter", "Content Filtered", "content filter"),
+        ("stop", STATUS_NO_CODE, None),
+    ):
+        llm = Stopped(finish)
+        res = get_tester("llm_coding").run(
+            config={"dataset_dir": str(ds_dir), "model": "m", "use_cache": False, "max_tokens": 64000,
+                    "max_attempts": 2, "_chat_client": llm, "_piston_execute_hook": _piston_all_pass_hook},
+            target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=600, artifacts_dir=tmp_path / f"a-{finish}", emit_stdout=False),
+        )
+        d = res.cases[0].detail
+        assert d["verdict"] == verdict, finish
+        if phrase:
+            assert phrase in d["attempts"][0]["compile_error_output"]
+            # Retry feedback explains the stop instead of asking for `class Solution`.
+            assert "token limit" in llm.calls[1][-1]["content"] or "content filter" in llm.calls[1][-1]["content"]

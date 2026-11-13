@@ -10,6 +10,8 @@ from __future__ import annotations
 from backend.app.testers.llm_coding.piston import (
     STATUS_COMPILE_ERROR,
     STATUS_NO_CODE,
+    STATUS_CONTENT_FILTERED,
+    STATUS_TOKEN_LIMIT,
     STATUS_CODE_TOO_LARGE,
     JudgeRunResult,
     TestCaseResult,
@@ -59,6 +61,20 @@ def build_attempt_feedback(
             f"{header}\n\n"
             "No valid Java code block containing `class Solution` could be extracted from your response. "
             "Please return your complete solution inside a single fenced ```java block containing `class Solution` (no `Main`)."
+        )
+
+    if judge_result.status == STATUS_TOKEN_LIMIT:
+        return (
+            f"{header}\n\n"
+            "Your response reached the output token limit before it contained any code. "
+            "Keep your reasoning brief and return your complete solution in a single fenced ```java block."
+        )
+
+    if judge_result.status == STATUS_CONTENT_FILTERED:
+        return (
+            f"{header}\n\n"
+            "Your response was stopped by the provider's content filter before it contained a complete code block. "
+            "Please return your complete solution in a single fenced ```java block."
         )
 
     if judge_result.status == STATUS_CODE_TOO_LARGE:

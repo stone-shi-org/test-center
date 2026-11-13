@@ -46,6 +46,9 @@ from backend.app.testers.llm_coding.judge import (
     evaluate_with_coding_judge,
 )
 from backend.app.testers.llm_coding.piston import (
+    STATUS_CONTENT_FILTERED,
+    STATUS_NO_CODE,
+    STATUS_TOKEN_LIMIT,
     STATUS_TRUNCATED,
     JudgeRunResult,
     PistonClient,
@@ -791,6 +794,21 @@ class LLMCodingTester(TesterPlugin):
                             stop_on_first_failure=False,
                             extract_from_markdown=False,
                         )
+                        if judge_run.status == STATUS_NO_CODE and finish_reason in ("length", "content_filter"):
+                            # Say why there is no code instead of a generic "no code extracted".
+                            n_out = int(getattr(stream_res, "completion_tokens", 0) or 0)
+                            if finish_reason == "length":
+                                judge_run.status = STATUS_TOKEN_LIMIT
+                                judge_run.compile_error_output = (
+                                    f"The response stopped at the output token limit ({n_out} completion tokens, "
+                                    f"max_tokens={max_tokens}) before any code block was written."
+                                )
+                            else:
+                                judge_run.status = STATUS_CONTENT_FILTERED
+                                judge_run.compile_error_output = (
+                                    "The provider's content filter stopped the response before a complete code block "
+                                    f"({n_out} completion tokens)."
+                                )
                     final_code = extracted_code or ""
                     final_judge_run = judge_run
 

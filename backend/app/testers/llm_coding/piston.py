@@ -60,6 +60,11 @@ STATUS_TRUNCATED = "Truncated Response"
 # Merged source + stdin would exceed Piston's request-body limit (express ``body-parser``
 # default of 100 KiB), so it was never sent. Almost always prose mis-extracted as code.
 STATUS_CODE_TOO_LARGE = "Code Too Large"
+# The response stopped at the output token limit (finish_reason "length") before any code
+# block: usually reasoning written as response text that used the whole budget.
+STATUS_TOKEN_LIMIT = "Token Limit Reached"
+# The provider's safety filter stopped the response (finish_reason "content_filter").
+STATUS_CONTENT_FILTERED = "Content Filtered"
 
 
 # Piston parses request bodies with express ``body_parser.json()`` and its default
