@@ -346,6 +346,50 @@ class LoadedDataset:
     manifest: DatasetManifest
     judge_prompt_md: str
     problems: list[ProblemSpec]
+    # Optional named problem subsets from ``subsets.json`` (see ``load_subsets``).
+    subsets: dict[str, "ProblemSubset"] = field(default_factory=dict)
+
+
+SUBSETS_FILENAME = "subsets.json"
+
+
+@dataclass
+class ProblemSubset:
+    """A named group of problems reported separately (e.g. the ones that separate models)."""
+
+    name: str
+    problems: list[str]
+    description: str = ""
+    # Every reasonable model is expected to solve these: failures are flagged as red flags.
+    expect_all_solved: bool = False
+
+
+def load_subsets(root: Path) -> dict[str, ProblemSubset]:
+    """Read optional ``subsets.json`` next to the manifest.
+
+    It is not part of the manifest or any problem hash, so updating it never changes cache keys.
+    Format: ``{"subsets": {"<name>": {"problems": [...], "description": "...",
+    "expect_all_solved": false}}, ...metadata}``. A missing or malformed file yields ``{}``.
+    """
+    path = Path(root) / SUBSETS_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, ProblemSubset] = {}
+    for name, spec in ((raw or {}).get("subsets") or {}).items():
+        if not isinstance(spec, dict) or not re.fullmatch(r"[a-z][a-z0-9_]*", str(name)):
+            continue
+        problems = [str(x) for x in spec.get("problems") or []]
+        out[str(name)] = ProblemSubset(
+            name=str(name),
+            problems=problems,
+            description=str(spec.get("description") or ""),
+            expect_all_solved=bool(spec.get("expect_all_solved", False)),
+        )
+    return out
 
 
 PROBLEM_HASH_FILES = (
@@ -596,4 +640,5 @@ def load_iqb_java_dataset(
         manifest=manifest,
         judge_prompt_md=judge_prompt_md,
         problems=loaded_problems,
+        subsets=load_subsets(root),
     )

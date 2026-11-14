@@ -69,6 +69,7 @@ from backend.app.testers.llm_coding.scoring import (
     DEFAULT_WEIGHT_CORRECTNESS,
     DEFAULT_WEIGHT_JUDGE,
     aggregate_run_metrics,
+    aggregate_subset_metrics,
     compute_case_score,
     parse_attempt_factors,
 )
@@ -1136,6 +1137,7 @@ class LLMCodingTester(TesterPlugin):
         dataset: LoadedDataset,
     ) -> None:
         agg = aggregate_run_metrics(completed_records, judge_enabled=judge_enabled)
+        agg.update(aggregate_subset_metrics(completed_records, dataset.subsets))
         for m_name, m_obj in agg.items():
             result.set_metric(
                 m_name,
@@ -1298,6 +1300,8 @@ class LLMCodingTester(TesterPlugin):
         ) -> None:
             with lock:
                 c_status = "pass" if c_detail.get("passed") else "fail"
+                # Tag with the dataset's named subsets (current subsets.json, also for cache hits).
+                c_detail["subsets"] = sorted(n for n, sub in dataset.subsets.items() if prob.id in sub.problems)
                 result.add_case(
                     case_id=prob.id,
                     suite=prob.difficulty,
@@ -1405,6 +1409,7 @@ class LLMCodingTester(TesterPlugin):
             effort=effort,
             tools_enabled=tools_enabled,
             max_attempts=max_attempts,
+            subsets=dataset.subsets,
         )
         report_file = ctx.artifacts_dir / "llm_coding_report.txt"
         report_file.write_text(report_text, encoding="utf-8")
@@ -1428,6 +1433,17 @@ class LLMCodingTester(TesterPlugin):
             },
             "judge": judge_info,
             "cache": result_cache.stats(),
+            "subsets": {
+                name: {
+                    "description": sub.description,
+                    "expect_all_solved": sub.expect_all_solved,
+                    "problems_evaluated": sorted(set(sub.problems) & {p.id for p in problems}),
+                    "failed": sorted(
+                        c.case_id for c in result.cases if c.case_id in set(sub.problems) and c.status != "pass"
+                    ),
+                }
+                for name, sub in dataset.subsets.items()
+            },
             "status": result.status,
             "summary": result.summary,
             "metrics": result.metrics,

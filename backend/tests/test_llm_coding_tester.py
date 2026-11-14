@@ -1858,3 +1858,51 @@ def test_cut_off_response_with_code_fragment_is_token_limit_not_compile_error(tm
     full = "```java\n" + SAMPLE_REFERENCE_JAVA + "\n```\nI could also explain more about"
     d2 = _run(CutOff(full), 802, _piston_all_pass_hook)
     assert d2["verdict"] == STATUS_ACCEPTED
+
+
+def test_subsets_json_adds_subset_metrics_tags_and_red_flags(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=2)
+    (ds_dir / "subsets.json").write_text(json.dumps({"subsets": {
+        "baseline": {"problems": ["prob-1", "prob-2"], "expect_all_solved": True, "description": "everyone solves"},
+        "hard_core": {"problems": ["prob-2"]},
+        "Bad Name": {"problems": ["prob-1"]},
+    }}))
+    # Manifest hash verification ignores subsets.json.
+    assert set(load_iqb_java_dataset(ds_dir).subsets) == {"baseline", "hard_core"}
+
+    llm = FakeChatClient(stream_responses=[
+        "```java\nclass Solution { public int add(int a, int b) { return a + b; } }\n```",
+        "```java\nclass Solution { public int add(int a, int b) { return 0; } }\n```",
+    ])
+
+    def hook(payload):
+        if "return 0;" in payload["files"][0]["content"]:
+            return {"run": {"stdout": "0\n", "stderr": "", "code": 0, "cpu_time": 20}}
+        return _piston_all_pass_hook(payload)
+
+    res = get_tester("llm_coding").run(
+        config={"dataset_dir": str(ds_dir), "model": "m", "use_cache": False, "_chat_client": llm, "_piston_execute_hook": hook},
+        target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+        ctx=TestContext(run_id=901, artifacts_dir=tmp_path / "a", emit_stdout=False),
+    )
+    m = res.metrics
+    assert m["problems_baseline"]["value"] == 2 and m["solved_baseline"]["value"] == 1
+    assert m["baseline_failures"]["value"] == 1 and m["baseline_failures"]["better"] == "lower"
+    assert m["score_hard_core"]["value"] == 0.0 and "hard_core_failures" not in m
+    assert m["score_baseline"]["value"] == 50.0
+    by_id = {c.case_id: c.detail for c in res.cases}
+    assert by_id["prob-1"]["subsets"] == ["baseline"] and by_id["prob-2"]["subsets"] == ["baseline", "hard_core"]
+    report = (tmp_path / "a" / "llm_coding_report.txt").read_text()
+    assert "Problem Subsets" in report and "1 failure(s) on problems every model solves" in report and "prob-2" in report
+    payload = json.loads((tmp_path / "a" / "llm_coding_results.json").read_text())
+    assert payload["subsets"]["baseline"]["failed"] == ["prob-2"]
+
+    # Without subsets.json nothing changes.
+    (ds_dir / "subsets.json").unlink()
+    res2 = get_tester("llm_coding").run(
+        config={"dataset_dir": str(ds_dir), "model": "m", "use_cache": False, "_chat_client": FakeChatClient(), "_piston_execute_hook": _piston_all_pass_hook},
+        target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+        ctx=TestContext(run_id=902, artifacts_dir=tmp_path / "b", emit_stdout=False),
+    )
+    assert not any(k.startswith(("score_baseline", "baseline_failures")) for k in res2.metrics)
+    assert all(c.detail["subsets"] == [] for c in res2.cases)

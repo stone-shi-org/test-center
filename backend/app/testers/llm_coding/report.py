@@ -17,6 +17,7 @@ def format_llm_coding_report(
     effort: str | None = None,
     tools_enabled: bool = False,
     max_attempts: int = 1,
+    subsets: dict[str, Any] | None = None,
 ) -> str:
     """Format a human-readable ASCII summary report (``llm_coding_report.txt``)."""
     score_val = metrics.get("score", {}).get("value", 0.0)
@@ -83,6 +84,27 @@ def format_llm_coding_report(
             diff_parts.append(f"{diff.capitalize()}: score={ds:.1f}, solve_at_1={ds1:.1f}%")
     if diff_parts:
         lines.append("  By Difficulty       : " + " | ".join(diff_parts))
+
+    if subsets:
+        status_by_id = {str(c.get("case_id")): c.get("status") for c in cases}
+        lines.extend(["-" * 90, "Problem Subsets (from subsets.json):"])
+        for name, sub in subsets.items():
+            if f"problems_{name}" not in metrics:
+                continue
+            n = metrics[f"problems_{name}"]["value"]
+            solved = metrics.get(f"solved_{name}", {}).get("value", 0)
+            sc = metrics.get(f"score_{name}", {}).get("value", 0.0)
+            s1 = metrics.get(f"solve_at_1_{name}", {}).get("value", 0.0)
+            lines.append(f"  {name:<20}: score={sc:.1f}, solve_at_1={s1:.1f}% ({solved}/{n} solved)")
+            if getattr(sub, "description", ""):
+                lines.append(f"  {'':<20}  {sub.description}")
+            if getattr(sub, "expect_all_solved", False):
+                failed = sorted(p for p in sub.problems if status_by_id.get(p) not in (None, "pass"))
+                if failed:
+                    lines.append(
+                        f"  {'':<20}  ! {len(failed)} failure(s) on problems every model solves - check these: "
+                        + ", ".join(failed)
+                    )
 
     if cases:
         lines.extend(

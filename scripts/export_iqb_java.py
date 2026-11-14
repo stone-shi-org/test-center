@@ -280,6 +280,12 @@ def export_dataset(
         shutil.rmtree(problems_root)
     problems_root.mkdir(parents=True, exist_ok=True)
 
+    # Carry subsets.json (built by build_iqb_java_subsets.py) into a fresh output directory.
+    default_subsets = REPO_ROOT / "test-data" / "iqb-java" / "subsets.json"
+    out_subsets = output_dir / "subsets.json"
+    if not out_subsets.exists() and default_subsets.is_file() and default_subsets.resolve() != out_subsets.resolve():
+        shutil.copy2(default_subsets, out_subsets)
+
     judge_prompt_path = output_dir / "judge_prompt.md"
     if not judge_prompt_path.is_file():
         judge_prompt_path.write_text(DEFAULT_JUDGE_PROMPT_MD, encoding="utf-8")

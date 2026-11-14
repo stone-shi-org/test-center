@@ -293,3 +293,36 @@ def aggregate_run_metrics(
             }
 
     return metrics
+
+
+def aggregate_subset_metrics(
+    case_records: list[dict[str, Any]],
+    subsets: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Per-subset metrics: ``score_<name>``, ``solve_at_1_<name>``, ``solved_<name>``, ``problems_<name>``.
+
+    Only evaluated problems count (a filtered run reports on the overlap). Subsets marked
+    ``expect_all_solved`` also get ``<name>_failures``: problems every reasonable model solves,
+    so any failure there deserves a look.
+    """
+    metrics: dict[str, dict[str, Any]] = {}
+    for name, subset in (subsets or {}).items():
+        members = set(getattr(subset, "problems", None) or [])
+        recs = [r for r in case_records if r.get("problem_id") in members]
+        if not recs:
+            continue
+        n = len(recs)
+        solved = sum(1 for r in recs if r.get("correct") == 1)
+        solved_1 = sum(1 for r in recs if r.get("correct") == 1 and r.get("solved_attempt") == 1)
+        metrics[f"score_{name}"] = {
+            "value": round(sum(float(r.get("case_score", 0.0)) for r in recs) / n * 100.0, 2),
+            "unit": "pts",
+            "better": "higher",
+        }
+        metrics[f"solve_at_1_{name}"] = {"value": round(solved_1 / n * 100.0, 2), "unit": "%", "better": "higher"}
+        metrics[f"solved_{name}"] = {"value": solved, "unit": "problems", "better": "higher"}
+        metrics[f"problems_{name}"] = {"value": n, "unit": "problems", "better": "higher"}
+        if getattr(subset, "expect_all_solved", False):
+            metrics[f"{name}_failures"] = {"value": n - solved, "unit": "problems", "better": "lower"}
+    return metrics
+
