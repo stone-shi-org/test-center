@@ -66,7 +66,7 @@ def build_attempt_feedback(
     if judge_result.status == STATUS_TOKEN_LIMIT:
         return (
             f"{header}\n\n"
-            "Your response reached the output token limit before it contained any code. "
+            "Your response reached the output token limit before it finished with a final answer. "
             "Keep your reasoning brief and return your complete solution in a single fenced ```java block."
         )
 

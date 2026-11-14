@@ -816,20 +816,33 @@ class LLMCodingTester(TesterPlugin):
                             stop_on_first_failure=False,
                             extract_from_markdown=False,
                         )
-                        if judge_run.status == STATUS_NO_CODE and finish_reason in ("length", "content_filter"):
-                            # Say why there is no code instead of a generic "no code extracted".
+                        if not judge_run.passed and finish_reason in ("length", "content_filter"):
+                            # The response was cut off before a final answer. Any code graded here was
+                            # pulled from the unfinished response (often a fragment of the reasoning), so
+                            # its Compile Error / Wrong Answer is a symptom: report the stop instead, and
+                            # keep the grader's output for reference. A cut-off response whose code
+                            # passes keeps its pass.
                             n_out = int(getattr(stream_res, "completion_tokens", 0) or 0)
+                            had_code = judge_run.status != STATUS_NO_CODE
+                            graded = (
+                                f"\n\nCode extracted from the cut-off response was graded {judge_run.status}"
+                                + (f":\n{judge_run.compile_error_output[:1500]}" if judge_run.compile_error_output else ".")
+                                if had_code
+                                else ""
+                            )
                             if finish_reason == "length":
                                 judge_run.status = STATUS_TOKEN_LIMIT
                                 judge_run.compile_error_output = (
                                     f"The response stopped at the output token limit ({n_out} completion tokens, "
-                                    f"max_tokens={max_tokens}) before any code block was written."
+                                    f"max_tokens={max_tokens}) "
+                                    + ("before a final answer." if had_code else "before any code block was written.")
+                                    + graded
                                 )
                             else:
                                 judge_run.status = STATUS_CONTENT_FILTERED
                                 judge_run.compile_error_output = (
                                     "The provider's content filter stopped the response before a complete code block "
-                                    f"({n_out} completion tokens)."
+                                    f"({n_out} completion tokens)." + graded
                                 )
                     final_code = extracted_code or ""
                     final_judge_run = judge_run

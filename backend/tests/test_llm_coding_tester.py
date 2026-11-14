@@ -1827,3 +1827,34 @@ def test_judge_placeholder_replies_are_retried_and_never_cached(tmp_path):
     assert len(j2.chat_calls) == 3
     assert d2["judge_error"].startswith("parse_error")
     assert s2["writes"] == 0
+
+
+def test_cut_off_response_with_code_fragment_is_token_limit_not_compile_error(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+
+    class CutOff:
+        def __init__(self, content):
+            self.content = content
+
+        def stream_chat(self, messages, model, max_tokens, effort=None):
+            return FakeStreamResp(content=self.content, completion_tokens=64000, finish_reason="length")
+
+    fragment = "Let me think.\n```java\nif (x > 0) {\n    y = 1;\n}\n```\nSo then ... and then"
+    piston_compile_error = {"run": {"stdout": "", "stderr": "Main.java:5: error: class, interface, or enum expected\nerror: compilation failed\n", "code": 1}}
+
+    def _run(llm, run_id, hook):
+        return get_tester("llm_coding").run(
+            config={"dataset_dir": str(ds_dir), "model": "m", "use_cache": False, "_chat_client": llm, "_piston_execute_hook": hook},
+            target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False),
+        ).cases[0].detail
+
+    d = _run(CutOff(fragment), 801, lambda p: piston_compile_error)
+    assert d["verdict"] == "Token Limit Reached"
+    msg = d["attempts"][0]["compile_error_output"]
+    assert "before a final answer" in msg and "graded Compile Error" in msg and "enum expected" in msg
+
+    # A cut-off response whose extracted code passes keeps the pass.
+    full = "```java\n" + SAMPLE_REFERENCE_JAVA + "\n```\nI could also explain more about"
+    d2 = _run(CutOff(full), 802, _piston_all_pass_hook)
+    assert d2["verdict"] == STATUS_ACCEPTED
