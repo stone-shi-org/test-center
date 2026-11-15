@@ -34,6 +34,7 @@ class RunWorker:
         artifacts_dir: Path | None = None,
         poll_interval: float = 1.0,
         default_timeout: float | None = None,
+        max_parallel_runs: int | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.settings = get_settings()
@@ -49,6 +50,11 @@ class RunWorker:
         self._active_processes: dict[int, asyncio.subprocess.Process] = {}
         self._active_run_processes: dict[int, set[asyncio.subprocess.Process]] = {}
         self._cancel_requests: set[int] = set()
+        self.max_parallel_runs = max(
+            1, int(max_parallel_runs if max_parallel_runs is not None else self.settings.MAX_PARALLEL_RUNS)
+        )
+        # Runs started by the worker loop: run_id -> (task, allows_parallel).
+        self._running: dict[int, tuple[asyncio.Task, bool]] = {}
 
     def trigger(self) -> None:
         """Wake up worker loop immediately when a new run is queued."""
@@ -71,14 +77,54 @@ class RunWorker:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 self._loop_task.cancel()
             self._loop_task = None
+        for task, _ in list(self._running.values()):
+            task.cancel()
+        self._running.clear()
         logger.info("RunWorker stopped")
 
+    @staticmethod
+    def run_allows_parallel(run: Run) -> bool:
+        """True when the run's config opts in to sharing the worker (``allow_parallel``).
+
+        Multi-definition runs/jobs always execute alone.
+        """
+        snap = run.config_snapshot
+        if not isinstance(snap, dict) or snap.get("definitions"):
+            return False
+        cfg = snap.get("config")
+        return bool(isinstance(cfg, dict) and cfg.get("allow_parallel"))
+
+    def _start_available_runs(self) -> int:
+        """Start queued runs as background tasks while the parallel rules allow. Returns how many started."""
+        started = 0
+        while not self._stop_event.is_set():
+            picked = self._pick_next_queued_run(respect_parallel=True)
+            if picked is None:
+                break
+            run_id, allows_parallel = picked
+            task = asyncio.create_task(self._execute_run_task(run_id))
+            self._running[run_id] = (task, allows_parallel)
+            started += 1
+        return started
+
+    async def _execute_run_task(self, run_id: int) -> None:
+        try:
+            await self.execute_run(run_id)
+            self._maybe_run_auto_retention()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error executing run #{run_id}: {e}", exc_info=True)
+        finally:
+            self._running.pop(run_id, None)
+            self._wake_event.set()  # a slot is free: let the loop start the next run
+
     async def _worker_loop(self) -> None:
-        """Main polling loop."""
+        """Main polling loop: starts queued runs (several at once when they allow parallel)."""
         while not self._stop_event.is_set():
             executed = False
             try:
-                executed = await self.poll_and_execute_once()
+                executed = self._start_available_runs() > 0
             except Exception as e:
                 logger.error(f"Unexpected error in worker loop: {e}", exc_info=True)
 
@@ -91,10 +137,11 @@ class RunWorker:
                 self._wake_event.clear()
 
     async def poll_and_execute_once(self) -> bool:
-        """Poll for next queued run and execute it. Returns True if a run was executed."""
-        run_id = self._pick_next_queued_run()
-        if run_id is None:
+        """Poll for next queued run and execute it (inline, one at a time). Returns True if a run was executed."""
+        picked = self._pick_next_queued_run()
+        if picked is None:
             return False
+        run_id, _ = picked
 
         await self.execute_run(run_id)
         self._maybe_run_auto_retention()
@@ -118,8 +165,14 @@ class RunWorker:
         except Exception as e:
             logger.warning(f"Auto-retention cleanup failed: {e}")
 
-    def _pick_next_queued_run(self) -> int | None:
-        """Find the oldest queued/pending run and atomically mark it as running."""
+    def _pick_next_queued_run(self, respect_parallel: bool = False) -> tuple[int, bool] | None:
+        """Find the oldest queued/pending run and atomically mark it as running.
+
+        With ``respect_parallel`` the queue stays FIFO: the oldest run starts only if nothing is
+        running, or if it and every running run allow parallel and ``max_parallel_runs`` is not
+        reached. Otherwise nothing starts (a run that must execute alone is never overtaken).
+        Returns ``(run_id, allows_parallel)``.
+        """
         db: Session = self.session_factory()
         try:
             running_job_ids = set(
@@ -144,11 +197,19 @@ class RunWorker:
             run = db.execute(stmt.limit(1)).scalars().first()
             if not run:
                 return None
+            allows_parallel = self.run_allows_parallel(run)
+            if respect_parallel and self._running:
+                if (
+                    not allows_parallel
+                    or len(self._running) >= self.max_parallel_runs
+                    or not all(p for _, p in self._running.values())
+                ):
+                    return None
 
             run.status = "running"
             run.started_at = utc_now()
             db.commit()
-            return run.id
+            return run.id, allows_parallel
         finally:
             db.close()
 

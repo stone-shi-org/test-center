@@ -349,7 +349,16 @@ class LLMCodingTester(TesterPlugin):
                 "description": "Optional explicit path to the SQLite llm_coding result cache file",
                 "x-advanced": True,
             },
-            "run_timeout": {
+            "allow_parallel": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Let this run execute at the same time as other runs that also allow parallel "
+                    "(up to MAX_PARALLEL_RUNS). Use for cloud APIs; leave off for local models sharing a GPU"
+                ),
+                "x-advanced": True,
+            },
+                        "run_timeout": {
                 "type": "number",
                 "minimum": 60.0,
                 "description": "Total run timeout in seconds before worker aborts execution (overrides DEFAULT_RUN_TIMEOUT of 5400s)",

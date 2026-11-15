@@ -418,3 +418,67 @@ def test_recover_stale_runs_loads_checkpointed_cases(tmp_path: Path, test_db_ses
     assert [x.tester for x in m.results] == ["dummy", "other"]
     assert [len(x.cases) for x in m.results] == [1, 2]
     db.close()
+
+
+async def _run_queue(test_db_session, tmp_path: Path, flags: list[bool], max_parallel: int, duration: float = 1.5):
+    """Queue dummy runs (allow_parallel per flag), run the worker loop until all finish, return the Run rows."""
+    db: Session = test_db_session()
+    ids = []
+    for i, allow in enumerate(flags):
+        cfg = {"duration_seconds": duration, "step_delay": 0.1, "fail_case": False, "create_artifacts": False}
+        if allow:
+            cfg["allow_parallel"] = True
+        run = Run(status="queued", queued_at=utc_now(),
+                  config_snapshot={"tester": "dummy", "config": cfg, "suites": ["smoke"]},
+                  target_snapshot={"name": f"t{i}"})
+        db.add(run)
+        db.commit()
+        ids.append(run.id)
+    db.close()
+    worker = RunWorker(session_factory=test_db_session, artifacts_dir=tmp_path / "artifacts",
+                       poll_interval=0.05, max_parallel_runs=max_parallel)
+    worker.start()
+    try:
+        for _ in range(600):
+            await asyncio.sleep(0.1)
+            db = test_db_session()
+            done = all(db.get(Run, i).status in ("completed", "failed", "error") for i in ids)
+            db.close()
+            if done:
+                break
+    finally:
+        await worker.stop()
+    db = test_db_session()
+    runs = [db.get(Run, i) for i in ids]
+    out = [(r.status, r.started_at, r.finished_at) for r in runs]
+    db.close()
+    return out
+
+
+def _overlap(a, b) -> bool:
+    return a[1] < b[2] and b[1] < a[2]
+
+
+@pytest.mark.asyncio
+async def test_worker_runs_allow_parallel_runs_concurrently(tmp_path: Path, test_db_session):
+    r = await _run_queue(test_db_session, tmp_path, [True, True], max_parallel=3)
+    assert [x[0] for x in r] == ["completed", "completed"]
+    assert _overlap(r[0], r[1])
+
+
+@pytest.mark.asyncio
+async def test_worker_exclusive_run_never_overlaps_and_is_not_overtaken(tmp_path: Path, test_db_session):
+    # parallel, exclusive, parallel: the exclusive run waits for the first, and the third waits for it (FIFO).
+    r = await _run_queue(test_db_session, tmp_path, [True, False, True], max_parallel=3)
+    assert all(x[0] == "completed" for x in r)
+    assert not _overlap(r[0], r[1]) and not _overlap(r[1], r[2])
+    assert r[1][1] >= r[0][2] and r[2][1] >= r[1][2]
+
+
+@pytest.mark.asyncio
+async def test_worker_respects_max_parallel_runs(tmp_path: Path, test_db_session):
+    r = await _run_queue(test_db_session, tmp_path, [True, True, True], max_parallel=2)
+    assert all(x[0] == "completed" for x in r)
+    assert _overlap(r[0], r[1])
+    # The third starts only after one of the first two finished.
+    assert r[2][1] >= min(r[0][2], r[1][2])
