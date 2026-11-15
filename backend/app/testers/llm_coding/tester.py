@@ -353,12 +353,13 @@ class LLMCodingTester(TesterPlugin):
                 "type": "boolean",
                 "default": False,
                 "description": (
-                    "Let this run execute at the same time as other runs that also allow parallel "
-                    "(up to MAX_PARALLEL_RUNS). Use for cloud APIs; leave off for local models sharing a GPU"
+                    "Let this run execute at the same time as other runs (up to MAX_PARALLEL_RUNS "
+                    "parallel runs). Use for cloud APIs; leave off for local models sharing a GPU: "
+                    "runs without it execute one at a time, though parallel runs can still run alongside"
                 ),
                 "x-advanced": True,
             },
-                        "run_timeout": {
+            "run_timeout": {
                 "type": "number",
                 "minimum": 60.0,
                 "description": "Total run timeout in seconds before worker aborts execution (overrides DEFAULT_RUN_TIMEOUT of 5400s)",

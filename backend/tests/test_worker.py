@@ -466,13 +466,47 @@ async def test_worker_runs_allow_parallel_runs_concurrently(tmp_path: Path, test
     assert _overlap(r[0], r[1])
 
 
+def _max_concurrency(runs) -> int:
+    """Highest number of the given runs executing at the same instant."""
+    events = sorted([(r[1], 1) for r in runs] + [(r[2], -1) for r in runs], key=lambda e: (e[0], e[1]))
+    cur = best = 0
+    for _, d in events:
+        cur += d
+        best = max(best, cur)
+    return best
+
+
 @pytest.mark.asyncio
-async def test_worker_exclusive_run_never_overlaps_and_is_not_overtaken(tmp_path: Path, test_db_session):
-    # parallel, exclusive, parallel: the exclusive run waits for the first, and the third waits for it (FIFO).
-    r = await _run_queue(test_db_session, tmp_path, [True, False, True], max_parallel=3)
+async def test_worker_parallel_run_starts_alongside_running_exclusive_run(tmp_path: Path, test_db_session):
+    # An exclusive run (local GPU model) is running; a parallel run queued after it does not wait.
+    r = await _run_queue(test_db_session, tmp_path, [False, True], max_parallel=3)
+    assert [x[0] for x in r] == ["completed", "completed"]
+    assert _overlap(r[0], r[1])
+
+
+@pytest.mark.asyncio
+async def test_worker_exclusive_runs_execute_one_at_a_time_in_order(tmp_path: Path, test_db_session):
+    # exclusive, exclusive, parallel: the exclusives never overlap each other and keep FIFO order,
+    # while the parallel run is not held up behind them.
+    r = await _run_queue(test_db_session, tmp_path, [False, False, True], max_parallel=3)
     assert all(x[0] == "completed" for x in r)
-    assert not _overlap(r[0], r[1]) and not _overlap(r[1], r[2])
-    assert r[1][1] >= r[0][2] and r[2][1] >= r[1][2]
+    assert not _overlap(r[0], r[1])
+    assert r[1][1] >= r[0][2]
+    assert _overlap(r[0], r[2])
+
+
+@pytest.mark.asyncio
+async def test_worker_exclusive_lane_alongside_capped_parallel_lane(tmp_path: Path, test_db_session):
+    # 3 exclusive + 5 parallel runs, cap 3: exclusives run one by one, parallels 3 at a time, side by side.
+    flags = [False, False, False, True, True, True, True, True]
+    r = await _run_queue(test_db_session, tmp_path, flags, max_parallel=3, duration=1.0)
+    assert all(x[0] == "completed" for x in r)
+    exclusive = [x for x, f in zip(r, flags) if not f]
+    parallel = [x for x, f in zip(r, flags) if f]
+    assert _max_concurrency(exclusive) == 1
+    assert exclusive[1][1] >= exclusive[0][2] and exclusive[2][1] >= exclusive[1][2]
+    assert _max_concurrency(parallel) == 3
+    assert any(_overlap(exclusive[0], x) for x in parallel)
 
 
 @pytest.mark.asyncio
@@ -482,3 +516,11 @@ async def test_worker_respects_max_parallel_runs(tmp_path: Path, test_db_session
     assert _overlap(r[0], r[1])
     # The third starts only after one of the first two finished.
     assert r[2][1] >= min(r[0][2], r[1][2])
+
+
+@pytest.mark.asyncio
+async def test_worker_exclusive_run_does_not_use_a_parallel_slot(tmp_path: Path, test_db_session):
+    # The cap counts parallel runs only: two parallel runs (cap 2) plus one exclusive all overlap.
+    r = await _run_queue(test_db_session, tmp_path, [True, True, False], max_parallel=2)
+    assert all(x[0] == "completed" for x in r)
+    assert _max_concurrency(r) == 3

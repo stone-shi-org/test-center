@@ -166,12 +166,18 @@ class RunWorker:
             logger.warning(f"Auto-retention cleanup failed: {e}")
 
     def _pick_next_queued_run(self, respect_parallel: bool = False) -> tuple[int, bool] | None:
-        """Find the oldest queued/pending run and atomically mark it as running.
+        """Find the next queued/pending run to start and atomically mark it as running.
 
-        With ``respect_parallel`` the queue stays FIFO: the oldest run starts only if nothing is
-        running, or if it and every running run allow parallel and ``max_parallel_runs`` is not
-        reached. Otherwise nothing starts (a run that must execute alone is never overtaken).
-        Returns ``(run_id, allows_parallel)``.
+        Without ``respect_parallel`` this is simply the oldest queued run.
+
+        With ``respect_parallel`` runs are split into two lanes, each FIFO on its own:
+
+        * exclusive lane (runs without ``allow_parallel``, e.g. local models on one GPU):
+          one at a time; the oldest exclusive run starts only when no exclusive run is running.
+        * parallel lane (runs with ``allow_parallel``): up to ``max_parallel_runs`` at once.
+
+        The lanes do not block each other, so a parallel run may start while an exclusive one
+        runs (and vice versa). Returns ``(run_id, allows_parallel)``.
         """
         db: Session = self.session_factory()
         try:
@@ -194,16 +200,36 @@ class RunWorker:
                 stmt = stmt.where(
                     (Run.job_id.is_(None)) | (Run.job_id.not_in(running_job_ids))
                 )
-            run = db.execute(stmt.limit(1)).scalars().first()
-            if not run:
-                return None
-            allows_parallel = self.run_allows_parallel(run)
-            if respect_parallel and self._running:
-                if (
-                    not allows_parallel
-                    or len(self._running) >= self.max_parallel_runs
-                    or not all(p for _, p in self._running.values())
-                ):
+
+            if not respect_parallel:
+                run = db.execute(stmt.limit(1)).scalars().first()
+                if not run:
+                    return None
+                allows_parallel = self.run_allows_parallel(run)
+            else:
+                parallel_running = sum(1 for _, p in self._running.values() if p)
+                exclusive_running = len(self._running) - parallel_running
+                # A lane is open if it may start its oldest queued run; each lane only ever
+                # considers its oldest run, so neither lane overtakes within itself.
+                lane_open = {
+                    False: exclusive_running == 0,
+                    True: parallel_running < self.max_parallel_runs,
+                }
+                if not any(lane_open.values()):
+                    return None
+                run = None
+                seen: set[bool] = set()
+                for candidate in db.execute(stmt).scalars():
+                    lane = self.run_allows_parallel(candidate)
+                    if lane in seen:
+                        continue
+                    seen.add(lane)
+                    if lane_open[lane]:
+                        run, allows_parallel = candidate, lane
+                        break
+                    if len(seen) == 2:
+                        break
+                if run is None:
                     return None
 
             run.status = "running"
