@@ -62,6 +62,7 @@ from backend.app.testers.llm_coding.prompts import (
     SYSTEM_PROMPT_STANDARD,
     SYSTEM_PROMPT_TOOLS,
     build_problem_prompt,
+    build_system_prompt,
 )
 from backend.app.testers.llm_coding.report import format_llm_coding_report
 from backend.app.testers.llm_coding.scoring import (
@@ -688,7 +689,7 @@ class LLMCodingTester(TesterPlugin):
             eff_cpu_limit_ms = None
 
         user_prompt = build_problem_prompt(problem, tools_enabled=tools_enabled)
-        sys_prompt = SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD
+        sys_prompt = build_system_prompt(problem, tools_enabled=tools_enabled)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_prompt},
@@ -1250,6 +1251,11 @@ class LLMCodingTester(TesterPlugin):
             key["problem_id"] = prob.id
             key["problem_sha256"] = prob.sha256
             key["user_prompt_sha256"] = sha256_text(build_problem_prompt(prob, tools_enabled=tools_enabled))
+            # Only templates without `class Solution` get a different system prompt; keying it per
+            # problem leaves every other problem's cache key unchanged.
+            prob_sys = build_system_prompt(prob, tools_enabled=tools_enabled)
+            if prob_sys != (SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD):
+                key["system_prompt_override_sha256"] = sha256_text(prob_sys)
 
             cached = result_cache.get(key)
             if cached is not None:

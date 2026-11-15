@@ -1906,3 +1906,42 @@ def test_subsets_json_adds_subset_metrics_tags_and_red_flags(tmp_path):
     )
     assert not any(k.startswith(("score_baseline", "baseline_failures")) for k in res2.metrics)
     assert all(c.detail["subsets"] == [] for c in res2.cases)
+
+
+def test_system_prompt_names_template_class_when_there_is_no_solution(tmp_path):
+    import dataclasses
+
+    from backend.app.testers.llm_coding.prompts import SYSTEM_PROMPT_STANDARD, SYSTEM_PROMPT_TOOLS, build_system_prompt
+    from backend.app.testers.llm_coding.retry import is_transient_error
+
+    ds = load_iqb_java_dataset(_write_synthetic_dataset(tmp_path / "ds", num_problems=1))
+    base = ds.problems[0]
+    assert build_system_prompt(base) == SYSTEM_PROMPT_STANDARD
+    assert build_system_prompt(base, tools_enabled=True) == SYSTEM_PROMPT_TOOLS
+    no_sol = dataclasses.replace(base, template_java="class MovingAverage {\n  public MovingAverage(int n) {}\n}\n",
+                                 harness_java="public class Main {}\nclass Solution {}\n")
+    sp = build_system_prompt(no_sol)
+    assert "`MovingAverage`" in sp and "do not add a `class Solution`" in sp and "containing `class Solution`" not in sp
+    assert "`MovingAverage`" in build_system_prompt(no_sol, tools_enabled=True)
+
+    assert is_transient_error("HTTP request to http://omniroute:20128/v1/chat/completions failed: peer closed connection "
+                              "without sending complete message body (incomplete chunked read)")
+
+
+def test_system_prompt_variant_only_changes_affected_cache_keys(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+    cache = tmp_path / "c.sqlite3"
+
+    def _run(run_id):
+        res = get_tester("llm_coding").run(
+            config={"dataset_dir": str(ds_dir), "model": "m", "_chat_client": FakeChatClient(),
+                    "_piston_execute_hook": _piston_all_pass_hook, "cache_path": str(cache)},
+            target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False),
+        )
+        return res.cases[0].detail
+
+    first = _run(951)
+    sys_msg = next(m["content"] for m in first["transcript"] if m["role"] == "system")
+    assert "containing `class Solution`" in sys_msg  # standard problem: unchanged prompt
+    assert _run(952)["cache_hit"] is True  # and unchanged cache key

@@ -54,6 +54,33 @@ SYSTEM_PROMPT_TOOLS = (
 )
 
 
+def build_system_prompt(problem: ProblemSpec, tools_enabled: bool = False) -> str:
+    """System prompt for a problem.
+
+    The standard prompts ask for ``class Solution``. For a template without one (e.g. ``LRUCache``)
+    that contradicts the user prompt, and models that rank the system prompt higher add an empty
+    ``class Solution {}`` that clashes with the harness. Those problems get a variant naming the
+    template's classes; every other problem gets the unchanged standard prompt (same cache key).
+    """
+    has_solution, others = template_answer_classes(problem)
+    if has_solution or not others:
+        return SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD
+    classes = f"the template's {_fmt(others)} class{'es' if len(others) > 1 else ''} (there is no `class Solution`)"
+    if tools_enabled:
+        return (
+            "You are an expert Java programmer solving coding interview problems with access to execution tools. "
+            f"You may use `compile`, `run_samples`, and `run_custom` to verify and debug your implementation of {classes}. "
+            f"When ready, call `submit(code)` with the complete Java source containing {classes} "
+            "(imports allowed, no `class Main`, do not add a `class Solution`)."
+        )
+    return (
+        "You are an expert Java programmer solving coding interview problems. "
+        "Follow the template signature and requirements strictly. "
+        f"Return your final code in a single fenced ```java code block containing {classes}; "
+        "do not add a `class Solution`."
+    )
+
+
 def build_problem_prompt(problem: ProblemSpec, tools_enabled: bool = False) -> str:
     """Build the initial user prompt for a coding problem."""
     parts: list[str] = [

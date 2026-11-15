@@ -19,7 +19,8 @@ from backend.app.testers.llm.client import ChatClientError
 TRANSIENT_ERROR_RE = re.compile(
     r"status (?:429|500|502|503|504)\b|\[(?:429|500|502|503|504)\]|ECONNREFUSED|ECONNRESET|"
     r"fetch failed|temporarily unavailable|all targets were skipped|connection refused|"
-    r"ConnectError|RemoteProtocolError|Server disconnected",
+    r"ConnectError|RemoteProtocolError|Server disconnected|peer closed connection|"
+    r"incomplete chunked read|Connection reset",
     re.IGNORECASE,
 )
 # Never retried, even if the message also matches above (e.g. a 504 for a combo timeout).
