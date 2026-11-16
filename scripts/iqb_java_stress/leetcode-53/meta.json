@@ -1,0 +1,6 @@
+{
+  "name": "n100000",
+  "constraint": "1 <= nums.length <= 10^5, -10^4 <= nums[i] <= 10^4 (values kept to -9..9: well inside the range, and shorter input text means less harness parsing time)",
+  "enabled": false,
+  "disabled_reason": "reference CPU swings between 1.7 s and 2.6 s against the 3 s cap: borderline. Enable when the sidecar CPU limit is raised."
+}

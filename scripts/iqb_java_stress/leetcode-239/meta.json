@@ -1,0 +1,7 @@
+{
+  "name": "n100000_k_half",
+  "constraint": "nums.length <= 10^5, -10^4 <= nums[i] <= 10^4, 1 <= k <= nums.length (values kept to -9..9: well inside the range, and shorter input text means less harness parsing time)",
+  "note": "A plain int-loop brute force (n*k = 2.5e9 steps) lands at 2.8-3.0 s CPU, a coin flip against the 3 s cap, so the validated slow version is the stream-based brute force.",
+  "enabled": false,
+  "disabled_reason": "reference CPU on the shared sidecar swings between 2.0 s and 2.8 s against the 3 s cap: no reliable headroom. Enable when the sidecar CPU limit is raised."
+}

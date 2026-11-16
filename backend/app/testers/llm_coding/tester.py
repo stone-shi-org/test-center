@@ -615,12 +615,12 @@ class LLMCodingTester(TesterPlugin):
             "attempts_used": 0,
             "max_attempts": 1,
             "passed_cases": 0,
-            "total_cases": len(problem.tests),
+            "total_cases": len(problem.all_tests),
             "test_case_pass_rate": 0.0,
             "sample_passed": 0,
             "sample_total": len(problem.sample_case_idx),
             "hidden_passed": 0,
-            "hidden_total": max(0, len(problem.tests) - len(problem.sample_case_idx)),
+            "hidden_total": max(0, len(problem.all_tests) - len(problem.sample_case_idx)),
             "case_score_100": 0.0,
             "score_breakdown": {
                 "correct": 0,
@@ -805,7 +805,7 @@ class LLMCodingTester(TesterPlugin):
                         )
                         ctx.log(f"[{problem.id}] Attempt {attempt_num}: {reason}", level="warning")
                         extracted_code = None
-                        n_tests = len(problem.tests)
+                        n_tests = len(problem.all_tests)
                         n_samples = len(problem.sample_case_idx)
                         judge_run = JudgeRunResult(
                             status=STATUS_TRUNCATED,
@@ -823,7 +823,7 @@ class LLMCodingTester(TesterPlugin):
                             client=piston_client,
                             code=extracted_code,
                             harness=problem.harness_java,
-                            test_cases=problem.tests,
+                            test_cases=problem.all_tests,
                             sample_case_idx=problem.sample_case_idx,
                             timeout_ms=eff_timeout_ms,
                             cpu_limit_ms=eff_cpu_limit_ms,
@@ -941,12 +941,12 @@ class LLMCodingTester(TesterPlugin):
                 passed=False,
                 correct=0,
                 passed_cases=0,
-                total_cases=len(problem.tests),
+                total_cases=len(problem.all_tests),
                 test_case_pass_rate=0.0,
                 sample_passed=0,
                 sample_total=len(problem.sample_case_idx),
                 hidden_passed=0,
-                hidden_total=max(0, len(problem.tests) - len(problem.sample_case_idx)),
+                hidden_total=max(0, len(problem.all_tests) - len(problem.sample_case_idx)),
             )
 
         # Optional LLM Judge evaluation (Section 6)
@@ -1371,6 +1371,10 @@ class LLMCodingTester(TesterPlugin):
                     c_metrics = cached["case_metrics"]
                     c_detail = cached["case_detail"]
                     agg_rec = cached["agg_record"]
+                    if c_detail.get("passed") and int(c_detail.get("passed_cases") or 0) < int(c_detail.get("total_cases") or 0):
+                        # Graded "Accepted" under the old rule (hidden tests only) although a visible
+                        # test failed; every test must pass now, so run this problem again.
+                        raise KeyError("stale grading rule")
                 except (KeyError, TypeError):
                     cached = None
                 else:

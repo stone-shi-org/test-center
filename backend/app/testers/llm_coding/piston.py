@@ -9,6 +9,7 @@ Ported from ``interview-question-bank/src/lib/judge-runner.ts`` with support for
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -91,6 +92,10 @@ class JudgeTestCase:
     expected_output: str
     index: int = 0
     is_sample: bool = False
+    # Generated stress case: {"name": ..., "generator_java": "class StressGen {...}"}. Piston's request
+    # body is capped (~100 KB), so a large input cannot travel as stdin; instead the program builds it
+    # in the JVM (see ``wrap_stress_harness``) and ``expected_output`` is a digest of the harness output.
+    stress: dict[str, Any] | None = None
 
 
 @dataclass
@@ -480,6 +485,82 @@ class PistonClient:
         return res
 
 
+STRESS_WRAPPER_JAVA = r"""
+public class Main {
+    public static void main(String[] args) throws Exception {
+        byte[] in = StressGen.gen().getBytes("UTF-8");
+        System.setIn(new java.io.ByteArrayInputStream(in));
+        java.io.PrintStream real = System.out;
+        java.io.ByteArrayOutputStream cap = new java.io.ByteArrayOutputStream();
+        System.setOut(new java.io.PrintStream(cap, true, "UTF-8"));
+        HarnessMain.main(args);
+        System.out.flush();
+        byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(cap.toByteArray());
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 8; i++) sb.append(String.format("%02x", h[i]));
+        real.println("len=" + cap.size() + " sha=" + sb);
+    }
+}
+"""
+
+_HARNESS_MAIN_RE = re.compile(r"(?:public\s+)?class\s+Main\b")
+
+
+def wrap_stress_harness(harness: str, generator_java: str) -> str:
+    """Wrap a stdin/stdout harness so a generator fills ``System.in`` and only a digest is printed.
+
+    The harness's ``Main`` is renamed ``HarnessMain`` and a new ``Main`` runs it on generated input,
+    printing ``len=<bytes> sha=<sha256 prefix>`` of what the harness wrote to stdout (Piston limits
+    output size, and big results cannot be echoed anyway). The new ``Main`` must come first in the
+    file: single-file source launch runs the first class declared.
+    """
+    if not _HARNESS_MAIN_RE.search(harness):
+        raise ValueError("harness has no class Main to wrap")
+    lines = _HARNESS_MAIN_RE.sub("class HarnessMain", harness, count=1).split("\n")
+    imports = [i for i, line in enumerate(lines) if line.startswith("import ")]
+    cut = (max(imports) + 1) if imports else 0
+    return "\n".join(lines[:cut]) + "\n" + STRESS_WRAPPER_JAVA + "\n" + generator_java + "\n" + "\n".join(lines[cut:])
+
+
+def run_stress_once(
+    client: PistonClient,
+    code: str,
+    harness: str,
+    generator_java: str,
+    timeout_ms: int | float | None = PISTON_MAX_RUN_TIMEOUT_MS,
+) -> dict[str, Any]:
+    """Run one solution on a generated input and return ``{status, stdout, cpu_ms, stderr}``.
+
+    ``status`` is ``ok`` / ``tle`` / ``rte`` / ``compile``; ``stdout`` is the digest line. Used to build
+    and validate stress cases (the reference's digest becomes the expected output).
+    """
+    merged = merge_java_solution_with_harness(code, wrap_stress_harness(harness, generator_java))
+    data = client.execute_java(merged.code, stdin="", timeout_ms=timeout_ms)
+    run = data.get("run") or {}
+    stderr = str(run.get("stderr") or "")
+    comp = data.get("compile")
+    if (isinstance(comp, dict) and comp.get("code", 0) != 0) or JAVA_SOURCE_LAUNCH_COMPILE_ERROR_RE.search(stderr):
+        status = "compile"
+    elif _piston_timed_out(data):
+        status = "tle"
+    elif run.get("code") != 0:
+        status = "rte"
+    else:
+        status = "ok"
+    cpu = run.get("cpu_time")
+    return {
+        "status": status,
+        "stdout": str(run.get("stdout") or "").strip(),
+        "cpu_ms": float(cpu) if isinstance(cpu, (int, float)) else None,
+        "stderr": stderr[:400],
+    }
+
+
+def _piston_timed_out(piston_data: dict[str, Any]) -> bool:
+    run = piston_data.get("run") or {}
+    return run.get("signal") in ("SIGTERM", "SIGKILL") or run.get("status") == "TO"
+
+
 def judge_java_solution(
     client: PistonClient,
     code: str | None,
@@ -506,6 +587,7 @@ def judge_java_solution(
                     expected_output=tc.expected_output,
                     index=i,
                     is_sample=(i in sample_set) or tc.is_sample,
+                    stress=tc.stress,
                 )
             )
         else:
@@ -515,6 +597,7 @@ def judge_java_solution(
                     expected_output=str(tc.get("expected_output") or tc.get("expected") or ""),
                     index=i,
                     is_sample=i in sample_set,
+                    stress=tc.get("stress") if isinstance(tc.get("stress"), dict) else None,
                 )
             )
 
@@ -541,6 +624,14 @@ def judge_java_solution(
         )
 
     merged = merge_java_solution_with_harness(candidate_code, harness)
+    # Generated stress cases run the same solution inside their own wrapped harness.
+    stress_merged = {
+        tc.index: merge_java_solution_with_harness(
+            candidate_code, wrap_stress_harness(harness, str(tc.stress["generator_java"]))
+        )
+        for tc in normalized_cases
+        if tc.stress
+    }
 
     # Check the largest request up front: Piston would reject it (HTTP 400
     # PayloadTooLargeError), and failing as a verdict keeps the attempt and response
@@ -551,8 +642,8 @@ def judge_java_solution(
                 {
                     "language": "java",
                     "version": getattr(client, "java_version", DEFAULT_JAVA_VERSION),
-                    "files": [{"name": "Main.java", "content": merged.code}],
-                    "stdin": tc.input or "",
+                    "files": [{"name": "Main.java", "content": stress_merged.get(tc.index, merged).code}],
+                    "stdin": "" if tc.stress else (tc.input or ""),
                     "run_timeout": clamp_piston_timeout_ms(timeout_ms),
                 }
             )
@@ -589,13 +680,20 @@ def judge_java_solution(
     run_start = time.perf_counter()
 
     for idx, tc in enumerate(normalized_cases):
+        case_merged = stress_merged.get(tc.index, merged)
         case_start = time.perf_counter()
         piston_data = client.execute_java(
-            merged.code,
-            stdin=tc.input,
+            case_merged.code,
+            stdin="" if tc.stress else tc.input,
             timeout_ms=timeout_ms,
         )
+        if tc.stress and _piston_timed_out(piston_data):
+            # Generated cases run close to the CPU cap by design; a loaded sidecar can push a correct
+            # solution over it. A genuinely slow solution times out again.
+            piston_data = client.execute_java(case_merged.code, stdin="", timeout_ms=timeout_ms)
         duration_ms = (time.perf_counter() - case_start) * 1000.0
+        if tc.stress:
+            tc = dataclasses.replace(tc, input=f"[generated stress input: {tc.stress.get('name', 'stress')}]")
 
         run_mem = int((piston_data.get("run") or {}).get("memory") or 0)
         if run_mem > peak_memory_bytes:
@@ -603,7 +701,7 @@ def judge_java_solution(
 
         comp_failed, comp_err, case_res = map_piston_response_to_case_result(
             piston_data=piston_data,
-            merged=merged,
+            merged=case_merged,
             tc=tc,
             duration_ms=duration_ms,
             cpu_limit_ms=cpu_limit_ms,
@@ -649,30 +747,23 @@ def judge_java_solution(
     hidden_passed = sum(1 for r in test_results if (not r.is_sample) and r.passed)
     pass_rate = (passed_cases / total_cases) if total_cases > 0 else 0.0
 
-    # Correctness is determined by hidden tests (or all tests if hidden_total == 0,
-    # e.g. when running sample-only helper).
+    # A solution is correct only if EVERY test passes, visible samples included. (Hidden tests alone
+    # used to decide it, so failing a visible sample was still graded Accepted.) With
+    # ``stop_on_first_failure`` the run stops at the first failure, which is still a failure.
     if compilation_failed:
         overall_status = STATUS_COMPILE_ERROR
         correct = 0
         passed = False
     else:
-        if hidden_total > 0:
-            eval_results = [r for r in test_results if not r.is_sample]
-        else:
-            eval_results = test_results
-
-        all_eval_passed = len(eval_results) > 0 and all(r.passed for r in eval_results)
-        if all_eval_passed:
+        all_passed = len(test_results) > 0 and all(r.passed for r in test_results)
+        if all_passed:
             correct = 1
             passed = True
             overall_status = STATUS_ACCEPTED
         else:
             correct = 0
             passed = False
-            first_failed = next(
-                (r for r in eval_results if not r.passed),
-                next((r for r in test_results if not r.passed), None),
-            )
+            first_failed = next((r for r in test_results if not r.passed), None)
             overall_status = first_failed.status if first_failed else STATUS_WRONG_ANSWER
 
     return JudgeRunResult(

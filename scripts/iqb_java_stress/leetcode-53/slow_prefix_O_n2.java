@@ -1,0 +1,1 @@
+class Solution { public int maxSubArray(int[] a) { int best = Integer.MIN_VALUE; for (int i = 0; i < a.length; i++) { int s = 0; for (int j = i; j < a.length; j++) { s += a[j]; best = Math.max(best, s); } } return best; } }

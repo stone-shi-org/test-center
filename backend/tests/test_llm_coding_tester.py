@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -25,6 +26,7 @@ from backend.app.testers.llm_coding.dataset import (
     DEFAULT_JUDGE_PROMPT_MD,
     SOLUTION_HEADING_RE,
     compute_problem_sha256,
+    load_problem_from_dir,
     compute_problems_Rollup_sha256,
     load_iqb_java_dataset,
     pick_sample_case_indices,
@@ -2064,3 +2066,167 @@ def test_legacy_v1_cache_entries_are_migrated_not_lost(tmp_path):
     assert rows == [(CACHE_SCHEMA_VERSION,)]
     assert CodingResultCache(path).migrated == 0  # idempotent
 
+
+
+# ---------------------------------------------------------------------------
+# Every test must pass; generated stress cases
+# ---------------------------------------------------------------------------
+
+
+def test_failing_a_visible_sample_is_not_correct_even_if_hidden_tests_pass():
+    tests = [
+        {"input": "2 3\n", "expected_output": "5\n"},      # sample (index 0)
+        {"input": "10 20\n", "expected_output": "30\n"},   # hidden
+    ]
+    outputs = ["999\n", "30\n"]  # wrong on the sample, right on the hidden test
+    res = judge_java_solution(
+        client=PistonClient(execute_hook=lambda p: {"run": {"stdout": outputs.pop(0), "stderr": "", "code": 0, "cpu_time": 50}}),
+        code=SAMPLE_REFERENCE_JAVA, harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0],
+    )
+    assert res.hidden_passed == 1 and res.sample_passed == 0
+    assert res.correct == 0 and res.passed is False and res.status == STATUS_WRONG_ANSWER
+
+
+def test_wrap_stress_harness_puts_wrapper_first_and_renames_main():
+    from backend.app.testers.llm_coding.piston import wrap_stress_harness
+
+    wrapped = wrap_stress_harness(SAMPLE_HARNESS_JAVA, "class StressGen { static String gen() { return \"1 2\\n\"; } }")
+    first_class = re.search(r"^(?:public\s+)?class\s+(\w+)", wrapped.split("import java.util.*;", 1)[1], re.M).group(1)
+    assert first_class == "Main"  # source launch runs the first class declared
+    assert "class HarnessMain" in wrapped and "class StressGen" in wrapped and wrapped.count("public class Main") == 1
+    with pytest.raises(ValueError):
+        wrap_stress_harness("class Other {}", "class StressGen {}")
+
+
+def test_stress_case_runs_wrapped_with_empty_stdin_retries_timeouts_and_counts_as_hidden():
+    calls: list[dict[str, Any]] = []
+    state = {"stress_timeouts": 1}
+
+    def hook(payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append(payload)
+        code = payload["files"][0]["content"]
+        if "class StressGen" in code:
+            assert payload["stdin"] == ""
+            if state["stress_timeouts"] > 0:
+                state["stress_timeouts"] -= 1
+                return {"run": {"stdout": "", "stderr": "", "code": None, "signal": "SIGKILL", "status": "TO", "cpu_time": 3050}}
+            return {"run": {"stdout": "len=7 sha=0123456789abcdef\n", "stderr": "", "code": 0, "cpu_time": 1900}}
+        return {"run": {"stdout": "5\n", "stderr": "", "code": 0, "cpu_time": 50}}
+
+    tests = [
+        {"input": "2 3\n", "expected_output": "5\n"},
+        {"input": "", "expected_output": "len=7 sha=0123456789abcdef",
+         "stress": {"name": "big", "generator_java": "class StressGen { static String gen() { return \"\"; } }"}},
+    ]
+    res = judge_java_solution(client=PistonClient(execute_hook=hook), code=SAMPLE_REFERENCE_JAVA,
+                              harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0])
+    assert res.passed and res.total_cases == 2 and res.hidden_total == 1 and res.hidden_passed == 1
+    assert sum("class StressGen" in c["files"][0]["content"] for c in calls) == 2  # one retry after the time-out
+    assert res.test_results[1].input.startswith("[generated stress input: big]")
+
+    # A solution that really is too slow times out on both tries and fails the stress case.
+    state["stress_timeouts"] = 99
+    res2 = judge_java_solution(client=PistonClient(execute_hook=hook), code=SAMPLE_REFERENCE_JAVA,
+                               harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0])
+    assert not res2.passed and res2.status == STATUS_TLE
+
+    # A wrong digest is a wrong answer.
+    state["stress_timeouts"] = 0
+    tests[1]["expected_output"] = "len=7 sha=ffffffffffffffff"
+    res3 = judge_java_solution(client=PistonClient(execute_hook=hook), code=SAMPLE_REFERENCE_JAVA,
+                               harness=SAMPLE_HARNESS_JAVA, test_cases=tests, sample_case_idx=[0])
+    assert not res3.passed and res3.status == STATUS_WRONG_ANSWER
+
+
+def test_stress_json_is_loaded_hashed_only_when_present_and_added_to_all_tests(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+    pdir = ds_dir / "problems" / "prob-1"
+    before = compute_problem_sha256(pdir)
+    plain = load_problem_from_dir(pdir)
+    assert plain.stress == [] and plain.all_tests == plain.tests and plain.sha256 == before
+
+    (pdir / "stress.json").write_text(json.dumps([{"name": "big", "generator_java": "class StressGen {}", "expected_output": "len=1 sha=ab"}]))
+    withs = load_problem_from_dir(pdir)
+    assert withs.sha256 != before  # tests changed, so cached results for this problem are not reused
+    assert len(withs.all_tests) == len(plain.tests) + 1 and withs.all_tests[-1]["stress"]["name"] == "big"
+    assert withs.sample_case_idx == plain.sample_case_idx  # stress cases are never samples
+
+    (pdir / "stress.json").write_text(json.dumps([{"name": "bad"}]))
+    with pytest.raises(ValueError):
+        load_problem_from_dir(pdir)
+
+
+def test_cached_pass_with_a_failed_visible_test_is_rerun(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+    cache = tmp_path / "c.sqlite3"
+    cfg = {"dataset_dir": str(ds_dir), "model": "m", "cache_path": str(cache), "_piston_execute_hook": _piston_all_pass_hook}
+
+    def run(run_id, llm):
+        return get_tester("llm_coding").run(
+            config={**cfg, "_chat_client": llm}, target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False)).cases[0].detail
+
+    run(971, FakeChatClient())
+    # Rewrite the stored entry the way the old rule produced it: Accepted although a test failed.
+    import sqlite3
+    con = sqlite3.connect(str(cache))
+    key, val = con.execute("select cache_key, value_json from llm_coding_cache").fetchone()
+    v = json.loads(val); v["case_detail"]["passed_cases"] = v["case_detail"]["total_cases"] - 1
+    con.execute("update llm_coding_cache set value_json = ? where cache_key = ?", (json.dumps(v), key)); con.commit(); con.close()
+
+    llm = FakeChatClient()
+    d = run(972, llm)
+    assert d["cache_hit"] is False and len(llm.stream_calls) == 1  # re-ran the model instead of trusting the entry
+    assert run(973, FakeChatClient())["cache_hit"] is True  # and the fresh result is cached again
+
+
+def _load_exporter():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "export_iqb_java_stress", Path(__file__).resolve().parents[2] / "scripts" / "export_iqb_java.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_exporter_builds_and_validates_stress_definitions(tmp_path):
+    mod = _load_exporter()
+    defs = tmp_path / "defs"
+    d = defs / "p1"
+    d.mkdir(parents=True)
+    (d / "meta.json").write_text(json.dumps({"name": "big", "constraint": "n <= 10^5"}))
+    (d / "generator.java").write_text("class StressGen { static String gen() { return \"1 2\\n\"; } }")
+    (d / "ok_alt.java").write_text(SAMPLE_REFERENCE_JAVA + "\n// OK_ALT\n")
+    (d / "slow_naive.java").write_text(SAMPLE_REFERENCE_JAVA + "\n// SLOW_NAIVE\n")
+    behaviour = {"ref_cpu": 1500, "slow_times_out": True}
+
+    def hook(payload):
+        code = payload["files"][0]["content"]
+        assert payload["stdin"] == "" and "class StressGen" in code
+        if "SLOW_NAIVE" in code and behaviour["slow_times_out"]:
+            return {"run": {"stdout": "", "stderr": "", "code": None, "signal": "SIGKILL", "status": "TO", "cpu_time": 3050}}
+        return {"run": {"stdout": "len=5 sha=00ff00ff00ff00ff\n", "stderr": "", "code": 0, "cpu_time": behaviour["ref_cpu"]}}
+
+    client = PistonClient(execute_hook=hook)
+    cases, problem = mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs)
+    assert problem is None and len(cases) == 1
+    assert cases[0]["expected_output"] == "len=5 sha=00ff00ff00ff00ff" and cases[0]["name"] == "big"
+    assert "class StressGen" in cases[0]["generator_java"]
+
+    behaviour["slow_times_out"] = False  # the "slow" solution finishes: the case does not separate algorithms
+    cases, problem = mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs)
+    assert cases == [] and "should time out" in problem
+    behaviour["slow_times_out"] = True
+
+    behaviour["ref_cpu"] = 2900  # no headroom under the 3 s cap
+    cases, problem = mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs)
+    assert cases == [] and "no headroom" in problem
+    behaviour["ref_cpu"] = 1500
+
+    assert mod.build_stress_cases("nope", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs) == ([], None)
+
+    (d / "meta.json").write_text(json.dumps({"name": "big", "enabled": False, "disabled_reason": "x"}))
+    assert mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs) == ([], None)
+    cases, problem = mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs, include_disabled=True)
+    assert problem is None and len(cases) == 1  # --validate-stress still checks disabled definitions

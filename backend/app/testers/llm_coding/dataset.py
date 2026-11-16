@@ -299,6 +299,22 @@ class ProblemSpec:
     reference_java: str
     tests: list[dict[str, str]]
     sha256: str = ""
+    # Generated stress cases from an optional ``stress.json``: [{"name", "generator_java",
+    # "expected_output"}]. Hidden by construction (never samples), appended after ``tests``.
+    stress: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def all_tests(self) -> list[dict[str, Any]]:
+        """Plain tests followed by the generated stress cases, in the form ``judge_java_solution`` takes."""
+        extra = [
+            {
+                "input": "",
+                "expected_output": str(st.get("expected_output") or ""),
+                "stress": {"name": st.get("name"), "generator_java": st.get("generator_java")},
+            }
+            for st in self.stress
+        ]
+        return [*self.tests, *extra]
 
     @property
     def sample_tests(self) -> list[dict[str, str]]:
@@ -392,6 +408,8 @@ def load_subsets(root: Path) -> dict[str, ProblemSubset]:
     return out
 
 
+OPTIONAL_HASH_FILES = ("stress.json",)
+
 PROBLEM_HASH_FILES = (
     "problem.json",
     "Solution.template.java",
@@ -413,6 +431,14 @@ def compute_problem_sha256(problem_dir: Path) -> str:
         hasher.update(b"\0")
         hasher.update(content)
         hasher.update(b"\0")
+    # Optional files change the hash only when present, so problems without them keep their hash.
+    for fname in OPTIONAL_HASH_FILES:
+        fpath = problem_dir / fname
+        if fpath.is_file():
+            hasher.update(fname.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(fpath.read_bytes().replace(b"\r\n", b"\n"))
+            hasher.update(b"\0")
     return hasher.hexdigest()
 
 
@@ -505,6 +531,23 @@ def load_problem_from_dir(problem_dir: Path) -> ProblemSpec:
 
     sha = compute_problem_sha256(problem_dir)
 
+    stress: list[dict[str, Any]] = []
+    stress_path = problem_dir / "stress.json"
+    if stress_path.is_file():
+        stress_raw = json.loads(stress_path.read_text(encoding="utf-8"))
+        if not isinstance(stress_raw, list):
+            raise ValueError(f"Problem {problem_dir.name} has an invalid stress.json")
+        for st in stress_raw:
+            if not (isinstance(st, dict) and st.get("generator_java") and st.get("expected_output")):
+                raise ValueError(f"Problem {problem_dir.name}: stress.json entries need generator_java and expected_output")
+            stress.append(
+                {
+                    "name": str(st.get("name") or "stress"),
+                    "generator_java": str(st["generator_java"]),
+                    "expected_output": str(st["expected_output"]),
+                }
+            )
+
     return ProblemSpec(
         id=str(meta.get("id") or problem_dir.name),
         title=str(meta.get("title") or problem_dir.name),
@@ -522,6 +565,7 @@ def load_problem_from_dir(problem_dir: Path) -> ProblemSpec:
         reference_java=ref_path.read_text(encoding="utf-8"),
         tests=tests,
         sha256=sha,
+        stress=stress,
     )
 
 

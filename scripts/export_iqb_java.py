@@ -53,6 +53,7 @@ from backend.app.testers.llm_coding.dataset import (  # noqa: E402
 from backend.app.testers.llm_coding.piston import (  # noqa: E402
     PistonClient,
     judge_java_solution,
+    run_stress_once,
 )
 
 
@@ -225,6 +226,102 @@ def drop_types_defined_by_harness(reference: str, harness: str) -> tuple[str, li
     return out, removed
 
 
+STRESS_DEFS_DIR = Path(__file__).resolve().parent / "iqb_java_stress"
+# The stress input is generated in the JVM and Piston caps CPU at ~3 s (JVM startup alone is 1.3-2 s),
+# so the reference must finish with headroom or a correct solution would time out under load.
+STRESS_REF_MAX_CPU_MS = 2300.0
+STRESS_OK_MAX_CPU_MS = 2700.0
+
+
+def build_stress_cases(
+    qid: str,
+    harness_java: str,
+    reference_java: str,
+    client: PistonClient,
+    defs_dir: Path = STRESS_DEFS_DIR,
+    include_disabled: bool = False,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Validate ``iqb_java_stress/<qid>/`` and return ``(stress.json entries, problem)``.
+
+    Without a definition: ``([], None)``. With one that does not validate: ``([], reason)`` so the
+    problem is still exported, just without the stress case. Validation, all on Piston:
+    the Reference runs twice with the same digest and CPU <= STRESS_REF_MAX_CPU_MS; every ``ok_*``
+    solution matches that digest within STRESS_OK_MAX_CPU_MS; every ``slow_*`` solution times out
+    (that is what proves the case separates algorithms).
+    """
+    d = defs_dir / qid
+    if not d.is_dir():
+        return [], None
+    try:
+        meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        generator = (d / "generator.java").read_text(encoding="utf-8").strip() + "\n"
+    except (OSError, ValueError) as exc:
+        return [], f"bad stress definition: {exc}"
+    name = str(meta.get("name") or "stress")
+    if meta.get("enabled") is False and not include_disabled:
+        print(f"    stress {qid}/{name}: disabled ({meta.get('disabled_reason', 'no reason given')})")
+        return [], None
+    ref_runs = [run_stress_once(client, reference_java, harness_java, generator) for _ in range(3)]
+    for r in ref_runs:
+        if r["status"] != "ok" or not r["stdout"].startswith("len="):
+            return [], f"reference {r['status']} on the stress input: {r['stderr'][:160] or r['stdout'][:80]}"
+    if len({r["stdout"] for r in ref_runs}) != 1:
+        return [], "reference output differs between runs (non-deterministic generator or harness)"
+    digest = ref_runs[0]["stdout"]
+    # Median of three: CPU time on the shared sidecar drifts by +-0.5 s between runs.
+    ref_cpu = sorted(float(r["cpu_ms"] or 0) for r in ref_runs)[1]
+    if ref_cpu > STRESS_REF_MAX_CPU_MS:
+        return [], f"reference too slow on the stress input ({ref_cpu:.0f} ms > {STRESS_REF_MAX_CPU_MS:.0f} ms): no headroom under the CPU cap"
+    notes = [f"reference ok cpu={ref_cpu:.0f}ms"]
+    for f in sorted(d.glob("ok_*.java")):
+        r = run_stress_once(client, f.read_text(encoding="utf-8"), harness_java, generator)
+        if r["status"] != "ok" or r["stdout"] != digest or float(r["cpu_ms"] or 0) > STRESS_OK_MAX_CPU_MS:
+            return [], f"{f.stem} should pass but: {r['status']} cpu={r['cpu_ms']} {'digest differs' if r['stdout'] != digest else ''}"
+        notes.append(f"{f.stem} pass cpu={r['cpu_ms']:.0f}ms")
+    for f in sorted(d.glob("slow_*.java")):
+        # Twice in a row: a solution that only sometimes times out would make the test a coin flip.
+        for attempt in (1, 2):
+            r = run_stress_once(client, f.read_text(encoding="utf-8"), harness_java, generator)
+            if r["status"] != "tle":
+                return [], f"{f.stem} should time out but: {r['status']} cpu={r['cpu_ms']} on try {attempt} (the case does not reliably separate algorithms)"
+        notes.append(f"{f.stem} TLE x2 as required")
+    print(f"    stress {qid}/{name}: " + "; ".join(notes))
+    return [
+        {
+            "name": name,
+            "generator_java": generator,
+            "expected_output": digest,
+            "constraint": meta.get("constraint"),
+            "reference_cpu_ms": ref_cpu,
+        }
+    ], None
+
+
+def validate_stress_definitions(problem_ids: list[str], piston_url: str, dataset_dir: Path) -> int:
+    """Validate stress definitions against the exported dataset (no database needed)."""
+    client = PistonClient(base_url=piston_url)
+    ids = problem_ids or sorted(p.name for p in STRESS_DEFS_DIR.iterdir() if p.is_dir())
+    bad = 0
+    for qid in ids:
+        pdir = dataset_dir / "problems" / qid
+        if not pdir.is_dir():
+            print(f"{qid}: not in dataset {dataset_dir}")
+            bad += 1
+            continue
+        reference, _ = drop_types_defined_by_harness(
+            (pdir / "Reference.java").read_text(encoding="utf-8"), (pdir / "Harness.java").read_text(encoding="utf-8")
+        )
+        cases, why = build_stress_cases(
+            qid, (pdir / "Harness.java").read_text(encoding="utf-8"), reference, client, include_disabled=True
+        )
+        if why or not cases:
+            print(f"{qid}: INVALID - {why or 'no definition'}")
+            bad += 1
+        else:
+            print(f"{qid}: OK ({cases[0]['expected_output']})")
+    return 1 if bad else 0
+
+
 EXCLUDED_PROBLEMS_FILE = Path(__file__).resolve().parent / "iqb_java_excluded.json"
 
 
@@ -294,6 +391,7 @@ def export_dataset(
     ).hexdigest()
 
     excluded = load_excluded_problems()
+    stress_dropped: list[dict[str, Any]] = []
     exported_problems: dict[str, str] = {}
     problem_summaries: list[dict[str, Any]] = []
     dropped_problems: list[dict[str, Any]] = []
@@ -456,6 +554,12 @@ def export_dataset(
             encoding="utf-8",
         )
 
+        stress_cases, stress_problem = build_stress_cases(qid, harness_java, reference_java, client)
+        if stress_problem:
+            print(f"  [{idx:02d}/{len(rows):02d}] STRESS DROPPED {qid}: {stress_problem}")
+            stress_dropped.append({"id": qid, "reason": stress_problem})
+        if stress_cases:
+            (pdir / "stress.json").write_text(json.dumps(stress_cases, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         prob_sha = compute_problem_sha256(pdir)
         exported_problems[qid] = prob_sha
         problem_summaries.append(
@@ -468,6 +572,7 @@ def export_dataset(
                 "hidden_cases": len(normalized_tests) - len(sample_case_idx),
                 "max_cpu_time_ms": judge_res.max_cpu_time_ms,
                 "sha256": prob_sha,
+                "stress_cases": len(stress_cases),
                 "stripped_solutions_count": len(split_res.solutions),
                 "stripped_answer_sections": stripped_answer_sections,
                 "reference_types_removed": dropped_ref_types,
@@ -510,6 +615,7 @@ def export_dataset(
         "by_difficulty": by_diff,
         "manifest_sha256": manifest_sha256,
         "dropped_problems": dropped_problems,
+        "stress_dropped": stress_dropped,
         "exported_problems": problem_summaries,
     }
     (output_dir / "export_report.json").write_text(
@@ -564,7 +670,16 @@ def main() -> int:
     )
     parser.add_argument("--email", default="stonexp@gmail.com")
     parser.add_argument("--dataset-version", default="1.0", help="Version recorded in manifest.json")
+    parser.add_argument(
+        "--validate-stress",
+        nargs="*",
+        metavar="PROBLEM_ID",
+        default=None,
+        help="Only validate scripts/iqb_java_stress definitions on Piston (all, or the given ids) and exit",
+    )
     args = parser.parse_args()
+    if args.validate_stress is not None:
+        return validate_stress_definitions(args.validate_stress, args.piston_url, Path(args.output_dir))
 
     export_dataset(
         output_dir=Path(args.output_dir),

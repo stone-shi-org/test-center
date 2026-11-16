@@ -1,0 +1,1 @@
+class Solution { public int[] productExceptSelf(int[] a) { int[] r = new int[a.length]; for (int i = 0; i < a.length; i++) { int p = 1; for (int j = 0; j < a.length; j++) if (j != i) p *= a[j]; r[i] = p; } return r; } }

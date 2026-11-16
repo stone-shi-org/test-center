@@ -1,0 +1,4 @@
+{
+  "name": "n100000",
+  "constraint": "2 <= nums.length <= 10^5, -30 <= nums[i] <= 30, every product fits in 32 bits (mostly 1s, a few 2s and -1s, one 0)"
+}

@@ -1,0 +1,1 @@
+class Solution { public int maxArea(int[] h) { int best = 0; for (int i = 0; i < h.length; i++) for (int j = i + 1; j < h.length; j++) best = Math.max(best, Math.min(h[i], h[j]) * (j - i)); return best; } }
