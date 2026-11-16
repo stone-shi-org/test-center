@@ -1497,7 +1497,7 @@ def test_result_cache_key_tracks_problem_content(tmp_path):
 
     assert is_cacheable({"attempts": [{"truncated": False}]})
     assert not is_cacheable({"error": "boom"})
-    assert not is_cacheable({"judge_error": "RuntimeError: x"})
+    assert is_cacheable({"judge_error": "RuntimeError: x"})  # the answer is valid; only the verdict is missing
     assert not is_cacheable({"attempts": [{"truncated": True}]})
 
 
@@ -1821,12 +1821,25 @@ def test_judge_placeholder_replies_are_retried_and_never_cached(tmp_path):
     assert len(j1.chat_calls) == 3 and set(j1.max_tokens_seen) == {8192}
     assert s1["writes"] == 1
 
-    # Always empty: placeholder kept for this run, but flagged and not cached.
+    # Always empty: the placeholder is used for this run's score and flagged, the model's answer is
+    # cached, but no judge verdict is stored.
+    cache2 = tmp_path / "c2.sqlite3"
     j2 = Judge(["", "", ""])
-    d2, s2 = _run(j2, 702, tmp_path / "c2.sqlite3")
+    d2, s2 = _run(j2, 702, cache2)
     assert len(j2.chat_calls) == 3
     assert d2["judge_error"].startswith("parse_error")
-    assert s2["writes"] == 0
+    assert s2["writes"] == 1
+    import sqlite3
+    stored = json.loads(sqlite3.connect(str(cache2)).execute("select value_json from llm_coding_cache").fetchone()[0])
+    assert stored["judges"] == {} and stored["case_detail"]["judge"] is None
+
+    # Next run: the model is not called again (cache hit); only the judge runs, and now its verdict is stored.
+    j3 = Judge([good])
+    d3, s3 = _run(j3, 703, cache2)
+    assert d3["cache_hit"] is True and d3["judged_on_cache_hit"] is True
+    assert len(j3.chat_calls) == 1 and d3["judge"]["overall"] == 5 and d3["judge_error"] is None
+    stored = json.loads(sqlite3.connect(str(cache2)).execute("select value_json from llm_coding_cache").fetchone()[0])
+    assert len(stored["judges"]) == 1
 
 
 def test_cut_off_response_with_code_fragment_is_token_limit_not_compile_error(tmp_path):
@@ -1945,3 +1958,109 @@ def test_system_prompt_variant_only_changes_affected_cache_keys(tmp_path):
     sys_msg = next(m["content"] for m in first["transcript"] if m["role"] == "system")
     assert "containing `class Solution`" in sys_msg  # standard problem: unchanged prompt
     assert _run(952)["cache_hit"] is True  # and unchanged cache key
+
+
+def test_judge_and_score_settings_do_not_affect_the_cache(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=1)
+    cache = tmp_path / "c.sqlite3"
+
+    def reply(overall):
+        return json.dumps({"approach_correctness": overall, "complexity_vs_reference": overall,
+                           "readability_idiom": overall, "overall": overall, "justification": "x"})
+
+    class Judge(FakeChatClient):
+        pass
+
+    def run(run_id, judge=None, llm=None, **extra):
+        llm = llm or FakeChatClient()
+        cfg = {"dataset_dir": str(ds_dir), "model": "m", "_chat_client": llm, "cache_path": str(cache),
+               "_piston_execute_hook": _piston_all_pass_hook}
+        if judge is not None:
+            cfg["_judge_client"] = judge
+        cfg.update(extra)
+        res = get_tester("llm_coding").run(
+            config=cfg, target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False))
+        return res.cases[0], llm
+
+    # 1. Judge off: the model runs once; score is correctness only.
+    c1, llm1 = run(801)
+    assert len(llm1.stream_calls) == 1 and c1.detail["judge"] is None and c1.detail["case_score_100"] == 100.0
+
+    # 2. Judge turned on: cache hit (model not called), judge called once on the cached code; overall 3 -> (0.8 + 0.2*0.5)*100.
+    j = Judge(chat_responses=[reply(3)])
+    c2, llm2 = run(802, judge=j)
+    assert llm2.stream_calls == [] and c2.detail["cache_hit"] is True and len(j.chat_calls) == 1
+    assert c2.detail["judge"]["overall"] == 3 and abs(c2.detail["case_score_100"] - 90.0) < 1e-6
+    assert c2.metrics["judge_overall"]["value"] == 3 and abs(c2.metrics["score"]["value"] - 90.0) < 1e-6
+
+    # 3. Same judge again: verdict comes from the entry, no judge call.
+    j3 = Judge(chat_responses=[reply(1)])
+    c3, llm3 = run(803, judge=j3)
+    assert j3.chat_calls == [] and llm3.stream_calls == [] and c3.detail["judge"]["overall"] == 3
+
+    # 4. Different weights: still a hit, score recomputed from the stored verdict (0.5 + 0.5*0.5).
+    j4 = Judge(chat_responses=[reply(1)])
+    c4, _ = run(804, judge=j4, weight_correctness=0.5, weight_judge=0.5)
+    assert j4.chat_calls == [] and abs(c4.detail["case_score_100"] - 75.0) < 1e-6
+
+    # 5. Judge off again: no judge data, correctness-only score, still no model call.
+    c5, llm5 = run(805)
+    assert llm5.stream_calls == [] and c5.detail["judge"] is None and c5.detail["case_score_100"] == 100.0
+    assert "judge_overall" not in c5.metrics
+
+    # 6. A different judge model gets its own verdict (judge called), model still not called.
+    j6 = Judge(chat_responses=[reply(5)])
+    c6, llm6 = run(806, judge=j6, judge_model="other-judge")
+    assert llm6.stream_calls == [] and len(j6.chat_calls) == 1 and c6.detail["judge"]["overall"] == 5
+    # ... and the earlier judge's verdict is still there.
+    j7 = Judge(chat_responses=[reply(1)])
+    c7, _ = run(807, judge=j7)
+    assert j7.chat_calls == [] and c7.detail["judge"]["overall"] == 3
+
+
+def test_legacy_v1_cache_entries_are_migrated_not_lost(tmp_path):
+    import sqlite3
+
+    from backend.app.testers.llm_coding.cache import (
+        CACHE_SCHEMA_VERSION, CodingResultCache, judge_fingerprint, sha256_text,
+    )
+
+    path = tmp_path / "legacy.sqlite3"
+    base_key = {"model": "m", "endpoint_url": "http://e", "effort": "high", "max_tokens": 64000, "max_attempts": 1,
+                "feedback_level": "first_failure", "tools_enabled": False, "system_prompt_sha256": "sys",
+                "per_case_timeout_ms": 9000, "cpu_limit_ms": 9000, "problem_id": "p1", "problem_sha256": "psha",
+                "user_prompt_sha256": "usha"}
+    legacy = {**base_key, "schema_version": "llm_coding_cache_v1", "judge_enabled": True, "attempt_factors": [1, 0.7, 0.5],
+              "weight_correctness": 0.8, "weight_judge": 0.2, "judge_model": "jm", "judge_endpoint_url": "http://j",
+              "judge_prompt_sha256": "jp", "judge_failed_solutions": False}
+    detail = {"problem_id": "p1", "passed": True, "attempts": [{"code": "class Solution {}"}],
+              "judge": {"overall": 4.0, "justification": "fine"}, "judge_error": None}
+    value = {"case_metrics": {"score": {"value": 95.0}, "judge_overall": {"value": 4.0}}, "case_detail": detail, "agg_record": {}}
+    key_hash, canonical = CodingResultCache.compute_key(legacy)
+    conn = sqlite3.connect(str(path))
+    conn.execute("""CREATE TABLE llm_coding_cache (cache_key TEXT PRIMARY KEY, schema_version TEXT NOT NULL, problem_id TEXT NOT NULL,
+        model TEXT NOT NULL, key_json TEXT NOT NULL, value_json TEXT NOT NULL, created_at REAL NOT NULL)""")
+    conn.execute("INSERT INTO llm_coding_cache VALUES (?,?,?,?,?,?,?)",
+                 (key_hash, "llm_coding_cache_v1", "p1", "m", canonical, json.dumps(value), 1.0))
+    # A second v1 entry for the same answer made with a different judge/weights collapses into one v2 entry.
+    legacy2 = {**legacy, "judge_model": "jm2", "weight_judge": 0.5}
+    h2, c2 = CodingResultCache.compute_key(legacy2)
+    detail2 = {**detail, "judge": {"overall": 2.0, "justification": "meh"}}
+    conn.execute("INSERT INTO llm_coding_cache VALUES (?,?,?,?,?,?,?)",
+                 (h2, "llm_coding_cache_v1", "p1", "m", c2, json.dumps({**value, "case_detail": detail2}), 2.0))
+    conn.commit(); conn.close()
+
+    cache = CodingResultCache(path)
+    assert cache.migrated == 2
+    assert list(tmp_path.glob("legacy.sqlite3.bak-v1-*"))
+    new_key = {**base_key, "schema_version": CACHE_SCHEMA_VERSION}
+    got = cache.get(new_key)
+    assert got is not None
+    assert got["case_detail"]["judge"] is None and "judge_overall" not in got["case_metrics"]
+    fp1 = judge_fingerprint("jm", "http://j", "jp"); fp2 = judge_fingerprint("jm2", "http://j", "jp")
+    assert set(got["judges"]) == {fp1, fp2} and got["judges"][fp2]["overall"] == 2.0
+    rows = sqlite3.connect(str(path)).execute("select schema_version from llm_coding_cache").fetchall()
+    assert rows == [(CACHE_SCHEMA_VERSION,)]
+    assert CodingResultCache(path).migrated == 0  # idempotent
+

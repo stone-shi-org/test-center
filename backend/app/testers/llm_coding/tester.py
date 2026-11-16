@@ -32,6 +32,8 @@ from backend.app.testers.llm_coding.cache import (
     DEFAULT_CACHE_FILENAME,
     CodingResultCache,
     is_cacheable,
+    is_judge_placeholder,
+    judge_fingerprint,
     sha256_text,
 )
 from backend.app.testers.llm_coding.dataset import (
@@ -950,44 +952,18 @@ class LLMCodingTester(TesterPlugin):
         # Optional LLM Judge evaluation (Section 6)
         judge_result: CodingJudgeResult | None = None
         judge_error: str | None = None
-        should_run_judge = (
-            judge_client is not None
-            and judge_model is not None
-            and (solved or judge_failed_solutions)
-            and bool(final_code.strip())
-        )
-        if should_run_judge:
-            judge_max_tokens = int(config.get("judge_max_tokens", DEFAULT_JUDGE_MAX_TOKENS))
-            judge_retries = max(0, int(config.get("judge_retries", DEFAULT_JUDGE_RETRIES)))
-            for judge_attempt in range(judge_retries + 1):
-                ctx.check_cancelled()
-                try:
-                    judge_result = evaluate_with_coding_judge(
-                        judge_client=judge_client,
-                        judge_model=str(judge_model),
-                        judge_target_name=str(judge_info.get("target_name", "judge-target")),
-                        judge_prompt_md=dataset.judge_prompt_md,
-                        problem=problem,
-                        candidate_code=final_code,
-                        judge_run=final_judge_run,
-                        max_tokens=judge_max_tokens,
-                    )
-                    # evaluate_with_coding_judge does not raise: a failed request scores 1/5 and an
-                    # empty/unparseable reply 3/5, with ``error`` set. Those are placeholders, not
-                    # judgements: retry, and if it keeps failing record a judge error so the case
-                    # is not cached (the next run judges it again).
-                    judge_error = judge_result.error or None
-                except TesterCancelledError:
-                    raise
-                except Exception as j_exc:
-                    judge_result = None
-                    judge_error = f"{type(j_exc).__name__}: {j_exc}"
-                if not judge_error:
-                    break
-                ctx.log(
-                    f"[{problem.id}] LLM judge attempt {judge_attempt + 1}/{judge_retries + 1} failed: {judge_error}",
-                    level="warning",
-                )
+        if self._should_judge(judge_client, judge_model, solved, judge_failed_solutions, final_code):
+            judge_result, judge_error = self._run_judge(
+                problem=problem,
+                dataset=dataset,
+                judge_client=judge_client,
+                judge_model=str(judge_model),
+                judge_info=judge_info,
+                config=config,
+                ctx=ctx,
+                final_code=final_code,
+                judge_run=final_judge_run,
+            )
 
         if tools_enabled:
             case_tps = tool_outcome.mean_tps if "tool_outcome" in locals() else 0.0
@@ -1097,21 +1073,151 @@ class LLMCodingTester(TesterPlugin):
         return case_metrics, case_detail, agg_record
 
     @staticmethod
+    def _should_judge(
+        judge_client: Any | None,
+        judge_model: str | None,
+        solved: bool,
+        judge_failed_solutions: bool,
+        final_code: str,
+    ) -> bool:
+        return (
+            judge_client is not None
+            and judge_model is not None
+            and (solved or judge_failed_solutions)
+            and bool(final_code.strip())
+        )
+
+    @staticmethod
+    def _run_judge(
+        problem: ProblemSpec,
+        dataset: LoadedDataset,
+        judge_client: Any,
+        judge_model: str,
+        judge_info: dict[str, Any],
+        config: dict[str, Any],
+        ctx: TestContext,
+        final_code: str,
+        judge_run: JudgeRunResult,
+    ) -> tuple[CodingJudgeResult | None, str | None]:
+        """Call the LLM judge (with retries). Returns ``(result, error)``.
+
+        ``evaluate_with_coding_judge`` does not raise: a failed request scores 1/5 and an empty or
+        unparseable reply 3/5, with ``error`` set. Those are placeholders, not judgements, so they are
+        retried; if the judge keeps failing the error is returned and the placeholder stays in the
+        result for this run only (it is never stored as a verdict in the cache).
+        """
+        judge_max_tokens = int(config.get("judge_max_tokens", DEFAULT_JUDGE_MAX_TOKENS))
+        judge_retries = max(0, int(config.get("judge_retries", DEFAULT_JUDGE_RETRIES)))
+        judge_result: CodingJudgeResult | None = None
+        judge_error: str | None = None
+        for judge_attempt in range(judge_retries + 1):
+            ctx.check_cancelled()
+            try:
+                judge_result = evaluate_with_coding_judge(
+                    judge_client=judge_client,
+                    judge_model=str(judge_model),
+                    judge_target_name=str(judge_info.get("target_name", "judge-target")),
+                    judge_prompt_md=dataset.judge_prompt_md,
+                    problem=problem,
+                    candidate_code=final_code,
+                    judge_run=judge_run,
+                    max_tokens=judge_max_tokens,
+                )
+                judge_error = judge_result.error or None
+            except TesterCancelledError:
+                raise
+            except Exception as j_exc:
+                judge_result = None
+                judge_error = f"{type(j_exc).__name__}: {j_exc}"
+            if not judge_error:
+                break
+            ctx.log(
+                f"[{problem.id}] LLM judge attempt {judge_attempt + 1}/{judge_retries + 1} failed: {judge_error}",
+                level="warning",
+            )
+        return judge_result, judge_error
+
+    @staticmethod
+    def _judge_run_from_detail(detail: dict[str, Any]) -> JudgeRunResult:
+        """Rebuild what the judge prompt needs about the test outcome from a stored case detail."""
+        att = (detail.get("attempts") or [{}])[-1]
+        total = int(detail.get("total_cases") or 0)
+        status = str(detail.get("verdict") or "")
+        run = JudgeRunResult(
+            status=status,
+            passed=bool(detail.get("passed")),
+            correct=int(detail.get("correct") or 0),
+            compilation_failed=status == "Compile Error",
+            compile_error_output=str(att.get("compile_error_output") or ""),
+            total_cases=total,
+            sample_total=int(detail.get("sample_total") or 0),
+            hidden_total=int(detail.get("hidden_total") or 0),
+        )
+        run.passed_cases = int(detail.get("passed_cases") or 0)
+        run.sample_passed = int(detail.get("sample_passed") or 0)
+        run.hidden_passed = int(detail.get("hidden_passed") or 0)
+        run.test_case_pass_rate = (run.passed_cases / total) if total else 0.0
+        run.max_cpu_time_ms = float(att.get("max_cpu_time_ms") or 0.0)
+        return run
+
+    @staticmethod
+    def _apply_judge_to_case(
+        detail: dict[str, Any],
+        metrics: dict[str, Any],
+        agg: dict[str, Any],
+        judge: dict[str, Any] | None,
+        judge_error: str | None,
+        judge_enabled: bool,
+        config: dict[str, Any],
+    ) -> None:
+        """Set a case's judge verdict and recompute its score with the CURRENT scoring settings."""
+        overall = judge.get("overall") if isinstance(judge, dict) else None
+        bd = compute_case_score(
+            correct=int(detail.get("correct") or 0),
+            solved_attempt=detail.get("solved_attempt"),
+            attempt_factors=parse_attempt_factors(config.get("attempt_factors", DEFAULT_ATTEMPT_FACTORS)),
+            judge_enabled=judge_enabled,
+            judge_overall=overall,
+            weight_correctness=float(config.get("weight_correctness", DEFAULT_WEIGHT_CORRECTNESS)),
+            weight_judge=float(config.get("weight_judge", DEFAULT_WEIGHT_JUDGE)),
+        )
+        detail.update(
+            judge=judge,
+            judge_error=judge_error,
+            case_score=bd.case_score,
+            case_score_100=bd.case_score_100,
+            attempt_factor=bd.attempt_factor,
+            solved_attempt=bd.solved_attempt,
+        )
+        for k in [k for k in metrics if k.startswith("judge_")]:
+            del metrics[k]
+        metrics["score"] = format_metric(bd.case_score_100, unit="pts", better="higher")
+        metrics["case_score"] = format_metric(bd.case_score_100, unit="pts", better="higher")
+        if isinstance(judge, dict):
+            for name, key in (
+                ("judge_overall", "overall"),
+                ("judge_approach_correctness", "approach_correctness"),
+                ("judge_complexity_vs_reference", "complexity_vs_reference"),
+                ("judge_readability_idiom", "readability_idiom"),
+            ):
+                metrics[name] = format_metric(judge.get(key), unit="/5", better="higher")
+        agg["case_score"] = bd.case_score
+        agg["judge_overall"] = overall
+
+    @staticmethod
     def _build_cache_key_base(
         config: dict[str, Any],
         model: str,
         endpoint_url: str,
-        judge_model: str | None,
-        judge_info: dict[str, Any],
-        dataset: LoadedDataset,
     ) -> dict[str, Any]:
-        """Run-level part of the per-problem cache key: everything that can change a problem's result.
+        """Run-level part of the per-problem cache key: what changes the model's answer or its test results.
 
         ``runner_url`` is deliberately excluded (any Piston sidecar with the same Java runtime grades
-        identically); grading-logic changes are covered by bumping ``CACHE_SCHEMA_VERSION``.
+        identically); grading-logic changes are covered by bumping ``CACHE_SCHEMA_VERSION``. The LLM
+        judge and the score weights are deliberately excluded too: judge verdicts live inside the entry
+        (see ``judge_fingerprint``) and scores are recomputed on every cache hit.
         """
         tools_enabled = bool(config.get("tools_enabled", False))
-        judge_enabled = bool(judge_info.get("enabled"))
         key: dict[str, Any] = {
             "schema_version": CACHE_SCHEMA_VERSION,
             "model": model,
@@ -1124,20 +1230,11 @@ class LLMCodingTester(TesterPlugin):
             "system_prompt_sha256": sha256_text(SYSTEM_PROMPT_TOOLS if tools_enabled else SYSTEM_PROMPT_STANDARD),
             "per_case_timeout_ms": config.get("per_case_timeout_ms"),
             "cpu_limit_ms": config.get("cpu_limit_ms"),
-            "judge_enabled": judge_enabled,
-            "attempt_factors": parse_attempt_factors(config.get("attempt_factors", DEFAULT_ATTEMPT_FACTORS)),
-            "weight_correctness": float(config.get("weight_correctness", DEFAULT_WEIGHT_CORRECTNESS)),
-            "weight_judge": float(config.get("weight_judge", DEFAULT_WEIGHT_JUDGE)),
         }
         if tools_enabled:
             key["max_tool_calls"] = int(config.get("max_tool_calls", 12))
             key["max_total_tokens"] = int(config.get("max_total_tokens", 32768))
             key["tools_schema_sha256"] = sha256_text(json.dumps(CODING_TOOLS_SCHEMA, sort_keys=True))
-        if judge_enabled:
-            key["judge_model"] = judge_model
-            key["judge_endpoint_url"] = str(judge_info.get("endpoint_url") or "")
-            key["judge_prompt_sha256"] = sha256_text(dataset.judge_prompt_md or "")
-            key["judge_failed_solutions"] = bool(config.get("judge_failed_solutions", False))
         return key
 
     def _update_result_metrics(
@@ -1243,14 +1340,15 @@ class LLMCodingTester(TesterPlugin):
         except Exception as exc:  # cache is best-effort; never block a run on it
             ctx.log(f"Result cache unavailable at {cache_path}: {exc}; continuing without cache", level="warning")
             result_cache = CodingResultCache(cache_path=cache_path, enabled=False)
-        cache_key_base = self._build_cache_key_base(
-            config=config,
-            model=model,
-            endpoint_url=endpoint_url,
-            judge_model=judge_model,
-            judge_info=judge_info,
-            dataset=dataset,
+        cache_key_base = self._build_cache_key_base(config=config, model=model, endpoint_url=endpoint_url)
+        judge_fp = (
+            judge_fingerprint(judge_model, judge_info.get("endpoint_url"), sha256_text(dataset.judge_prompt_md or ""))
+            if judge_client is not None and judge_model is not None
+            else None
         )
+        judge_failed_solutions = bool(config.get("judge_failed_solutions", False))
+        judged_on_hit = [0]
+        judged_lock = threading.Lock()
         if result_cache.enabled:
             ctx.log(
                 f"Result cache: {cache_path} ({'write-only, skip_cache=true' if result_cache.skip_read else 'read/write'})"
@@ -1276,11 +1374,47 @@ class LLMCodingTester(TesterPlugin):
                 except (KeyError, TypeError):
                     cached = None
                 else:
+                    cached_at = cached.pop("cached_at", None)
+                    judged_now = False
+                    # The judge and the score weights are not part of the key: pick this run's verdict
+                    # (calling the judge only if none is stored for this judge setup) and re-score.
+                    judges = cached.get("judges") if isinstance(cached.get("judges"), dict) else {}
+                    judge_dict: dict[str, Any] | None = None
+                    judge_err: str | None = None
+                    attempts = c_detail.get("attempts") or []
+                    final_code = str((attempts[-1] if attempts else {}).get("code") or "")
+                    if self._should_judge(judge_client, judge_model, bool(c_detail.get("passed")), judge_failed_solutions, final_code):
+                        judge_dict = judges.get(judge_fp)
+                        if judge_dict is None:
+                            jr, judge_err = self._run_judge(
+                                problem=prob,
+                                dataset=dataset,
+                                judge_client=judge_client,
+                                judge_model=str(judge_model),
+                                judge_info=judge_info,
+                                config=config,
+                                ctx=ctx,
+                                final_code=final_code,
+                                judge_run=self._judge_run_from_detail(c_detail),
+                            )
+                            judge_dict = jr.to_dict() if jr is not None else None
+                            judged_now = True
+                            with judged_lock:
+                                judged_on_hit[0] += 1
+                            if judge_dict is not None and not judge_err and not is_judge_placeholder(judge_dict) and result_cache.enabled:
+                                judges[judge_fp] = judge_dict
+                                # `cached` is still exactly what was stored: nothing run-specific in it.
+                                result_cache.put(key, {**cached, "judges": judges})
                     c_detail["cache_hit"] = True
-                    c_detail["cached_at"] = cached.get("cached_at")
+                    c_detail["cached_at"] = cached_at
+                    if judged_now:
+                        c_detail["judged_on_cache_hit"] = True
                     # Report against the dataset actually loaded for this run.
                     c_detail["dataset_version"] = dataset.manifest.version
                     c_detail["manifest_sha256"] = dataset.manifest.manifest_sha256
+                    self._apply_judge_to_case(
+                        c_detail, c_metrics, agg_rec, judge_dict, judge_err, judge_client is not None, config
+                    )
                     return c_metrics, c_detail, agg_rec
 
             c_metrics, c_detail, agg_rec = self._evaluate_single_problem(
@@ -1297,9 +1431,18 @@ class LLMCodingTester(TesterPlugin):
             )
             c_detail["cache_hit"] = False
             if result_cache.enabled and is_cacheable(c_detail):
+                # Store the answer and its test results; the judge verdict goes into `judges` under
+                # this judge setup's fingerprint (never a placeholder), and score fields are recomputed
+                # on every hit.
+                stored_detail = {**c_detail, "judge": None, "judge_error": None}
+                stored_metrics = {k: v for k, v in c_metrics.items() if not k.startswith("judge_")}
+                judges_out: dict[str, Any] = {}
+                if judge_fp and isinstance(c_detail.get("judge"), dict) and not c_detail.get("judge_error") \
+                        and not is_judge_placeholder(c_detail["judge"]):
+                    judges_out[judge_fp] = c_detail["judge"]
                 result_cache.put(
                     key,
-                    {"case_metrics": c_metrics, "case_detail": c_detail, "agg_record": agg_rec},
+                    {"case_metrics": stored_metrics, "case_detail": stored_detail, "agg_record": agg_rec, "judges": judges_out},
                 )
             return c_metrics, c_detail, agg_rec
 
@@ -1411,7 +1554,7 @@ class LLMCodingTester(TesterPlugin):
         if result_cache.enabled:
             ctx.log(
                 f"Result cache: hits={result_cache.hits}, misses={result_cache.misses}, "
-                f"writes={result_cache.writes}"
+                f"writes={result_cache.writes}, judge calls on cache hits={judged_on_hit[0]}"
             )
         report_text = format_llm_coding_report(
             model=model,
