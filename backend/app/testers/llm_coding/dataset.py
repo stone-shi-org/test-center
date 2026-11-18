@@ -364,6 +364,8 @@ class LoadedDataset:
     problems: list[ProblemSpec]
     # Optional named problem subsets from ``subsets.json`` (see ``load_subsets``).
     subsets: dict[str, "ProblemSubset"] = field(default_factory=dict)
+    # Name of the subset this load was restricted to (None = the whole dataset).
+    selected_subset: str | None = None
 
 
 SUBSETS_FILENAME = "subsets.json"
@@ -378,6 +380,18 @@ class ProblemSubset:
     description: str = ""
     # Every reasonable model is expected to solve these: failures are flagged as red flags.
     expect_all_solved: bool = False
+
+
+SUBSET_ALIASES = {"hardcore": "hard_core", "hard-core": "hard_core", "hard core": "hard_core"}
+FULL_SUBSET_NAMES = ("", "full", "all")
+
+
+def normalize_subset_name(name: str | None) -> str | None:
+    """``None`` for the whole dataset, else the canonical subset name (aliases like "hardcore" resolved)."""
+    key = str(name or "").strip().lower()
+    if key in FULL_SUBSET_NAMES:
+        return None
+    return SUBSET_ALIASES.get(key, key.replace("-", "_").replace(" ", "_"))
 
 
 def load_subsets(root: Path) -> dict[str, ProblemSubset]:
@@ -577,9 +591,13 @@ def load_iqb_java_dataset(
     difficulty: list[str] | str | None = None,
     topics: list[str] | str | None = None,
     limit: int | None = None,
+    subset: str | None = None,
 ) -> LoadedDataset:
     """Load the ``iqb-java`` dataset, verify per-problem SHA-256 hashes against ``manifest.json``,
     and apply suite/config filters.
+
+    ``subset`` restricts the load to the problems listed under that name in ``subsets.json``
+    (``None`` / ``"full"`` = everything). It combines with the other filters (all must match).
     """
     root = resolve_iqb_java_dir(dataset_dir)
     manifest_path = root / "manifest.json"
@@ -639,6 +657,19 @@ def load_iqb_java_dataset(
     else:
         judge_prompt_md = DEFAULT_JUDGE_PROMPT_MD
 
+    subsets = load_subsets(root)
+    subset_name = normalize_subset_name(subset)
+    subset_members: set[str] | None = None
+    if subset_name is not None:
+        if not subsets:
+            raise ValueError(
+                f"subset '{subset_name}' requested but {root / SUBSETS_FILENAME} is missing or empty "
+                "(build it with scripts/build_iqb_java_subsets.py)"
+            )
+        if subset_name not in subsets:
+            raise ValueError(f"unknown subset '{subset_name}'; available: full, {', '.join(sorted(subsets))}")
+        subset_members = set(subsets[subset_name].problems)
+
     problems_dir = root / "problems"
     id_filter = set(_normalize_str_list(ids))
     diff_filter = {d.lower() for d in _normalize_str_list(difficulty)}
@@ -651,6 +682,8 @@ def load_iqb_java_dataset(
     problem_ids_ordered = sorted(problems_sha_map.keys())
     for pid in problem_ids_ordered:
         if id_filter and pid not in id_filter:
+            continue
+        if subset_members is not None and pid not in subset_members:
             continue
         pdir = problems_dir / pid
         if not pdir.is_dir():
@@ -684,5 +717,6 @@ def load_iqb_java_dataset(
         manifest=manifest,
         judge_prompt_md=judge_prompt_md,
         problems=loaded_problems,
-        subsets=load_subsets(root),
+        subsets=subsets,
+        selected_subset=subset_name,
     )

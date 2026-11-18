@@ -18,6 +18,7 @@ def format_llm_coding_report(
     tools_enabled: bool = False,
     max_attempts: int = 1,
     subsets: dict[str, Any] | None = None,
+    subset_note: str | None = None,
 ) -> str:
     """Format a human-readable ASCII summary report (``llm_coding_report.txt``)."""
     score_val = metrics.get("score", {}).get("value", 0.0)
@@ -40,6 +41,7 @@ def format_llm_coding_report(
         f"Endpoint URL          : {endpoint_url}",
         f"Piston Runner URL     : {runner_url}",
         f"Dataset Version       : {dataset_version} (sha256: {manifest_sha256[:16]}...)",
+        *([f"Problem Set           : {subset_note} (NOT comparable with a full-run score)"] if subset_note else []),
         f"Reasoning Effort      : {effort if effort else 'unset'}",
         f"Max Attempts          : {max_attempts} (pass with feedback, not statistical pass@k)",
         f"Agent Tool Mode       : {'Enabled' if tools_enabled else 'Disabled'}",

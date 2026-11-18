@@ -2230,3 +2230,91 @@ def test_exporter_builds_and_validates_stress_definitions(tmp_path):
     assert mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs) == ([], None)
     cases, problem = mod.build_stress_cases("p1", SAMPLE_HARNESS_JAVA, SAMPLE_REFERENCE_JAVA, client, defs_dir=defs, include_disabled=True)
     assert problem is None and len(cases) == 1  # --validate-stress still checks disabled definitions
+
+
+# ---------------------------------------------------------------------------
+# subset option: run only hard_core / discriminating
+# ---------------------------------------------------------------------------
+
+
+def _write_subsets(ds_dir, **subsets):
+    (ds_dir / "subsets.json").write_text(json.dumps({"subsets": {
+        name: {"problems": ids, "description": name} for name, ids in subsets.items()}}))
+
+
+def test_loader_subset_filter_combines_with_other_filters_and_reports_errors(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=3)
+    _write_subsets(ds_dir, hard_core=["prob-2"], discriminating=["prob-1", "prob-2", "prob-gone"])
+
+    assert [p.id for p in load_iqb_java_dataset(ds_dir).problems] == ["prob-1", "prob-2", "prob-3"]
+    for full in (None, "", "full", "all", "FULL"):
+        ds = load_iqb_java_dataset(ds_dir, subset=full)
+        assert len(ds.problems) == 3 and ds.selected_subset is None
+    ds = load_iqb_java_dataset(ds_dir, subset="hard_core")
+    assert [p.id for p in ds.problems] == ["prob-2"] and ds.selected_subset == "hard_core"
+    assert [p.id for p in load_iqb_java_dataset(ds_dir, subset="hardcore").problems] == ["prob-2"]  # alias
+    # An id in the subset that is not in the dataset is ignored; other filters still apply on top.
+    assert [p.id for p in load_iqb_java_dataset(ds_dir, subset="discriminating").problems] == ["prob-1", "prob-2"]
+    assert [p.id for p in load_iqb_java_dataset(ds_dir, subset="discriminating", ids=["prob-1", "prob-3"]).problems] == ["prob-1"]
+    assert [p.id for p in load_iqb_java_dataset(ds_dir, subset="discriminating", limit=1).problems] == ["prob-1"]
+
+    with pytest.raises(ValueError, match="unknown subset 'bogus'.*hard_core"):
+        load_iqb_java_dataset(ds_dir, subset="bogus")
+    (ds_dir / "subsets.json").unlink()
+    with pytest.raises(ValueError, match="subsets.json"):
+        load_iqb_java_dataset(ds_dir, subset="hard_core")
+    assert len(load_iqb_java_dataset(ds_dir, subset="full").problems) == 3  # full never needs the file
+
+
+def test_subset_config_is_normalized_and_validated():
+    tester = LLMCodingTester()
+    assert tester.validate_and_apply_config({})["subset"] == "full"
+    assert tester.validate_and_apply_config({"subset": "hardcore"})["subset"] == "hard_core"
+    assert tester.validate_and_apply_config({"subset": "Hard-Core"})["subset"] == "hard_core"
+    assert tester.validate_and_apply_config({"subset": ""})["subset"] == "full"
+    assert tester.validate_and_apply_config({"subset": "discriminating"})["subset"] == "discriminating"
+    with pytest.raises(TesterConfigError):
+        tester.validate_and_apply_config({"subset": "bogus"})
+    assert tester.config_schema["properties"]["subset"].get("x-advanced") is None  # visible by default
+
+
+def test_subset_run_evaluates_only_the_subset_labels_it_and_shares_the_cache(tmp_path):
+    ds_dir = _write_synthetic_dataset(tmp_path / "ds", num_problems=3)
+    _write_subsets(ds_dir, hard_core=["prob-2"], discriminating=["prob-1", "prob-2"])
+    cache = tmp_path / "c.sqlite3"
+
+    def run(run_id, **extra):
+        llm = FakeChatClient()
+        res = get_tester("llm_coding").run(
+            config={"dataset_dir": str(ds_dir), "model": "m", "cache_path": str(cache), "_chat_client": llm,
+                    "_piston_execute_hook": _piston_all_pass_hook, **extra},
+            target={"name": "t", "kind": "llm", "base_url": "http://x/v1"},
+            ctx=TestContext(run_id=run_id, artifacts_dir=tmp_path / f"r{run_id}", emit_stdout=False))
+        payload = json.loads((tmp_path / f"r{run_id}" / "llm_coding_results.json").read_text())
+        return res, llm, payload
+
+    res, llm, payload = run(981, subset="hard_core")
+    assert [c.case_id for c in res.cases] == ["prob-2"] and len(llm.stream_calls) == 1
+    assert res.metrics["problems_evaluated"]["value"] == 1
+    assert "[subset 'hard_core': 1 of 3 problems]" in res.summary
+    assert payload["dataset"]["subset"] == "hard_core" and payload["dataset"]["problems_in_run"] == 1
+    report = (tmp_path / "r981" / "llm_coding_report.txt").read_text()
+    assert "Problem Set" in report and "NOT comparable" in report
+
+    # A later full run reuses the subset run's result and only runs the other two problems.
+    res2, llm2, payload2 = run(982)
+    assert [c.case_id for c in res2.cases] == ["prob-1", "prob-2", "prob-3"] and len(llm2.stream_calls) == 2
+    assert res2.cases[1].detail["cache_hit"] is True
+    assert "subset" not in res2.summary and payload2["dataset"]["subset"] == "full"
+    assert "Problem Set" not in (tmp_path / "r982" / "llm_coding_report.txt").read_text()
+
+    # discriminating = prob-1 + prob-2, all cached now; an unknown name fails the run clearly.
+    res3, llm3, _ = run(983, subset="discriminating")
+    assert [c.case_id for c in res3.cases] == ["prob-1", "prob-2"] and llm3.stream_calls == []
+    with pytest.raises(TesterConfigError, match="No coding problems matched.*subset 'hard_core'"):
+        run(984, subset="hard_core", ids=["prob-1"])  # subset and ids do not intersect: nothing to run
+    # Without a subsets.json the run fails with a clear message instead of silently running everything.
+    (ds_dir / "subsets.json").unlink()
+    with pytest.raises(TesterConfigError, match="Failed to load iqb-java dataset.*subsets.json"):
+        run(985, subset="discriminating")
+    assert len(run(986)[0].cases) == 3  # full does not need it

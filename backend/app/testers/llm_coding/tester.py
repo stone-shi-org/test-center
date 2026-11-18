@@ -40,6 +40,7 @@ from backend.app.testers.llm_coding.dataset import (
     LoadedDataset,
     ProblemSpec,
     load_iqb_java_dataset,
+    normalize_subset_name,
 )
 from backend.app.testers.llm_coding.feedback import build_attempt_feedback
 from backend.app.testers.llm_coding.harness import extract_java_code
@@ -129,6 +130,18 @@ class LLMCodingTester(TesterPlugin):
                 },
                 "default": ["all"],
                 "description": "Difficulty suites to run ('all' runs easy, medium, and hard)",
+            },
+            "subset": {
+                "type": "string",
+                "enum": ["full", "hard_core", "discriminating"],
+                "default": "full",
+                "description": (
+                    "Which problems to run: 'full' = every problem; 'hard_core' = the few problems that most "
+                    "models fail (fastest check); 'discriminating' = every problem at least one benchmarked model "
+                    "fails (the ones that rank models). Subsets come from the dataset's subsets.json. A subset "
+                    "score is not comparable with a full-run score; results are cached per problem, so a later "
+                    "full run reuses them."
+                ),
             },
             # Advanced: dataset & runner & filtering
             "dataset_dir": {
@@ -383,7 +396,9 @@ class LLMCodingTester(TesterPlugin):
                     continue
                 if k in ("effort", "runner_url", "dataset_dir", "judge_model", "cache_path") and isinstance(v, str) and not v.strip():
                     continue
-                if k in ("ids", "topics", "difficulty", "suites") and isinstance(v, str):
+                if k == "subset" and isinstance(v, str):
+                    cleaned[k] = normalize_subset_name(v) or "full"  # "hardcore" -> "hard_core", "all"/"" -> "full"
+                elif k in ("ids", "topics", "difficulty", "suites") and isinstance(v, str):
                     cleaned[k] = [item.strip() for item in v.split(",") if item.strip()]
                 elif k == "attempt_factors" and isinstance(v, str):
                     cleaned[k] = parse_attempt_factors(v)
@@ -1308,19 +1323,30 @@ class LLMCodingTester(TesterPlugin):
                 difficulty=diff_cfg if diff_cfg else None,
                 topics=config.get("topics"),
                 limit=config.get("limit"),
+                subset=config.get("subset"),
             )
         except Exception as exc:
             raise TesterConfigError(f"Failed to load iqb-java dataset: {exc}") from exc
 
         problems = dataset.problems
         if not problems:
-            raise TesterConfigError("No coding problems matched the configured suite/filter criteria")
+            raise TesterConfigError(
+                "No coding problems matched the configured suite/filter criteria"
+                + (f" (subset '{dataset.selected_subset}' combined with the other filters)" if dataset.selected_subset else "")
+            )
 
         concurrency = max(1, int(config.get("concurrency", 1)))
         max_attempts = max(1, int(config.get("max_attempts", 1)))
         tools_enabled = bool(config.get("tools_enabled", False))
         effort = config.get("effort")
 
+        subset_note = (
+            f"subset '{dataset.selected_subset}': {len(problems)} of {dataset.manifest.problem_count} problems"
+            if dataset.selected_subset
+            else None
+        )
+        if subset_note:
+            ctx.log(f"Running only {subset_note}; its scores are not comparable with a full-run score.")
         ctx.log(
             f"Starting llm_coding benchmark: model='{model}', problems={len(problems)}, "
             f"runner='{runner_url}', max_attempts={max_attempts}, tools={tools_enabled}, "
@@ -1553,6 +1579,7 @@ class LLMCodingTester(TesterPlugin):
             f"LLM Coding ({model}): score={score_val:.1f}/100, "
             f"solve@1={s1_val:.1f}%, solve@{max_attempts}={sk_val:.1f}% "
             f"({solved_count}/{n_problems} solved), test_cases={tc_val:.1f}%"
+            + (f" [{subset_note}]" if subset_note else "")
         )
 
         if result_cache.enabled:
@@ -1573,6 +1600,7 @@ class LLMCodingTester(TesterPlugin):
             tools_enabled=tools_enabled,
             max_attempts=max_attempts,
             subsets=dataset.subsets,
+            subset_note=subset_note,
         )
         report_file = ctx.artifacts_dir / "llm_coding_report.txt"
         report_file.write_text(report_text, encoding="utf-8")
@@ -1590,6 +1618,8 @@ class LLMCodingTester(TesterPlugin):
                 "manifest_sha256": dataset.manifest.manifest_sha256,
                 "judge_prompt_sha256": dataset.manifest.judge_prompt_sha256,
                 "problem_count": dataset.manifest.problem_count,
+                "subset": dataset.selected_subset or "full",
+                "problems_in_run": len(problems),
             },
             "config": {
                 k: v for k, v in config.items() if not k.startswith("_")

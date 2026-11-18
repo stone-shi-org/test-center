@@ -175,6 +175,27 @@ STARTER_TEMPLATES: list[dict[str, Any]] = [
     },
     {
         "tester": "llm_coding",
+        "name": "Quick check: hard core subset",
+        "description": (
+            "Only the few problems most models fail (subset 'hard_core'): the fastest way to see whether a "
+            "model is in the top tier. Scores are not comparable with a full run; results are cached per "
+            "problem, so a later full run reuses them."
+        ),
+        "suites": ["all"],
+        "config": {"subset": "hard_core"},
+    },
+    {
+        "tester": "llm_coding",
+        "name": "Quick check: discriminating subset",
+        "description": (
+            "Every problem at least one benchmarked model fails (subset 'discriminating'): where models "
+            "actually differ, at a fraction of a full run. Scores are not comparable with a full run."
+        ),
+        "suites": ["all"],
+        "config": {"subset": "discriminating"},
+    },
+    {
+        "tester": "llm_coding",
         "name": "Standard benchmark (All)",
         "description": "Full Java coding benchmark across easy, medium, and hard problems (single attempt).",
         "suites": ["all"],
